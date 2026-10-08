@@ -5,7 +5,8 @@ Connect a Telegram bot to your Claude Code with an MCP server.
 The MCP server logs into Telegram as a bot and provides tools to Claude to reply, react, or edit messages. When you message the bot, the server forwards the message to your Claude Code session.
 
 > This is AXEG0's fork of Anthropic's official Telegram plugin. It adds a typing
-> indicator that lasts the whole turn and speech to text for voice messages. Install it from this repo's marketplace and
+> indicator that lasts the whole turn, speech to text for voice messages, and a
+> live message per subagent. Install it from this repo's marketplace and
 > start Claude Code with the development flag, since only Anthropic's own channel
 > plugins pass `--channels` during the research preview:
 >
@@ -91,17 +92,20 @@ Quick reference: IDs are **numeric user IDs** (get yours from [@userinfobot](htt
 | `react` | Add an emoji reaction to a message by ID. **Only Telegram's fixed whitelist** is accepted (👍 👎 ❤ 🔥 👀 etc). |
 | `edit_message` | Edit a message the bot previously sent. Useful for "working…" → result progress updates. Only works on the bot's own messages. |
 
-Inbound messages start a typing indicator that lasts until Claude's turn ends.
-Telegram drops the indicator after a few seconds or when the bot sends, so the
-server re-sends it while the turn runs. The plugin's `Stop`, `StopFailure` and
-`SessionEnd` hook ([hooks/turn-end.ts](./hooks/turn-end.ts)) records the turn end
-under `~/.claude/channels/telegram/turns/`, which stops it. The indicator holds
-while a permission prompt waits on you, and that wait does not count toward its
-30 minutes. After 30 minutes without a turn end it stops, and the bot tells the
-chat that Claude may be stuck or was interrupted. An interrupt (Esc)
+Telegram shows "typing…" while Claude's turn runs: from an inbound message, and
+for a turn that something else started (the terminal, a finished subagent, a
+scheduled task), in the private chat that last wrote to the bot. Telegram drops
+the indicator after a few seconds or when the bot sends, so the server re-sends
+it while the turn runs. The plugin's hooks mark the session busy on every tool
+call and prompt ([hooks/busy.sh](./hooks/busy.sh)) and record the turn end on
+`Stop`, `StopFailure` and `SessionEnd` ([hooks/turn-end.ts](./hooks/turn-end.ts)),
+under `turns/` in the channel's state directory. The indicator holds while a
+permission prompt waits on you, and that wait does not count toward its 30
+minutes. After 30 minutes without activity or a turn end it stops, and the bot
+tells the chat that Claude may be stuck or was interrupted. An interrupt (Esc)
 runs no hook, so after one the indicator lasts until the next turn ends or the
 30 minutes pass. A message that arrives while Claude is busy can land in the
-next turn, which then shows no indicator.
+next turn.
 
 ## Photos
 
@@ -109,6 +113,29 @@ Inbound photos are downloaded to `~/.claude/channels/telegram/inbox/` and the
 local path is included in the `<channel>` notification so the assistant can
 `Read` it. Telegram compresses photos — if you need the original file, send it
 as a document instead (long-press → Send as File).
+
+## Subagents
+
+Each subagent Claude starts appears in the chat as one message that is edited
+while it runs, the way the CLI shows it:
+
+```
+🤖 general-purpose · Review PRs 3 and 4
+⏳ Checking gate mention and server env · 4m 31s · 85.4k tokens
+```
+
+and ends as `✅ Done in 6m 10s · 89.8k tokens`. The plugin's `SubagentStart` and
+`SubagentStop` hook ([hooks/subagent.ts](./hooks/subagent.ts)) records each
+subagent under `agents/` in the channel's state directory, and the server reads
+the subagent's own transcript for its current step and context size, and its
+meta file for its description. A step shows the tool call's own description, or
+the tool with a file name or search pattern; commands, URLs and queries stay on
+the box. Messages go, without a notification, to the private chat that last
+wrote to the bot, from the first message after the server starts. All subagents
+in a chat share one edit every 3 seconds, a message's clock moves every 30
+seconds when nothing else changes, and a rate limit holds the chat for as long as
+Telegram asks. A subagent whose transcript stays unchanged for 30 minutes shows
+as quiet until its stop arrives.
 
 ## Voice messages
 
