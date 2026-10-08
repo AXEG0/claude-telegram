@@ -27,6 +27,7 @@ import { ancestorPids, busyFiles, createTyping, markerFiles, readBusyAt, readTur
 import { STT_KINDS, sttConfig, transcribeTelegramFile } from './stt.ts'
 import { AGENT_TICK_MS, agentEventFile, createAgentStream, createEventReader } from './agents.ts'
 import { editRich, RICH_FORMAT_HELP, RICH_INSTRUCTIONS, richEnabled, sendRich, type RawApi } from './rich.ts'
+import { replyMeta } from './reply.ts'
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR
   ?? join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'channels', 'telegram')
@@ -1052,6 +1053,7 @@ async function handleInbound(
         user: from.username ?? String(from.id),
         user_id: String(from.id),
         ts: new Date((ctx.message?.date ?? 0) * 1000).toISOString(),
+        ...replyMeta(ctx.message, botUsername),
         ...(imagePath ? { image_path: imagePath } : {}),
         ...(speech ? { transcribed_by: STT!.model, audio_path: speech.path, attachment_kind: attachment!.kind } : {}),
         ...(attachment && !speech ? {

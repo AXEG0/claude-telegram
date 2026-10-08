@@ -179,6 +179,15 @@ transcription fails or takes longer than 30 seconds, the message arrives as it
 does without a key, as an attachment Claude can download. Updates are handled one
 at a time, so a voice note can hold later messages for up to those 30 seconds.
 
+## Replies and quotes
+
+A message that replies to another carries what it replies to on the
+`<channel>` tag, as Telegram sends it: `reply_to_message_id`, `reply_to_user`
+(`this bot` for the bot's own messages), `reply_to_text` shortened to 300
+characters, `reply_to_kind` for a photo, voice note or other media, and
+`reply_quote` for the part the sender highlighted. A reply to one of the bot's
+rich messages carries the text of its blocks.
+
 ## No history or search
 
 Telegram's Bot API exposes **neither** message history nor search. The bot
