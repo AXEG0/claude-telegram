@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
-  "name": "claude-channels",
-  "description": "Channel plugins for Claude Code, forked from Anthropic's official ones",
+  "name": "claude-telegram",
+  "description": "Telegram channel plugin for Claude Code, forked from Anthropic's official one",
   "owner": {
     "name": "AXEG0"
   },
