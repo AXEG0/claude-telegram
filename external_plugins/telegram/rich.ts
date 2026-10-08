@@ -70,7 +70,7 @@ const endOf = (n: Nodes) => n.position?.end.offset ?? 0
 // formula ("path $HOME/$USER" became math), so it gets a backslash. Only text
 // nodes are touched: in code, autolinks and link URLs the backslash would
 // show. A tag Telegram does not render becomes &lt;.
-function collectEdits(md: string, base: number, edits: Map<number, Edit>): void {
+function collectEdits(md: string, base: number, edits: Map<number, Edit>, root = parse(md)): void {
   const tag = (at: number) => {
     const name = /^<\/?([A-Za-z][A-Za-z0-9-]*)/.exec(md.slice(at, at + 64))?.[1]
     if (name && !RICH_TAGS.has(name.toLowerCase()) && !HTML_TAGS.has(name)) edits.set(base + at, { drop: 1, insert: '&lt;' })
@@ -113,7 +113,7 @@ function collectEdits(md: string, base: number, edits: Map<number, Edit>): void 
     }
     if (head < to) collectEdits(md.slice(head, to), base + head, edits)
   }
-  walk(parse(md), undefined)
+  walk(root, undefined)
 }
 
 // The rich Markdown Telegram is sent for md, whole.
@@ -125,8 +125,8 @@ class Rendered {
   readonly edits = new Map<number, Edit>()
   // bytes[i] is the UTF-8 size of what md[0, i) renders to.
   private readonly bytes: Uint32Array
-  constructor(readonly md: string) {
-    collectEdits(md, 0, this.edits)
+  constructor(readonly md: string, root = parse(md)) {
+    collectEdits(md, 0, this.edits, root)
     this.bytes = new Uint32Array(md.length + 1)
     for (let i = 0; i < md.length; i++) {
       const c = md.charCodeAt(i)
@@ -160,10 +160,11 @@ export type RichPart = { rich: string; plain: string }
 // whole. A block too big alone is cut at lines; a code block is closed and
 // reopened around each cut, and a table repeats its header.
 export function richParts(md: string, limits = { bytes: RICH_PART_BYTES, blocks: RICH_PART_BLOCKS }): RichPart[] {
-  const r = new Rendered(md)
+  const root = parse(md)
+  const r = new Rendered(md, root)
   const units: { from: number; to: number; node: RootContent; count: number }[] = []
   let open = 0
-  for (const node of parse(md).children) {
+  for (const node of root.children) {
     const last = units.at(-1)
     if (open > 0 && last) {
       last.to = endOf(node)
@@ -220,7 +221,14 @@ function cutBlock(r: Rendered, from: number, to: number, node: RootContent, limi
     head = [body[0]![0], body[1]![1]]
     body = body.slice(2)
   }
-  const headSize = head ? r.size(head[0], head[1]) + 1 : 0
+  let headSize = head ? r.size(head[0], head[1]) + 1 : 0
+  // A header too big to repeat is cut like any other line.
+  if (head && headSize > limit / 2) {
+    body = lines(md, from, to)
+    head = undefined
+    tail = ''
+    headSize = 0
+  }
   const room = Math.max(1, limit - headSize - (tail ? tail.length + 1 : 0))
   const range = (a: number, b: number) => ({ rich: r.render(a, b), plain: md.slice(a, b) })
   const wrap = (a: number, b: number): RichPart => {
