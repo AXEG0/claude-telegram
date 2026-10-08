@@ -14,6 +14,8 @@ import {
   formatDuration,
   formatTokens,
   progressFromTranscript,
+  THINKING,
+  WRITING,
   type AgentEvent,
 } from './agents.ts'
 
@@ -65,13 +67,21 @@ describe('progressFromTranscript', () => {
       assistant([{ type: 'tool_use', name: 'Read', input: { file_path: '/a/b/server.ts' } }], { input_tokens: 1, output_tokens: 1 }),
       assistant([{ type: 'text', text: 'hm' }, { type: 'tool_use', name: 'Bash', input: { command: 'ls', description: 'Checking gate mention and server env' } }],
         { input_tokens: 2, cache_creation_input_tokens: 1000, cache_read_input_tokens: 84000, output_tokens: 400 }, '2026-10-08T15:04:31.000Z'),
-      JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result' }] } }),
     ].join('\n')
     expect(progressFromTranscript(text)).toEqual({
       step: 'Checking gate mention and server env',
       tokens: 85402,
       updatedAt: Date.parse('2026-10-08T15:04:31.000Z'),
     })
+  })
+
+  test('thinking once a tool has returned, writing once text comes', () => {
+    const toolResult = JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', content: 'ok' }] } })
+    const call = assistant([{ type: 'tool_use', name: 'Bash', input: { description: 'Run tests' } }], { input_tokens: 10 })
+    expect(progressFromTranscript([call].join('\n')).step).toBe('Run tests')
+    expect(progressFromTranscript([call, toolResult].join('\n'))).toMatchObject({ step: THINKING, tokens: 10 })
+    expect(progressFromTranscript([call, toolResult, assistant([{ type: 'thinking', thinking: '' }])].join('\n')).step).toBe(THINKING)
+    expect(progressFromTranscript([call, toolResult, assistant([{ type: 'text', text: 'Found it' }])].join('\n')).step).toBe(WRITING)
   })
 
   test('a tool without a description shows its tool and target', () => {
@@ -155,12 +165,12 @@ describe('createAgentStream', () => {
     expect(h.stream.agents()).toEqual([])
   })
 
-  test('with nothing new, only the clock moves, and only every 30 seconds', async () => {
+  test('with nothing new, only the clock moves, and only every 10 seconds', async () => {
     const h = harness()
     await h.tick()
     h.events.push(start(h))
     await h.tick()
-    for (let i = 0; i < 9; i++) { h.advance(AGENT_TICK_MS); await h.tick() }
+    for (let i = 0; i < 3; i++) { h.advance(AGENT_TICK_MS); await h.tick() }
     expect(h.edits).toEqual([])
     h.advance(CLOCK_REFRESH_MS); await h.tick()
     expect(h.edits.length).toBe(1)
@@ -184,7 +194,7 @@ describe('createAgentStream', () => {
     h.failEditWith({ description: 'Too Many Requests', parameters: { retry_after: 20 } })
     h.advance(CLOCK_REFRESH_MS); await h.tick()
     h.failEditWith(undefined)
-    h.advance(CLOCK_REFRESH_MS - 15_000); await h.tick()
+    h.advance(15_000); await h.tick()
     expect(h.edits).toEqual([])
     h.advance(10_000); await h.tick()
     expect(h.edits.length).toBe(1)

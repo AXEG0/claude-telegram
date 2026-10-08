@@ -141,11 +141,12 @@ and ends as `✅ Done in 6m 10s · 89.8k tokens`. The plugin's `SubagentStart` a
 `SubagentStop` hook ([hooks/subagent.ts](./hooks/subagent.ts)) records each
 subagent under `agents/` in the channel's state directory, and the server reads
 the subagent's own transcript for its current step and context size, and its
-meta file for its description. A step shows the tool call's own description, or
-the tool with a file name or search pattern; commands, URLs and queries stay on
-the box. Messages go, without a notification, to the private chat that last
+meta file for its description. A step shows the running tool call's own
+description, or the tool with a file name or search pattern (commands, URLs and
+queries stay on the box), then `💭 Thinking…` once the tool returns and
+`✍️ Writing…` once the subagent writes its answer. Messages go, without a notification, to the private chat that last
 wrote to the bot, from the first message after the server starts. All subagents
-in a chat share one edit every 3 seconds, a message's clock moves every 30
+in a chat share one edit every 3 seconds, a message's clock moves every 10
 seconds when nothing else changes, and a rate limit holds the chat for as long as
 Telegram asks. A subagent whose transcript stays unchanged for 30 minutes shows
 as quiet until its stop arrives.

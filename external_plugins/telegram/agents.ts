@@ -22,7 +22,7 @@ export const AGENT_TICK_MS = 3000
 export const CHAT_GAP_MS = 3000
 // With no new step or token count, a message is edited only this often, to
 // move its clock.
-export const CLOCK_REFRESH_MS = 30_000
+export const CLOCK_REFRESH_MS = 10_000
 // A subagent whose transcript has not changed for this long is shown as quiet;
 // its stop still closes it.
 export const AGENT_STALE_MS = 30 * 60 * 1000
@@ -112,17 +112,27 @@ function readRange(file: string, from: number, to: number): string {
 
 export type Progress = { step?: string; tokens?: number; updatedAt?: number }
 
-// The current step and context size from the end of a subagent transcript:
-// the last tool call's description, or its tool and target, and the last
-// request's input plus output tokens, which is what the CLI shows.
+export const THINKING = '💭 Thinking…'
+export const WRITING = '✍️ Writing…'
+
+// The current step and context size from the end of a subagent transcript.
+// The step is the running tool call's description, or its tool and target;
+// thinking once a tool has returned or the model only thinks; writing once it
+// produces text. The size is the last request's input plus output tokens,
+// which is what the CLI shows.
 export function progressFromTranscript(text: string): Progress {
   const lines = text.split('\n')
   const p: Progress = {}
   for (let i = lines.length - 1; i >= 0 && (p.step === undefined || p.tokens === undefined); i--) {
     const line = lines[i]!
-    if (!line.includes('"assistant"')) continue
+    const isResult = line.includes('"tool_result"')
+    if (!line.includes('"assistant"') && !isResult) continue
     let e: { type?: string; timestamp?: string; message?: { usage?: Record<string, number>; content?: unknown[] } }
     try { e = JSON.parse(line) } catch { continue }
+    if (e.type === 'user' && isResult) {
+      if (p.step === undefined) p.step = THINKING
+      continue
+    }
     if (e.type !== 'assistant') continue
     if (p.updatedAt === undefined && e.timestamp) p.updatedAt = Date.parse(e.timestamp)
     const u = e.message?.usage
@@ -139,6 +149,7 @@ export function progressFromTranscript(text: string): Progress {
           break
         }
       }
+      if (p.step === undefined) p.step = content.some(c => c.type === 'text') ? WRITING : THINKING
     }
   }
   return p
