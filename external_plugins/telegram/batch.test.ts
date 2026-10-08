@@ -32,11 +32,11 @@ const msg = (id: number, content: string, extra: Record<string, string> = {}): I
 describe('createBatcher', () => {
   test('a burst of texts goes out once, joined, with every id', () => {
     const h = harness()
-    h.b.add('k', msg(1, 'first'), TEXT_GAP_MS)
+    h.b.add('k', 'c', msg(1, 'first'), TEXT_GAP_MS)
     h.advance(200)
-    h.b.add('k', msg(2, 'second'), TEXT_GAP_MS)
+    h.b.add('k', 'c', msg(2, 'second'), TEXT_GAP_MS)
     h.advance(200)
-    h.b.add('k', msg(3, 'third'), TEXT_GAP_MS)
+    h.b.add('k', 'c', msg(3, 'third'), TEXT_GAP_MS)
     h.advance(TEXT_GAP_MS - 1)
     expect(h.out).toEqual([])
     h.advance(1)
@@ -45,9 +45,9 @@ describe('createBatcher', () => {
 
   test('a text after the gap starts a new batch, and a single message goes out as it came', () => {
     const h = harness()
-    h.b.add('k', msg(1, 'one'), TEXT_GAP_MS)
+    h.b.add('k', 'c', msg(1, 'one'), TEXT_GAP_MS)
     h.advance(TEXT_GAP_MS)
-    h.b.add('k', msg(2, 'two'), TEXT_GAP_MS)
+    h.b.add('k', 'c', msg(2, 'two'), TEXT_GAP_MS)
     h.advance(TEXT_GAP_MS)
     expect(h.out).toEqual([msg(1, 'one'), msg(2, 'two')])
   })
@@ -55,32 +55,34 @@ describe('createBatcher', () => {
   test('the pieces of a split paste are glued back, waiting longer after a full piece', () => {
     const h = harness()
     const piece = 'x'.repeat(4096)
-    h.b.add('k', msg(1, piece), FRAGMENT_GAP_MS)
+    h.b.add('k', 'c', msg(1, piece), FRAGMENT_GAP_MS)
     h.advance(1000)
-    h.b.add('k', msg(2, 'tail'), TEXT_GAP_MS)
+    h.b.add('k', 'c', msg(2, 'tail'), TEXT_GAP_MS)
     h.advance(TEXT_GAP_MS)
     expect(h.out.map(o => o.content)).toEqual([piece + 'tail'])
   })
 
   test('a batch goes out at the latest MAX_WAIT_MS after its first message, or when full', () => {
     const h = harness()
-    for (let i = 1; h.out.length === 0 && i < 100; i++) { h.b.add('k', msg(i, `m${i}`), TEXT_GAP_MS); h.advance(250) }
+    // Full at 12, it goes at once, without waiting for a 13th or the gap.
+    for (let i = 1; i <= MAX_MESSAGES; i++) h.b.add('k', 'c', msg(i, `m${i}`), TEXT_GAP_MS)
+    expect(h.out.length).toBe(1)
     expect(h.out[0]!.meta.message_ids!.split(',').length).toBe(MAX_MESSAGES)
 
     // Pieces 1400 ms apart never leave a 1500 ms gap; the batch closes at 7.5 s.
     const g = harness()
-    for (let i = 1; i <= 8; i++) { g.b.add('k', msg(i, `m${i}`), FRAGMENT_GAP_MS); g.advance(1400) }
+    for (let i = 1; i <= 8; i++) { g.b.add('k', 'c', msg(i, `m${i}`), FRAGMENT_GAP_MS); g.advance(1400) }
     g.advance(MAX_WAIT_MS)
     expect(g.out.map(o => o.meta.message_ids)).toEqual(['1,2,3,4,5,6', '7,8'])
   })
 
   test('photos join the batch, the first as image_path and all in image_paths', () => {
     const h = harness()
-    h.b.add('k', msg(1, '(photo)', { image_path: '/in/a.jpg' }), PHOTO_GAP_MS)
+    h.b.add('k', 'c', msg(1, '(photo)', { image_path: '/in/a.jpg' }), PHOTO_GAP_MS)
     h.advance(400)
-    h.b.add('k', msg(2, '(photo)', { image_path: '/in/b.jpg' }), PHOTO_GAP_MS)
+    h.b.add('k', 'c', msg(2, '(photo)', { image_path: '/in/b.jpg' }), PHOTO_GAP_MS)
     h.advance(100)
-    h.b.add('k', msg(3, 'what are these?'), TEXT_GAP_MS)
+    h.b.add('k', 'c', msg(3, 'what are these?'), TEXT_GAP_MS)
     h.advance(TEXT_GAP_MS)
     expect(h.out).toEqual([{
       content: '(photo)\n(photo)\nwhat are these?',
@@ -90,24 +92,59 @@ describe('createBatcher', () => {
 
   test('a batch waits while the next message is still being prepared', () => {
     const h = harness()
-    h.b.add('k', msg(1, '(photo)', { image_path: '/in/a.jpg' }), PHOTO_GAP_MS)
+    h.b.add('k', 'c', msg(1, '(photo)', { image_path: '/in/a.jpg' }), PHOTO_GAP_MS)
     h.advance(100)
-    h.b.hold('k')
+    h.b.hold('k', 'c')
     h.advance(2000)
     expect(h.out).toEqual([])
-    h.b.add('k', msg(2, '(photo)', { image_path: '/in/b.jpg' }), PHOTO_GAP_MS)
+    h.b.add('k', 'c', msg(2, '(photo)', { image_path: '/in/b.jpg' }), PHOTO_GAP_MS)
     h.advance(PHOTO_GAP_MS)
     expect(h.out.map(o => o.meta.message_ids)).toEqual(['1,2'])
   })
 
-  test('anything else sends the batch first, then goes alone; senders do not mix', () => {
+  test('anything else sends the batch first, then goes alone', () => {
     const h = harness()
-    h.b.add('k', msg(1, 'look at this'), TEXT_GAP_MS)
-    h.b.add('other', msg(9, 'from someone else'), TEXT_GAP_MS)
+    h.b.add('k', 'c', msg(1, 'look at this'), TEXT_GAP_MS)
     h.b.flush('k', msg(2, '(document: a.pdf)'))
     expect(h.out).toEqual([msg(1, 'look at this'), msg(2, '(document: a.pdf)')])
+  })
+
+  test('in a group, another sender\'s message sends the waiting batch first, so the chat keeps its order', () => {
+    const h = harness()
+    h.b.add('c:x', 'c', msg(1, 'x'.repeat(4096)), FRAGMENT_GAP_MS)
+    h.advance(200)
+    h.b.hold('c:y', 'c')
+    expect(h.out.map(o => o.meta.message_id)).toEqual(['1'])
+    h.b.add('c:y', 'c', msg(2, 'agreed'), TEXT_GAP_MS)
+    h.b.add('d:x', 'd', msg(3, 'elsewhere'), TEXT_GAP_MS)
     h.advance(TEXT_GAP_MS)
-    expect(h.out.at(-1)).toEqual(msg(9, 'from someone else'))
+    expect(h.out.map(o => o.meta.message_id)).toEqual(['1', '2', '3'])
+  })
+
+  test('another sender\'s batch goes first even without a hold', () => {
+    const h = harness()
+    h.b.add('c:x', 'c', msg(1, '(photo)', { image_path: '/in/a.jpg' }), PHOTO_GAP_MS)
+    h.b.add('c:y', 'c', msg(2, 'nice'), TEXT_GAP_MS)
+    h.advance(PHOTO_GAP_MS)
+    expect(h.out.map(o => o.meta.message_id)).toEqual(['1', '2'])
+  })
+
+  test('a message replying to another message than the batch\'s starts a new batch', () => {
+    const h = harness()
+    h.b.add('k', 'c', msg(1, 'a', { reply_to_message_id: '10' }), TEXT_GAP_MS)
+    h.b.add('k', 'c', msg(2, 'more on that'), TEXT_GAP_MS)
+    h.b.add('k', 'c', msg(3, 'b', { reply_to_message_id: '20' }), TEXT_GAP_MS)
+    h.advance(TEXT_GAP_MS)
+    expect(h.out.map(o => [o.meta.message_ids ?? o.meta.message_id, o.meta.reply_to_message_id])).toEqual([['1,2', '10'], ['3', '20']])
+  })
+
+  test('flushAll sends every waiting batch and waits for the sends', async () => {
+    const sent: string[] = []
+    const b = createBatcher({ deliver: async item => { await Bun.sleep(5); sent.push(item.meta.message_id!) } })
+    b.add('a', 'c', msg(1, 'one'), TEXT_GAP_MS)
+    b.add('b', 'd', msg(2, 'two'), TEXT_GAP_MS)
+    await b.flushAll()
+    expect(sent.sort()).toEqual(['1', '2'])
   })
 })
 

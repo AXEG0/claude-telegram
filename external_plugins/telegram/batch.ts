@@ -3,9 +3,12 @@
 // 4096-character pieces, and photos, an album's or a photo sent with its
 // question. Claude then answers the burst once, not its first message alone.
 //
-// A batch goes out a gap after its last message, sooner if it is full, and at
-// the latest MAX_WAIT_MS after its first. Anything else from the sender (a
-// document, a voice note, a command) sends the batch first, then goes alone.
+// A batch goes out a gap after its last message, as soon as it is full, and
+// at the latest MAX_WAIT_MS after its first. Anything else from the sender (a
+// document, a voice note, a command) sends the batch first, then goes alone. A
+// message from someone else in the chat, or one replying to another message
+// than the batch's, also sends it first, so the chat keeps its order and each
+// message its reply.
 
 export const TEXT_GAP_MS = 300
 // A piece near Telegram's 4096 limit is likely followed by the rest of a paste.
@@ -52,10 +55,13 @@ export function batchGap(m: { text: string; photo: boolean; other: boolean }): n
   return m.text.length >= FRAGMENT_CHARS ? FRAGMENT_GAP_MS : TEXT_GAP_MS
 }
 
-type Pending = { items: Inbound[]; chars: number; first: number; timer?: unknown }
+type Pending = { chat: string; items: Inbound[]; chars: number; first: number; timer?: unknown }
+
+const replyOf = (item: Inbound) => item.meta.reply_to_message_id ?? item.meta.reply_quote
 
 export function createBatcher(opts: {
-  deliver: (item: Inbound) => void
+  // May return a promise, which flushAll waits for.
+  deliver: (item: Inbound) => unknown
   now?: () => number
   setTimer?: (fn: () => void, ms: number) => unknown
   clearTimer?: (timer: unknown) => void
@@ -72,10 +78,14 @@ export function createBatcher(opts: {
     clearTimer(p.timer)
     // A batch can go out from a timer, where a throw would end the server.
     try {
-      opts.deliver(mergeInbound(p.items))
+      return opts.deliver(mergeInbound(p.items))
     } catch (err) {
       process.stderr.write(`telegram channel: failed to deliver inbound batch: ${err}\n`)
     }
+  }
+  // Batches of the chat's other senders go first.
+  const flushOthers = (key: string, chat: string) => {
+    for (const [k, p] of [...pending]) if (k !== key && p.chat === chat) flush(k)
   }
   const arm = (key: string, p: Pending, gapMs: number) => {
     clearTimer(p.timer)
@@ -84,23 +94,28 @@ export function createBatcher(opts: {
 
   return {
     // Adds an item to the sender's batch, which goes out gapMs after it.
-    add(key: string, item: Inbound, gapMs: number) {
+    add(key: string, chat: string, item: Inbound, gapMs: number) {
+      flushOthers(key, chat)
       let p = pending.get(key)
-      if (p && (p.items.length >= MAX_MESSAGES || p.chars + item.content.length > MAX_CHARS)) {
+      const reply = replyOf(item)
+      if (p && (p.chars + item.content.length > MAX_CHARS || (reply && p.items.some(i => replyOf(i) && replyOf(i) !== reply)))) {
         flush(key)
         p = undefined
       }
       if (!p) {
-        p = { items: [], chars: 0, first: now() }
+        p = { chat, items: [], chars: 0, first: now() }
         pending.set(key, p)
       }
       p.items.push(item)
       p.chars += item.content.length
-      arm(key, p, gapMs)
+      if (p.items.length >= MAX_MESSAGES) flush(key)
+      else arm(key, p, gapMs)
     },
     // A message from the sender is being prepared (a photo downloading): the
-    // batch waits for it, up to MAX_WAIT_MS after its first item.
-    hold(key: string) {
+    // batch waits for it, up to MAX_WAIT_MS after its first item. The chat's
+    // other senders' batches go now.
+    hold(key: string, chat: string) {
+      flushOthers(key, chat)
       const p = pending.get(key)
       if (p) arm(key, p, MAX_WAIT_MS)
     },
@@ -108,6 +123,11 @@ export function createBatcher(opts: {
     flush(key: string, item?: Inbound) {
       flush(key)
       if (item) opts.deliver(item)
+    },
+    // Every waiting batch, now: the server is stopping, and Telegram counts
+    // the updates as delivered.
+    flushAll(): Promise<unknown> {
+      return Promise.allSettled([...pending.keys()].map(k => flush(k)))
     },
   }
 }
