@@ -179,6 +179,20 @@ transcription fails or takes longer than 30 seconds, the message arrives as it
 does without a key, as an attachment Claude can download. Updates are handled one
 at a time, so a voice note can hold later messages for up to those 30 seconds.
 
+## Bursts
+
+Messages one sender sends in quick succession reach Claude as one, as in
+OpenClaw, so Claude answers the burst once rather than its first message
+alone. Texts within 300 ms of each other join with line breaks; a long paste
+that Telegram split into 4096-character pieces joins back whole, the server
+waiting 1.5 seconds after a full piece; photos, an album's or one sent just
+before its question, join within 500 ms. The message carries the last
+message's id, every id in `message_ids`, the first reply context, and every
+photo in `image_paths` with the first in `image_path`. A batch goes out at the
+latest 7.5 seconds after its first message, or at 12 messages or 50000
+characters. A document, voice note or command sends the waiting batch first
+and then goes alone.
+
 ## Replies and quotes
 
 A message that replies to another carries what it replies to on the

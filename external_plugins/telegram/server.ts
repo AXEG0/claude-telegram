@@ -28,6 +28,7 @@ import { STT_KINDS, sttConfig, transcribeTelegramFile } from './stt.ts'
 import { AGENT_TICK_MS, agentEventFile, createAgentStream, createEventReader } from './agents.ts'
 import { editRich, RICH_FORMAT_HELP, RICH_INSTRUCTIONS, richEnabled, sendRich, type RawApi } from './rich.ts'
 import { replyMeta } from './reply.ts'
+import { batchGap, createBatcher } from './batch.ts'
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR
   ?? join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'channels', 'telegram')
@@ -971,6 +972,16 @@ function safeName(s: string | undefined): string | undefined {
   return s?.replace(/[<>\[\]\r\n;]/g, '_')
 }
 
+// A burst from one sender reaches Claude as one message. See batch.ts.
+const batcher = createBatcher({
+  deliver: ({ content, meta }) => void mcp.notification({
+    method: 'notifications/claude/channel',
+    params: { content, meta },
+  }).catch(err => {
+    process.stderr.write(`telegram channel: failed to deliver inbound to Claude: ${err}\n`)
+  }),
+})
+
 async function handleInbound(
   ctx: Context,
   text: string,
@@ -1032,6 +1043,9 @@ async function handleInbound(
       .catch(() => {})
   }
 
+  // The sender's batch waits while this message's photo or audio is fetched.
+  const batchKey = `${chat_id}:${from.id}`
+  batcher.hold(batchKey)
   const imagePath = downloadImage ? await downloadImage() : undefined
   const speech = STT && attachment && STT_KINDS.has(attachment.kind)
     ? await transcribeTelegramFile({
@@ -1043,31 +1057,29 @@ async function handleInbound(
 
   // image_path goes in meta only — an in-content "[image attached — read: PATH]"
   // annotation is forgeable by any allowlisted sender typing that string.
-  mcp.notification({
-    method: 'notifications/claude/channel',
-    params: {
-      content: speech ? `${caption ? `${caption}\n\n` : ''}[transcript] ${speech.text}` : text,
-      meta: {
-        chat_id,
-        ...(msgId != null ? { message_id: String(msgId) } : {}),
-        user: from.username ?? String(from.id),
-        user_id: String(from.id),
-        ts: new Date((ctx.message?.date ?? 0) * 1000).toISOString(),
-        ...replyMeta(ctx.message, botUsername),
-        ...(imagePath ? { image_path: imagePath } : {}),
-        ...(speech ? { transcribed_by: STT!.model, audio_path: speech.path, attachment_kind: attachment!.kind } : {}),
-        ...(attachment && !speech ? {
-          attachment_kind: attachment.kind,
-          attachment_file_id: attachment.file_id,
-          ...(attachment.size != null ? { attachment_size: String(attachment.size) } : {}),
-          ...(attachment.mime ? { attachment_mime: attachment.mime } : {}),
-          ...(attachment.name ? { attachment_name: attachment.name } : {}),
-        } : {}),
-      },
-    },
-  }).catch(err => {
-    process.stderr.write(`telegram channel: failed to deliver inbound to Claude: ${err}\n`)
-  })
+  const item = {
+    content: speech ? `${caption ? `${caption}\n\n` : ''}[transcript] ${speech.text}` : text,
+    meta: {
+      chat_id,
+      ...(msgId != null ? { message_id: String(msgId) } : {}),
+      user: from.username ?? String(from.id),
+      user_id: String(from.id),
+      ts: new Date((ctx.message?.date ?? 0) * 1000).toISOString(),
+      ...replyMeta(ctx.message, botUsername),
+      ...(imagePath ? { image_path: imagePath } : {}),
+      ...(speech ? { transcribed_by: STT!.model, audio_path: speech.path, attachment_kind: attachment!.kind } : {}),
+      ...(attachment && !speech ? {
+        attachment_kind: attachment.kind,
+        attachment_file_id: attachment.file_id,
+        ...(attachment.size != null ? { attachment_size: String(attachment.size) } : {}),
+        ...(attachment.mime ? { attachment_mime: attachment.mime } : {}),
+        ...(attachment.name ? { attachment_name: attachment.name } : {}),
+      } : {}),
+    } as Record<string, string>,
+  }
+  const gap = batchGap({ text, photo: imagePath != null, other: downloadImage != null || attachment != null })
+  if (gap === undefined) batcher.flush(batchKey, item)
+  else batcher.add(batchKey, item, gap)
 }
 
 // Without this, any throw in a message handler stops polling permanently
