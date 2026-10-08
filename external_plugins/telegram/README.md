@@ -5,7 +5,8 @@ Connect a Telegram bot to your Claude Code with an MCP server.
 The MCP server logs into Telegram as a bot and provides tools to Claude to reply, react, or edit messages. When you message the bot, the server forwards the message to your Claude Code session.
 
 > This is AXEG0's fork of Anthropic's official Telegram plugin. It adds a typing
-> indicator that lasts the whole turn and speech to text for voice messages. Install it from this repo's marketplace and
+> indicator that lasts the whole turn, speech to text for voice messages, and a
+> live message per subagent. Install it from this repo's marketplace and
 > start Claude Code with the development flag, since only Anthropic's own channel
 > plugins pass `--channels` during the research preview:
 >
@@ -109,6 +110,24 @@ Inbound photos are downloaded to `~/.claude/channels/telegram/inbox/` and the
 local path is included in the `<channel>` notification so the assistant can
 `Read` it. Telegram compresses photos — if you need the original file, send it
 as a document instead (long-press → Send as File).
+
+## Subagents
+
+Each subagent Claude starts appears in the chat as one message that is edited
+while it runs, the way the CLI shows it:
+
+```
+🤖 general-purpose · Review PRs 3 and 4
+⏳ Checking gate mention and server env · 4m 31s · 85.4k tokens
+```
+
+and ends as `✅ Done in 6m 10s · 89.8k tokens`. The plugin's `SubagentStart` and
+`SubagentStop` hook ([hooks/subagent.ts](./hooks/subagent.ts)) records each
+subagent under `~/.claude/channels/telegram/agents/`, and the server reads the
+subagent's own transcript for its current step and context size, and its meta
+file for its description. Messages go to the private chat that last wrote to the
+bot, without a notification, and only once someone has written since the server
+started.
 
 ## Voice messages
 

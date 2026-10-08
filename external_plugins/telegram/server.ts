@@ -25,6 +25,7 @@ import { execFileSync } from 'child_process'
 import { join, extname, sep } from 'path'
 import { ancestorPids, createTyping, markerFiles, readTurnEnd, REFRESH_MS } from './typing.ts'
 import { STT_KINDS, sttConfig, transcribeTelegramFile } from './stt.ts'
+import { AGENT_TICK_MS, agentEventFile, createAgentStream, createEventReader } from './agents.ts'
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR
   ?? join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'channels', 'telegram')
@@ -98,7 +99,8 @@ const bot = new Bot(TOKEN)
 let botUsername = ''
 
 // "typing…" for the whole turn, not Telegram's 5 seconds. See typing.ts.
-const turnEndFiles = markerFiles(STATE_DIR, process.env.CLAUDE_CODE_SESSION_ID, ancestorPids())
+const ancestors = ancestorPids()
+const turnEndFiles = markerFiles(STATE_DIR, process.env.CLAUDE_CODE_SESSION_ID, ancestors)
 const typing = createTyping({
   send: chat_id => void bot.api.sendChatAction(chat_id, 'typing').catch(() => {}),
   turnEndedAt: () => readTurnEnd(turnEndFiles),
@@ -107,6 +109,19 @@ const typing = createTyping({
     .catch(() => {}),
 })
 setInterval(() => typing.tick(), REFRESH_MS).unref()
+
+// Subagents, streamed to the private chat of the last inbound message. See agents.ts.
+let lastChat: string | undefined
+const agentStream = createAgentStream({
+  readEvents: createEventReader(ancestors.map(pid => agentEventFile(STATE_DIR, pid))),
+  chat: () => lastChat,
+  send: async (chat_id, text) =>
+    (await bot.api.sendMessage(chat_id, text, { disable_notification: true })).message_id,
+  edit: async (chat_id, message_id, text) => {
+    await bot.api.editMessageText(chat_id, message_id, text)
+  },
+})
+setInterval(() => agentStream.tick(), AGENT_TICK_MS).unref()
 
 // Speech to text for voice and audio, when a key is set. See stt.ts.
 const STT = sttConfig()
@@ -974,6 +989,7 @@ async function handleInbound(
 
   // Typing indicator — signals "processing" until Claude's turn ends.
   typing.start(chat_id)
+  if (ctx.chat?.type === 'private') lastChat = chat_id
 
   // Ack reaction — lets the user know we're processing. Fire-and-forget.
   // Telegram only accepts a fixed emoji whitelist — if the user configures

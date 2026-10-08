@@ -1,24 +1,63 @@
 {
-  "description": "Marks the end of each turn so the Telegram server stops re-sending its typing indicator",
+  "description": "Marks the end of each turn, and the start and stop of each subagent, for the Telegram server's typing indicator and subagent stream",
   "hooks": {
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "command": "bun \"${CLAUDE_PLUGIN_ROOT}/hooks/turn-end.ts\"", "async": true, "timeout": 10 }
+          {
+            "type": "command",
+            "command": "bun \"${CLAUDE_PLUGIN_ROOT}/hooks/turn-end.ts\"",
+            "async": true,
+            "timeout": 10
+          }
         ]
       }
     ],
     "StopFailure": [
       {
         "hooks": [
-          { "type": "command", "command": "bun \"${CLAUDE_PLUGIN_ROOT}/hooks/turn-end.ts\"", "async": true, "timeout": 10 }
+          {
+            "type": "command",
+            "command": "bun \"${CLAUDE_PLUGIN_ROOT}/hooks/turn-end.ts\"",
+            "async": true,
+            "timeout": 10
+          }
         ]
       }
     ],
     "SessionEnd": [
       {
         "hooks": [
-          { "type": "command", "command": "bun \"${CLAUDE_PLUGIN_ROOT}/hooks/turn-end.ts\"", "async": true, "timeout": 10 }
+          {
+            "type": "command",
+            "command": "bun \"${CLAUDE_PLUGIN_ROOT}/hooks/turn-end.ts\"",
+            "async": true,
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun \"${CLAUDE_PLUGIN_ROOT}/hooks/subagent.ts\"",
+            "async": true,
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun \"${CLAUDE_PLUGIN_ROOT}/hooks/subagent.ts\"",
+            "async": true,
+            "timeout": 10
+          }
         ]
       }
     ]
