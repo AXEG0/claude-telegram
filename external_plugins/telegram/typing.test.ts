@@ -75,6 +75,14 @@ describe('createTyping', () => {
     h.typing.start('42')
     expect(h.sent).toEqual(['42', '42'])
   })
+
+  test('a pause with no chat typing does not hold the next message', () => {
+    const h = harness()
+    h.typing.pause()
+    h.typing.start('42')
+    h.advance(4000); h.typing.tick()
+    expect(h.sent).toEqual(['42', '42'])
+  })
 })
 
 describe('turn-end markers', () => {

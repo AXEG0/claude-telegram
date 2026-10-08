@@ -108,9 +108,10 @@ export function createTyping(opts: {
       }
       if (since.size === 0) paused = false
     },
-    // A permission prompt waits on the owner, not on Claude.
+    // A permission prompt waits on the owner, not on Claude. With no chat
+    // typing there is nothing to hold, and no tick would clear the pause.
     pause() {
-      paused = true
+      if (since.size > 0) paused = true
     },
     resume() {
       paused = false

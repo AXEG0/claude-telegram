@@ -97,8 +97,9 @@ server re-sends it while the turn runs. The plugin's `Stop`, `StopFailure` and
 `SessionEnd` hook ([hooks/turn-end.ts](./hooks/turn-end.ts)) records the turn end
 under `~/.claude/channels/telegram/turns/`, which stops it. The indicator holds
 while a permission prompt waits on you, and stops after 30 minutes if no turn end
-arrives. A message that arrives while Claude is busy is handled in the next turn,
-which shows no indicator.
+arrives. An interrupt (Esc) runs no hook, so after one the indicator lasts until
+the next turn ends or the 30 minutes pass. A message that arrives while Claude is
+busy can land in the next turn, which then shows no indicator.
 
 ## Photos
 
