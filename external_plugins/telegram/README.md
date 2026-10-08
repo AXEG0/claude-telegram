@@ -5,7 +5,7 @@ Connect a Telegram bot to your Claude Code with an MCP server.
 The MCP server logs into Telegram as a bot and provides tools to Claude to reply, react, or edit messages. When you message the bot, the server forwards the message to your Claude Code session.
 
 > This is AXEG0's fork of Anthropic's official Telegram plugin. It adds a typing
-> indicator that lasts the whole turn. Install it from this repo's marketplace and
+> indicator that lasts the whole turn and speech to text for voice messages. Install it from this repo's marketplace and
 > start Claude Code with the development flag, since only Anthropic's own channel
 > plugins pass `--channels` during the research preview:
 >
@@ -96,10 +96,12 @@ Telegram drops the indicator after a few seconds or when the bot sends, so the
 server re-sends it while the turn runs. The plugin's `Stop`, `StopFailure` and
 `SessionEnd` hook ([hooks/turn-end.ts](./hooks/turn-end.ts)) records the turn end
 under `~/.claude/channels/telegram/turns/`, which stops it. The indicator holds
-while a permission prompt waits on you, and stops after 30 minutes if no turn end
-arrives. An interrupt (Esc) runs no hook, so after one the indicator lasts until
-the next turn ends or the 30 minutes pass. A message that arrives while Claude is
-busy can land in the next turn, which then shows no indicator.
+while a permission prompt waits on you, and that wait does not count toward its
+30 minutes. After 30 minutes without a turn end it stops, and the bot tells the
+chat that Claude may be stuck or was interrupted. An interrupt (Esc)
+runs no hook, so after one the indicator lasts until the next turn ends or the
+30 minutes pass. A message that arrives while Claude is busy can land in the
+next turn, which then shows no indicator.
 
 ## Photos
 
@@ -107,6 +109,20 @@ Inbound photos are downloaded to `~/.claude/channels/telegram/inbox/` and the
 local path is included in the `<channel>` notification so the assistant can
 `Read` it. Telegram compresses photos — if you need the original file, send it
 as a document instead (long-press → Send as File).
+
+## Voice messages
+
+With `TELEGRAM_STT_OPENAI_KEY` set in `~/.claude/channels/telegram/.env`, voice
+notes, audio files and video notes reach Claude as text. The server downloads the
+file to the inbox, sends it to OpenAI's `/v1/audio/transcriptions` with
+`gpt-transcribe`, and delivers the transcript as the message, marked
+`[transcript]` after any caption, with `transcribed_by` and `audio_path` on the
+`<channel>` tag. `TELEGRAM_STT_MODEL`
+picks another model, and `TELEGRAM_STT_LANGUAGES` pins languages, comma-separated
+(`en,zh`), which keeps a short clip from being heard as a third language. When
+transcription fails or takes longer than 30 seconds, the message arrives as it
+does without a key, as an attachment Claude can download. Updates are handled one
+at a time, so a voice note can hold later messages for up to those 30 seconds.
 
 ## No history or search
 
