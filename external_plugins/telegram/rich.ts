@@ -25,11 +25,11 @@ export function richEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return /^(1|true|yes|on)$/i.test(env.TELEGRAM_RICH_MESSAGES?.trim() ?? '')
 }
 
+// One line of the server's instructions, which Claude Code cuts at 2048
+// characters; it goes last, so a cut takes it before the access warning.
 export const RICH_INSTRUCTIONS =
-  'Rich messages are on: reply and edit_message render GitHub Markdown as a Telegram rich message. ' +
-  'Use headings, tables, lists and task lists (- [x]), quotes, fenced code and links; <details><summary>Title</summary>…</details> for a collapsible section; ' +
-  '<u>, <sup>, <sub>, ==marked== and ||spoiler|| inline, so a literal == or || goes in backticks. Math only as <tg-math>…</tg-math> or a ```math block: a $ in text is sent as a literal dollar sign. ' +
-  "Not MarkdownV2. Tables take only inline formatting in cells and at most 20 columns. Pass format: 'text' for a plain message."
+  'Rich messages: reply and edit_message render GitHub Markdown: headings, tables (inline formatting only, up to 20 columns), task lists, code, ' +
+  '<details><summary>…</summary>…</details>, ==marked==, ||spoiler||. A literal == or || goes in backticks. Math only as <tg-math>…</tg-math>; a $ stays a dollar sign.'
 
 export const RICH_FORMAT_HELP =
   "Rendering mode. 'rich' (the default) sends GitHub Markdown as a Telegram rich message (tables, headings, details). 'text' is plain, no escaping needed. 'markdownv2' enables Telegram formatting (bold, italic, code, links); caller must escape special chars per MarkdownV2 rules."
