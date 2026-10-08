@@ -97,8 +97,10 @@ for a turn that something else started (the terminal, a finished subagent, a
 scheduled task), in the private chat that last wrote to the bot. Telegram drops
 the indicator after a few seconds or when the bot sends, so the server re-sends
 it while the turn runs. The plugin's hooks mark the session busy on each of
-Claude's own tool calls and prompts ([hooks/busy.sh](./hooks/busy.sh); a
-subagent's work shows in its own message instead) and record the turn end on
+Claude's own tool calls and prompts ([hooks/busy.ts](./hooks/busy.ts)). A
+subagent's tool calls start no typing, as its work shows in its own message,
+but they keep a turn that waits on a subagent clear of the 30-minute stop. The
+hooks record the turn end on
 `Stop`, `StopFailure` and `SessionEnd` ([hooks/turn-end.ts](./hooks/turn-end.ts)),
 under `turns/` in the channel's state directory. The indicator holds while a
 permission prompt waits on you, and that wait does not count toward its 30
@@ -120,17 +122,23 @@ as a document instead (long-press → Send as File).
 With `TELEGRAM_RICH_MESSAGES=true` in `~/.claude/channels/telegram/.env`, replies
 and edits render as Telegram rich messages (Bot API 10.3): Claude writes GitHub
 Markdown and Telegram shows native headings, tables, task lists, quotes, code
-blocks and collapsible `<details>` sections. The server parses the Markdown and
-sends Telegram's own rich Markdown through `sendRichMessage` and
-`editMessageText`. A `$` in text is escaped so that `$HOME/$USER` stays text
-and not a formula, while code and URLs keep theirs; formulas use `<tg-math>` or
-a ` ```math ` block. A tag Telegram would drop, such as the `<String>` in
-`Vec<String>`, goes out as text. A long reply goes out in parts cut between
-blocks, each under 30000 UTF-8 bytes (Telegram cuts rich text near 35000 bytes
-without an error) and 400 blocks; a code block too big for one part is closed
-and reopened, and a table repeats its header. A part Telegram rejects goes out
-plain. `format: 'text'` or `'markdownv2'` on a call still picks the old modes.
-Off by default, as some Telegram clients show rich messages as unsupported.
+blocks and collapsible `<details>` sections. The server parses the Markdown as
+Telegram reads it, with Markdown inside `<details>`, and sends Telegram's own
+rich Markdown through `sendRichMessage` and `editMessageText`. A `$` in text is
+escaped so that `$HOME/$USER` stays text and not a formula, while code and URLs
+keep theirs; formulas use `<tg-math>` or a ` ```math ` block. A tag Telegram
+would drop, such as the `<String>` in `Vec<String>`, goes out as text.
+
+A long reply goes out in parts cut between top-level blocks, never inside a
+`<details>`, each under 30000 UTF-8 bytes (Telegram cuts rich text near 35000
+bytes without an error) and 400 blocks. A block too big for one part is cut
+where Markdown allows it: a code block is closed and reopened, a table repeats
+its header, and a list or quote is cut between its items. Any other block that
+big, and any part Telegram rejects, goes out plain as written. The parsing runs
+in a worker: text it has not split within 5 seconds, as pathological Markdown
+can take, goes out plain, and the bot keeps polling meanwhile. `format: 'text'`
+or `'markdownv2'` on a call still picks the old modes. Off by default, as some
+Telegram clients show rich messages as unsupported.
 
 ## Subagents
 

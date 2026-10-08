@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { editRich, plainFallback, richEnabled, richMarkdown, richParts, sendRich, type RawApi } from './rich.ts'
+import { editRich, plainFallback, richEnabled, richMarkdown, richParts, richPartsAsync, sendRich, type RawApi } from './rich.ts'
 
 describe('richEnabled', () => {
   test('on only when asked', () => {
@@ -45,6 +45,20 @@ describe('richMarkdown', () => {
   test('inside <details> it is Markdown again, code included', () => {
     expect(richMarkdown(`<details><summary>Cost ${S}</summary>\nItem ${S}\n\`\`\`\necho ${S}\n\`\`\`\n</details>`))
       .toBe('<details><summary>Cost \\$HOME/\\$USER</summary>\nItem \\$HOME/\\$USER\n```\necho $HOME/$USER\n```\n</details>')
+  })
+
+  test('<details> in any layout: summary on its own line, in a list, around code, with text after', () => {
+    const E = '\\$HOME/\\$USER'
+    expect(richMarkdown(`<details>\n<summary>Cost ${S}</summary>\nItem ${S}\n</details>`))
+      .toBe(`<details>\n<summary>Cost ${E}</summary>\nItem ${E}\n</details>`)
+    expect(richMarkdown(`- a\n  - b\n    <details><summary>S</summary>\n    body ${S}\n    </details>`))
+      .toBe(`- a\n  - b\n    <details><summary>S</summary>\n    body ${E}\n    </details>`)
+    expect(richMarkdown(`<details><summary>x</summary>\n\`\`\`bash\necho $a\n\necho $b\n\`\`\`\n</details>\nafter ${S}`))
+      .toBe(`<details><summary>x</summary>\n\`\`\`bash\necho $a\n\necho $b\n\`\`\`\n</details>\nafter ${E}`)
+    expect(richMarkdown(`<details><summary>A</summary>\n<details><summary>B ${S}</summary>\nC Vec<String>\n</details>\n</details>`))
+      .toBe(`<details><summary>A</summary>\n<details><summary>B ${E}</summary>\nC Vec&lt;String>\n</details>\n</details>`)
+    expect(richMarkdown('```html\n<details><summary>$x</summary>\n```')).toBe('```html\n<details><summary>$x</summary>\n```')
+    expect(richMarkdown('<pre>\n<details>\n$x\n</pre>')).toBe('<pre>\n<details>\n$x\n</pre>')
   })
 
   test('a tag Telegram would drop becomes text; HTML it renders or drops stays', () => {
@@ -97,20 +111,89 @@ describe('richParts', () => {
     expect(parts.flatMap(p => p.plain.split('\n').slice(2))).toEqual(rows)
   })
 
+  test('a <details> inside a list item does not cut the list', () => {
+    const list = '- a\n  <details><summary>S</summary>\n  body\n  </details>\n- b'
+    expect(richParts(list + '\n\nafter', { bytes: 1000, blocks: 1 }).map(p => p.plain)).toEqual([list, 'after'])
+    // Too big for one part, the list is cut between its items, not at the tag.
+    expect(richParts(list + '\n\nafter', { bytes: 58, blocks: 400 }).map(p => p.plain))
+      .toEqual(['- a\n  <details><summary>S</summary>\n  body\n  </details>', '- b', 'after'])
+  })
+
+  test('a <details> in code, raw <pre> or prose opens no section', () => {
+    const one = { bytes: 1000, blocks: 1 }
+    expect(richParts('<pre>\n<details>\n</pre>\n\na\n\nb', one).map(p => p.plain)).toEqual(['<pre>\n<details>\n</pre>', 'a', 'b'])
+    expect(richParts('Use <details> for a fold.\n\na\n\nb', one).map(p => p.plain)).toEqual(['Use <details> for a fold.', 'a', 'b'])
+    expect(richParts('```\n<details>\n```\n\na\n\nb', one).map(p => p.plain)).toEqual(['```\n<details>\n```', 'a', 'b'])
+  })
+
   test('a <details> section is never cut between its tags', () => {
     const md = ['before', '<details><summary>More</summary>', 'one', 'two', '</details>', 'after'].join('\n\n')
     const parts = richParts(md, { bytes: 1000, blocks: 2 })
     expect(parts.map(p => p.plain)).toEqual(['before', '<details><summary>More</summary>\n\none\n\ntwo\n\n</details>', 'after'])
   })
 
-  test('a line too long alone is cut by size, never inside an emoji', () => {
-    const parts = richParts('😀'.repeat(60), small)
+  test('the parts cover the text once: a bare CR between blocks sends nothing twice', () => {
+    const md = 'A'.repeat(60) + '\r\r' + 'B'.repeat(60) + '\r\r' + 'C'.repeat(60)
+    expect(richParts(md, small).map(p => p.plain)).toEqual(['A'.repeat(60), 'B'.repeat(60), 'C'.repeat(60)])
+  })
+
+  test('a list too big alone is cut between items; an item too big alone goes out plain', () => {
+    const items = Array.from({ length: 6 }, (_, i) => `- item ${i} $${i} ${'x'.repeat(20)}`)
+    const big = '- big\n  ```\n' + '  line $x\n'.repeat(12) + '  ```'
+    const parts = richParts([...items.slice(0, 3), big, ...items.slice(3)].join('\n'), small)
+    expect(parts.map(p => p.plain).join('\n')).toBe([...items.slice(0, 3), big, ...items.slice(3)].join('\n'))
+    for (const p of parts) {
+      if (p.rich === undefined) expect(p.plain).toBe(big)
+      else {
+        expect(p.rich.startsWith('- item')).toBe(true)
+        expect(Buffer.byteLength(p.rich)).toBeLessThanOrEqual(100)
+      }
+    }
+  })
+
+  test('a quote too big alone is cut between its blocks, each part still quoted', () => {
+    const blocks = Array.from({ length: 6 }, (_, i) => `> quote ${i} $${i} ${'q'.repeat(20)}`)
+    const parts = richParts(blocks.join('\n>\n'), small)
+    expect(parts.length).toBeGreaterThan(1)
+    for (const p of parts) expect(p.rich!.startsWith('> quote')).toBe(true)
+  })
+
+  test('a code line too long alone is cut inside its fence, never inside a surrogate pair', () => {
+    const parts = richParts('```\n' + '😀'.repeat(60) + '\n```', small)
     expect(parts.length).toBeGreaterThan(1)
     for (const p of parts) {
-      expect(Buffer.byteLength(p.rich)).toBeLessThanOrEqual(100)
-      expect(/^\p{Extended_Pictographic}+$/u.test(p.rich)).toBe(true)
+      expect(Buffer.byteLength(p.rich!)).toBeLessThanOrEqual(100)
+      expect(p.rich).toMatch(/^```\n\p{Extended_Pictographic}+\n```$/u)
     }
-    expect(parts.map(p => p.plain).join('')).toBe('😀'.repeat(60))
+  })
+
+  test('a lone surrogate is counted as the 3 bytes it goes out as', () => {
+    for (const p of richParts('```\n' + '\udc00'.repeat(60) + '\n```', small)) expect(Buffer.byteLength(p.rich!)).toBeLessThanOrEqual(100)
+  })
+
+  test('an unclosed fence keeps its last line', () => {
+    const parts = richParts('```\n' + 'code $x\n'.repeat(20) + '```js', small)
+    expect(parts.at(-1)!.plain.endsWith('```js\n```')).toBe(true)
+  })
+
+  test('a paragraph too big alone goes out plain, as written', () => {
+    const line = 'word $x `c$` '.repeat(20)
+    expect(richParts(line, small)).toEqual([{ plain: line.trimEnd() }])
+    const lines = Array.from({ length: 12 }, (_, i) => `line ${i} $x \`c\``).join('\n')
+    expect(richParts(lines, small)).toEqual([{ plain: lines }])
+  })
+})
+
+describe('richPartsAsync', () => {
+  test('splits in a worker as richParts does', async () => {
+    expect(await richPartsAsync('costs $5')).toEqual(richParts('costs $5'))
+  })
+
+  test('text the parser has not split in time goes out plain', async () => {
+    const deep = Array.from({ length: 400 }, (_, i) => ' '.repeat(i * 2) + '- x').join('\n')
+    const t = Date.now()
+    expect(await richPartsAsync(deep, undefined, 300)).toEqual([{ plain: deep }])
+    expect(Date.now() - t).toBeLessThan(2000)
   })
 })
 
@@ -173,6 +256,15 @@ describe('sendRich', () => {
     ])
   })
 
+  test('a part only plain text keeps whole goes out plain without a rich try', async () => {
+    const f = fakeRaw()
+    const p = progress()
+    const text = 'word $x '.repeat(5000)
+    await sendRich({ raw: f.raw, chatId: '42', text, replyTo: () => undefined, plainChunks: t => [t.slice(0, 4096), t.slice(4096)], progress: p })
+    expect(f.calls.map(c => c.method)).toEqual(['sendMessage', 'sendMessage'])
+    expect(p).toEqual({ ids: [101, 102], done: 1, total: 1 })
+  })
+
   test('a failure part way leaves what was sent in progress and rethrows', async () => {
     const tooMany = { error_code: 429, description: 'Too Many Requests: retry after 5' }
     const f = fakeRaw((m, n) => (m === 'sendRichMessage' && n === 2 ? tooMany : undefined))
@@ -201,6 +293,12 @@ describe('editRich', () => {
     const f = fakeRaw(() => same)
     await expect(editRich({ raw: f.raw, chatId: '42', messageId: 9, text: 'x' })).rejects.toBe(same)
     expect(f.calls.length).toBe(1)
+  })
+
+  test('many short blocks still edit as one rich message', async () => {
+    const f = fakeRaw()
+    await editRich({ raw: f.raw, chatId: '42', messageId: 9, text: Array.from({ length: 450 }, (_, i) => `p${i}`).join('\n\n') })
+    expect(f.calls.map(c => Object.keys(c.params))).toEqual([['chat_id', 'message_id', 'rich_message']])
   })
 
   test('text for more than one rich message is refused before any call', async () => {

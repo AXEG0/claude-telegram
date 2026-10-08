@@ -23,7 +23,7 @@ import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, 
 import { homedir } from 'os'
 import { execFileSync } from 'child_process'
 import { join, extname, sep } from 'path'
-import { ancestorPids, busyFiles, createTyping, markerFiles, readBusyAt, readTurnEnd, REFRESH_MS } from './typing.ts'
+import { ancestorPids, busyFiles, createTyping, markerFiles, readBusyAt, readTurnEnd, REFRESH_MS, subagentFiles } from './typing.ts'
 import { STT_KINDS, sttConfig, transcribeTelegramFile } from './stt.ts'
 import { AGENT_TICK_MS, agentEventFile, createAgentStream, createEventReader } from './agents.ts'
 import { editRich, RICH_FORMAT_HELP, RICH_INSTRUCTIONS, richEnabled, sendRich, type RawApi } from './rich.ts'
@@ -103,6 +103,7 @@ let botUsername = ''
 const ancestors = ancestorPids()
 const turnEndFiles = markerFiles(STATE_DIR, process.env.CLAUDE_CODE_SESSION_ID, ancestors)
 const busyMarkers = busyFiles(STATE_DIR, ancestors)
+const subagentMarkers = subagentFiles(STATE_DIR, ancestors)
 // The private chat that last wrote: typing for turns it did not start, and subagents.
 let lastChat: string | undefined
 const typing = createTyping({
@@ -110,6 +111,7 @@ const typing = createTyping({
   turnEndedAt: () => readTurnEnd(turnEndFiles),
   busyAt: () => readBusyAt(busyMarkers),
   chat: () => lastChat,
+  subagentAt: () => readBusyAt(subagentMarkers),
   onCap: chat_id => void bot.api
     .sendMessage(chat_id, '⚠️ No turn end seen in 30 minutes: Claude may be stuck, or was interrupted. Typing has stopped.')
     .catch(() => {}),
@@ -627,7 +629,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           const msg = err instanceof Error ? err.message : String(err)
           throw new Error(
             rich
-              ? `reply failed after ${rich.done} of ${rich.total} part(s) sent: ${msg}`
+              ? `reply failed after ${rich.done} of ${rich.total} part(s) sent (${sentIds.length} message(s)): ${msg}`
               : `reply failed after ${sentIds.length} of ${chunks.length} chunk(s) sent: ${msg}`,
           )
         }
