@@ -120,13 +120,17 @@ as a document instead (long-press → Send as File).
 With `TELEGRAM_RICH_MESSAGES=true` in `~/.claude/channels/telegram/.env`, replies
 and edits render as Telegram rich messages (Bot API 10.3): Claude writes GitHub
 Markdown and Telegram shows native headings, tables, task lists, quotes, code
-blocks and collapsible `<details>` sections. The server sends Telegram's own rich
-Markdown through `sendRichMessage` and `editMessageText`, escaping every `$`
-outside code so that prices stay prices; formulas use `<tg-math>` or a ` ```math `
-block. Text over 32768 characters goes out in parts, and a part Telegram rejects
-goes out plain. `format: 'text'` or `'markdownv2'` on a call still picks the old
-modes. Off by default, as some Telegram clients show rich messages as
-unsupported.
+blocks and collapsible `<details>` sections. The server parses the Markdown and
+sends Telegram's own rich Markdown through `sendRichMessage` and
+`editMessageText`. A `$` in text is escaped so that `$HOME/$USER` stays text
+and not a formula, while code and URLs keep theirs; formulas use `<tg-math>` or
+a ` ```math ` block. A tag Telegram would drop, such as the `<String>` in
+`Vec<String>`, goes out as text. A long reply goes out in parts cut between
+blocks, each under 30000 UTF-8 bytes (Telegram cuts rich text near 35000 bytes
+without an error) and 400 blocks; a code block too big for one part is closed
+and reopened, and a table repeats its header. A part Telegram rejects goes out
+plain. `format: 'text'` or `'markdownv2'` on a call still picks the old modes.
+Off by default, as some Telegram clients show rich messages as unsupported.
 
 ## Subagents
 
