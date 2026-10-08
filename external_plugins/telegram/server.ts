@@ -857,6 +857,8 @@ bot.on('callback_query:data', async ctx => {
   }
 
   typing.resume()
+  // Text sent before the answer reaches Claude before it.
+  if (ctx.chat) batcher.flushChat(String(ctx.chat.id))
   void mcp.notification({
     method: 'notifications/claude/channel/permission',
     params: { request_id, behavior },
@@ -1015,8 +1017,8 @@ async function handleInbound(
   // (non-allowlisted senders were dropped above), so we trust the reply.
   const permMatch = PERMISSION_REPLY_RE.exec(text)
   if (permMatch) {
-    // Text the sender sent before the answer reaches Claude before it.
-    batcher.flush(batchKey)
+    // Text sent before the answer reaches Claude before it.
+    batcher.flushChat(chat_id)
     typing.resume()
     void mcp.notification({
       method: 'notifications/claude/channel/permission',

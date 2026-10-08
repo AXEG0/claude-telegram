@@ -70,6 +70,8 @@ export function createBatcher(opts: {
   const setTimer = opts.setTimer ?? ((fn, ms) => setTimeout(fn, ms))
   const clearTimer = opts.clearTimer ?? (t => clearTimeout(t as ReturnType<typeof setTimeout>))
   const pending = new Map<string, Pending>()
+  // Set once the server stops: from then on a message goes out at once.
+  let closing = false
 
   const flush = (key: string) => {
     const p = pending.get(key)
@@ -95,6 +97,11 @@ export function createBatcher(opts: {
   return {
     // Adds an item to the sender's batch, which goes out gapMs after it.
     add(key: string, chat: string, item: Inbound, gapMs: number) {
+      if (closing) {
+        flush(key)
+        opts.deliver(item)
+        return
+      }
       flushOthers(key, chat)
       let p = pending.get(key)
       const reply = replyOf(item)
@@ -124,9 +131,15 @@ export function createBatcher(opts: {
       flush(key)
       if (item) opts.deliver(item)
     },
-    // Every waiting batch, now: the server is stopping, and Telegram counts
-    // the updates as delivered.
+    // Every batch of the chat, now: a permission answer must not overtake
+    // text sent before it.
+    flushChat(chat: string) {
+      for (const [k, p] of [...pending]) if (p.chat === chat) flush(k)
+    },
+    // Every waiting batch, now, and every later message at once: the server
+    // is stopping, and Telegram counts the updates as delivered.
     flushAll(): Promise<unknown> {
+      closing = true
       return Promise.allSettled([...pending.keys()].map(k => flush(k)))
     },
   }

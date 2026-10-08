@@ -138,6 +138,22 @@ describe('createBatcher', () => {
     expect(h.out.map(o => [o.meta.message_ids ?? o.meta.message_id, o.meta.reply_to_message_id])).toEqual([['1,2', '10'], ['3', '20']])
   })
 
+  test('flushChat sends every batch of the chat, and only that chat\'s', () => {
+    const h = harness()
+    h.b.add('c:x', 'c', msg(1, 'x said'), TEXT_GAP_MS)
+    h.b.add('d:x', 'd', msg(3, 'elsewhere'), TEXT_GAP_MS)
+    h.b.flushChat('c')
+    expect(h.out.map(o => o.meta.message_id)).toEqual(['1'])
+  })
+
+  test('after flushAll a message goes out at once, as the server is stopping', async () => {
+    const h = harness()
+    h.b.add('k', 'c', msg(1, 'before'), TEXT_GAP_MS)
+    await h.b.flushAll()
+    h.b.add('k', 'c', msg(2, 'fetched during shutdown'), PHOTO_GAP_MS)
+    expect(h.out.map(o => o.meta.message_id)).toEqual(['1', '2'])
+  })
+
   test('flushAll sends every waiting batch and waits for the sends', async () => {
     const sent: string[] = []
     const b = createBatcher({ deliver: async item => { await Bun.sleep(5); sent.push(item.meta.message_id!) } })
