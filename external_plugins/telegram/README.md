@@ -96,8 +96,9 @@ Telegram drops the indicator after a few seconds or when the bot sends, so the
 server re-sends it while the turn runs. The plugin's `Stop`, `StopFailure` and
 `SessionEnd` hook ([hooks/turn-end.ts](./hooks/turn-end.ts)) records the turn end
 under `~/.claude/channels/telegram/turns/`, which stops it. The indicator holds
-while a permission prompt waits on you. After 30 minutes without a turn end it
-stops, and the bot tells the chat that Claude may be stuck. An interrupt (Esc)
+while a permission prompt waits on you, and that wait does not count toward its
+30 minutes. After 30 minutes without a turn end it stops, and the bot tells the
+chat that Claude may be stuck or was interrupted. An interrupt (Esc)
 runs no hook, so after one the indicator lasts until the next turn ends or the
 30 minutes pass. A message that arrives while Claude is busy can land in the
 next turn, which then shows no indicator.
@@ -114,12 +115,14 @@ as a document instead (long-press → Send as File).
 With `TELEGRAM_STT_OPENAI_KEY` set in `~/.claude/channels/telegram/.env`, voice
 notes, audio files and video notes reach Claude as text. The server downloads the
 file to the inbox, sends it to OpenAI's `/v1/audio/transcriptions` with
-`gpt-transcribe`, and delivers the transcript as the message, with
-`transcribed_by` and `audio_path` on the `<channel>` tag. `TELEGRAM_STT_MODEL`
+`gpt-transcribe`, and delivers the transcript as the message, marked
+`[transcript]` after any caption, with `transcribed_by` and `audio_path` on the
+`<channel>` tag. `TELEGRAM_STT_MODEL`
 picks another model, and `TELEGRAM_STT_LANGUAGES` pins languages, comma-separated
 (`en,zh`), which keeps a short clip from being heard as a third language. When
 transcription fails or takes longer than 30 seconds, the message arrives as it
-does without a key, as an attachment Claude can download.
+does without a key, as an attachment Claude can download. Updates are handled one
+at a time, so a voice note can hold later messages for up to those 30 seconds.
 
 ## No history or search
 

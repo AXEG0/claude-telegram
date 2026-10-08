@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, readFileSync } from 'fs'
+import { mkdtempSync, readFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { STT_MAX_BYTES, sttConfig, transcribe, transcribeTelegramFile, uploadName, type SttConfig } from './stt.ts'
@@ -62,7 +62,7 @@ describe('transcribe', () => {
 })
 
 describe('transcribeTelegramFile', () => {
-  const api = { getFile: async () => ({ file_path: 'voice/file_1.oga', file_unique_id: 'u1' }) }
+  const api = { getFile: async (_id: string, _signal?: AbortSignal) => ({ file_path: 'voice/file_1.oga', file_unique_id: 'u1' }) }
 
   test('downloads into the inbox and returns the transcript', async () => {
     const inboxDir = mkdtempSync(join(tmpdir(), 'stt-'))
@@ -104,6 +104,16 @@ describe('transcribeTelegramFile', () => {
     const inboxDir = mkdtempSync(join(tmpdir(), 'stt-'))
     const f = fakeFetch(url => (url.includes('api.telegram.org') ? new Response(new Uint8Array([1])) : new Response('no', { status: 500 })))
     expect(await transcribeTelegramFile({ api, token: 'T', inboxDir, fileId: 'f', mime: 'audio/ogg', cfg, fetchImpl: f.impl })).toBeUndefined()
-    expect(existsSync(inboxDir)).toBe(true)
+  })
+
+  test('a file lookup that hangs gives up at the timeout too', async () => {
+    const hanging = {
+      getFile: (_id: string, signal?: AbortSignal) =>
+        new Promise<{ file_path?: string }>((_, reject) => signal?.addEventListener('abort', () => reject(signal.reason))),
+    }
+    const t0 = Date.now()
+    const r = await transcribeTelegramFile({ api: hanging, token: 'T', inboxDir: mkdtempSync(join(tmpdir(), 'stt-')), fileId: 'f', mime: 'audio/ogg', cfg, timeoutMs: 200 })
+    expect(r).toBeUndefined()
+    expect(Date.now() - t0).toBeLessThan(2000)
   })
 })

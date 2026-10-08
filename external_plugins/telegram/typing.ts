@@ -25,11 +25,13 @@ export function stateDir(env: NodeJS.ProcessEnv = process.env): string {
 }
 
 // A session is named twice: by its session id, and by the pid of the Claude
-// Code process, which survives /clear when the session id changes.
-export function markerFiles(dir: string, sessionId?: string, claudePid?: number): string[] {
+// Code process, which survives /clear when the session id changes. The hook
+// writes its Claude Code pid; the server reads the files of all its
+// ancestors, one of which is that process.
+export function markerFiles(dir: string, sessionId?: string, pids: number[] = []): string[] {
   const files: string[] = []
   if (sessionId && /^[\w-]+$/.test(sessionId)) files.push(join(dir, 'turns', `session-${sessionId}`))
-  if (claudePid && claudePid > 1) files.push(join(dir, 'turns', `pid-${claudePid}`))
+  for (const pid of pids) if (pid > 1) files.push(join(dir, 'turns', `pid-${pid}`))
   return files
 }
 
@@ -51,25 +53,30 @@ export function readTurnEnd(files: string[]): number {
   return latest
 }
 
-// The nearest ancestor named `claude`, walking at most a few parents. The
-// server starts under a `bun run` wrapper; a hook under a shell.
-export function findClaudePid(start: number = process.ppid): number | undefined {
+// The first few ancestors, nearest first. The server starts under a `bun run`
+// wrapper whose parent is Claude Code. No name match: Claude Code's process
+// name differs between installs.
+export function ancestorPids(start: number = process.ppid, depth = 4): number[] {
+  const pids: number[] = []
   let pid = start
-  for (let i = 0; i < 4 && pid > 1; i++) {
+  while (pids.length < depth && pid > 1) {
+    pids.push(pid)
     try {
-      const out = execFileSync('ps', ['-o', 'ppid=,comm=', '-p', String(pid)], {
+      pid = parseInt(execFileSync('ps', ['-o', 'ppid=', '-p', String(pid)], {
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'ignore'],
-      }).trim()
-      const m = /^(\d+)\s+(.*)$/.exec(out)
-      if (!m) return undefined
-      if (/(^|\/)claude$/.test(m[2]!)) return pid
-      pid = parseInt(m[1]!, 10)
+      }).trim(), 10)
     } catch {
-      return undefined
+      break
     }
   }
-  return undefined
+  return pids
+}
+
+// The hook's Claude Code pid: CLAUDE_PID, which Claude Code sets for the
+// processes it starts, or else the hook's nearest ancestor.
+export function hookClaudePid(env: NodeJS.ProcessEnv = process.env): number | undefined {
+  return Number(env.CLAUDE_PID) || ancestorPids(process.ppid, 1)[0]
 }
 
 export type Typing = {
@@ -91,6 +98,7 @@ export function createTyping(opts: {
   const capMs = opts.capMs ?? CAP_MS
   const since = new Map<string, number>()
   let paused = false
+  let pausedAt = 0
 
   return {
     start(chatId) {
@@ -106,7 +114,8 @@ export function createTyping(opts: {
           since.delete(chatId)
           continue
         }
-        if (t - began >= capMs) {
+        // A permission prompt waits on the owner, so it does not count.
+        if (!paused && t - began >= capMs) {
           since.delete(chatId)
           opts.onCap?.(chatId)
           continue
@@ -118,10 +127,16 @@ export function createTyping(opts: {
     // A permission prompt waits on the owner, not on Claude. With no chat
     // typing there is nothing to hold, and no tick would clear the pause.
     pause() {
-      if (since.size > 0) paused = true
+      if (since.size > 0 && !paused) {
+        paused = true
+        pausedAt = now()
+      }
     },
     resume() {
+      if (!paused) return
       paused = false
+      const held = now() - pausedAt
+      for (const [chatId, began] of since) since.set(chatId, began + held)
     },
     active() {
       return [...since.keys()]

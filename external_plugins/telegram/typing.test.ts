@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync, readdirSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { createTyping, markerFiles, readTurnEnd, writeTurnEnd } from './typing.ts'
+import { ancestorPids, createTyping, markerFiles, readTurnEnd, writeTurnEnd } from './typing.ts'
 
 function harness(capMs = 60_000) {
   let t = 1_000
@@ -89,6 +89,21 @@ describe('createTyping', () => {
     expect(h.sent).toEqual(['42', '42'])
   })
 
+  test('time paused on a permission prompt does not count toward the cap', () => {
+    const h = harness(10_000)
+    h.typing.start('42')
+    h.advance(5_000)
+    h.typing.pause()
+    h.advance(60_000); h.typing.tick()
+    expect(h.capped).toEqual([])
+    h.typing.resume()
+    h.advance(4_000); h.typing.tick()
+    expect(h.capped).toEqual([])
+    expect(h.sent).toEqual(['42', '42'])
+    h.advance(2_000); h.typing.tick()
+    expect(h.capped).toEqual(['42'])
+  })
+
   test('a pause with no chat typing does not hold the next message', () => {
     const h = harness()
     h.typing.pause()
@@ -100,14 +115,20 @@ describe('createTyping', () => {
 
 describe('turn-end markers', () => {
   test('one file per session id and per Claude Code pid', () => {
-    expect(markerFiles('/s', 'abc-123', 4242)).toEqual(['/s/turns/session-abc-123', '/s/turns/pid-4242'])
-    expect(markerFiles('/s', '../escape', 4242)).toEqual(['/s/turns/pid-4242'])
-    expect(markerFiles('/s', undefined, 1)).toEqual([])
+    expect(markerFiles('/s', 'abc-123', [4242, 99])).toEqual(['/s/turns/session-abc-123', '/s/turns/pid-4242', '/s/turns/pid-99'])
+    expect(markerFiles('/s', '../escape', [4242])).toEqual(['/s/turns/pid-4242'])
+    expect(markerFiles('/s', undefined, [1])).toEqual([])
+  })
+
+  test('the ancestors start at the given pid and include its parent', () => {
+    const pids = ancestorPids(process.pid)
+    expect(pids[0]).toBe(process.pid)
+    expect(pids[1]).toBe(process.ppid)
   })
 
   test('the latest end across the files is the turn end', () => {
     const dir = mkdtempSync(join(tmpdir(), 'typing-'))
-    const [a, b] = markerFiles(dir, 'sess', 4242)
+    const [a, b] = markerFiles(dir, 'sess', [4242])
     expect(readTurnEnd([a!, b!])).toBe(0)
     writeTurnEnd([a!], 5)
     writeTurnEnd([b!], 9)

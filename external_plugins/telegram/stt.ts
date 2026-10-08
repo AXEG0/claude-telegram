@@ -15,8 +15,8 @@ import { mkdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
 
 export const STT_KINDS = new Set(['voice', 'audio', 'video_note'])
-// The whole download and transcription, so a slow call cannot hold the
-// update loop that every later message waits behind.
+// The whole lookup, download and transcription. Updates are handled one at a
+// time, so this bounds how long a voice note can hold later messages.
 export const STT_TIMEOUT_MS = 30_000
 // The Bot API serves files up to this size.
 export const STT_MAX_BYTES = 20 * 1024 * 1024
@@ -96,7 +96,9 @@ export async function transcribe(
   return body.trim()
 }
 
-type FileApi = { getFile(fileId: string): Promise<{ file_path?: string; file_unique_id?: string }> }
+type FileApi = {
+  getFile(fileId: string, signal?: AbortSignal): Promise<{ file_path?: string; file_unique_id?: string }>
+}
 
 // Downloads a Telegram file into the inbox and transcribes it. Returns
 // undefined, after a line on stderr, whenever it cannot: the message then
@@ -116,7 +118,7 @@ export async function transcribeTelegramFile(opts: {
   const signal = AbortSignal.timeout(opts.timeoutMs ?? STT_TIMEOUT_MS)
   try {
     if (opts.size != null && opts.size > STT_MAX_BYTES) throw new Error(`file is ${opts.size} bytes`)
-    const file = await opts.api.getFile(opts.fileId)
+    const file = await opts.api.getFile(opts.fileId, signal)
     if (!file.file_path) throw new Error('Telegram returned no file_path')
     const name = uploadName(opts.mime, file.file_path)
     if (!name) throw new Error(`no transcribable container for ${opts.mime ?? file.file_path}`)

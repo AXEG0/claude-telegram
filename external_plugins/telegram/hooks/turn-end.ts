@@ -5,7 +5,7 @@
 
 import { readdirSync, readFileSync, rmSync, statSync } from 'fs'
 import { join } from 'path'
-import { findClaudePid, markerFiles, stateDir, writeTurnEnd } from '../typing.ts'
+import { hookClaudePid, markerFiles, stateDir, writeTurnEnd } from '../typing.ts'
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000
 
@@ -14,9 +14,9 @@ try {
   try {
     sessionId = JSON.parse(readFileSync(0, 'utf8')).session_id
   } catch {}
-  const pid = Number(process.env.CLAUDE_PID) || findClaudePid()
+  const pid = hookClaudePid()
   const dir = stateDir()
-  writeTurnEnd(markerFiles(dir, sessionId, pid))
+  writeTurnEnd(markerFiles(dir, sessionId, pid ? [pid] : []))
 
   const turns = join(dir, 'turns')
   const now = Date.now()
