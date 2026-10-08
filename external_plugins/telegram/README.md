@@ -5,8 +5,8 @@ Connect a Telegram bot to your Claude Code with an MCP server.
 The MCP server logs into Telegram as a bot and provides tools to Claude to reply, react, or edit messages. When you message the bot, the server forwards the message to your Claude Code session.
 
 > This is AXEG0's fork of Anthropic's official Telegram plugin. It adds a typing
-> indicator that lasts the whole turn, speech to text for voice messages, and a
-> live message per subagent. Install it from this repo's marketplace and
+> indicator that lasts the whole turn, speech to text for voice messages, a live
+> message per subagent, and rich messages. Install it from this repo's marketplace and
 > start Claude Code with the development flag, since only Anthropic's own channel
 > plugins pass `--channels` during the research preview:
 >
@@ -96,8 +96,11 @@ Telegram shows "typing…" while Claude's turn runs: from an inbound message, an
 for a turn that something else started (the terminal, a finished subagent, a
 scheduled task), in the private chat that last wrote to the bot. Telegram drops
 the indicator after a few seconds or when the bot sends, so the server re-sends
-it while the turn runs. The plugin's hooks mark the session busy on every tool
-call and prompt ([hooks/busy.sh](./hooks/busy.sh)) and record the turn end on
+it while the turn runs. The plugin's hooks mark the session busy on each of
+Claude's own tool calls and prompts ([hooks/busy.ts](./hooks/busy.ts)). A
+subagent's tool calls start no typing, as its work shows in its own message,
+but they keep a turn that waits on a subagent clear of the 30-minute stop. The
+hooks record the turn end on
 `Stop`, `StopFailure` and `SessionEnd` ([hooks/turn-end.ts](./hooks/turn-end.ts)),
 under `turns/` in the channel's state directory. The indicator holds while a
 permission prompt waits on you, and that wait does not count toward its 30
@@ -114,6 +117,30 @@ local path is included in the `<channel>` notification so the assistant can
 `Read` it. Telegram compresses photos — if you need the original file, send it
 as a document instead (long-press → Send as File).
 
+## Rich messages
+
+With `TELEGRAM_RICH_MESSAGES=true` in `~/.claude/channels/telegram/.env`, replies
+and edits render as Telegram rich messages (Bot API 10.3): Claude writes GitHub
+Markdown and Telegram shows native headings, tables, task lists, quotes, code
+blocks and collapsible `<details>` sections. The server parses the Markdown as
+Telegram reads it, with Markdown inside `<details>`, and sends Telegram's own
+rich Markdown through `sendRichMessage` and `editMessageText`. A `$` in text is
+escaped so that `$HOME/$USER` stays text and not a formula, while code and URLs
+keep theirs; formulas use `<tg-math>` or a ` ```math ` block. A tag Telegram
+would drop, such as the `<String>` in `Vec<String>`, goes out as text.
+
+A long reply goes out in parts cut between top-level blocks, each under 30000
+UTF-8 bytes (Telegram cuts rich text near 35000 bytes without an error) and 400
+top-level blocks. A `<details>` section stays whole, whatever it holds; one that
+Telegram rejects goes out plain. A block too big for one part is cut
+where Markdown allows it: a code block is closed and reopened, a table repeats
+its header, and a list or quote is cut between its items. Any other block that
+big, and any part Telegram rejects, goes out plain as written. The parsing runs
+in a worker: text it has not split within 5 seconds, as pathological Markdown
+can take, goes out plain, and the bot keeps polling meanwhile. `format: 'text'`
+or `'markdownv2'` on a call still picks the old modes. Off by default, as some
+Telegram clients show rich messages as unsupported.
+
 ## Subagents
 
 Each subagent Claude starts appears in the chat as one message that is edited
@@ -128,11 +155,12 @@ and ends as `✅ Done in 6m 10s · 89.8k tokens`. The plugin's `SubagentStart` a
 `SubagentStop` hook ([hooks/subagent.ts](./hooks/subagent.ts)) records each
 subagent under `agents/` in the channel's state directory, and the server reads
 the subagent's own transcript for its current step and context size, and its
-meta file for its description. A step shows the tool call's own description, or
-the tool with a file name or search pattern; commands, URLs and queries stay on
-the box. Messages go, without a notification, to the private chat that last
+meta file for its description. A step shows the running tool call's own
+description, or the tool with a file name or search pattern (commands, URLs and
+queries stay on the box), then `💭 Thinking…` once the tool returns and
+`✍️ Writing…` once the subagent writes its answer. Messages go, without a notification, to the private chat that last
 wrote to the bot, from the first message after the server starts. All subagents
-in a chat share one edit every 3 seconds, a message's clock moves every 30
+in a chat share one edit every 3 seconds, a message's clock moves every 10
 seconds when nothing else changes, and a rate limit holds the chat for as long as
 Telegram asks. A subagent whose transcript stays unchanged for 30 minutes shows
 as quiet until its stop arrives.

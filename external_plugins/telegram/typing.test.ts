@@ -2,12 +2,13 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync, readdirSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { ancestorPids, busyFiles, createTyping, markerFiles, readBusyAt, readTurnEnd, writeTurnEnd } from './typing.ts'
+import { ancestorPids, busyFiles, createTyping, markerFiles, readBusyAt, readTurnEnd, subagentFiles, writeTurnEnd } from './typing.ts'
 
 function harness(capMs = 60_000, chat?: string) {
   let t = 1_000
   let ended = 0
   let busy = 0
+  let sub = 0
   const sent: string[] = []
   const capped: string[] = []
   const typing = createTyping({
@@ -18,6 +19,7 @@ function harness(capMs = 60_000, chat?: string) {
     onCap: id => capped.push(id),
     busyAt: () => busy,
     chat: () => chat,
+    subagentAt: () => sub,
   })
   return {
     typing,
@@ -26,6 +28,7 @@ function harness(capMs = 60_000, chat?: string) {
     advance(ms: number) { t += ms },
     endTurn() { ended = t },
     work() { busy = t },
+    subagent() { sub = t },
   }
 }
 
@@ -153,6 +156,45 @@ describe('typing for a turn no message started', () => {
   })
 })
 
+describe('a subagent\'s tool calls', () => {
+  test('keep the turn\'s typing clear of the cap', () => {
+    const h = harness(10_000)
+    h.typing.start('42')
+    for (let i = 0; i < 5; i++) { h.advance(4000); h.subagent(); h.typing.tick() }
+    expect(h.capped).toEqual([])
+    expect(h.sent.length).toBe(6)
+    h.advance(10_000); h.typing.tick()
+    expect(h.capped).toEqual(['42'])
+  })
+
+  test('during a permission prompt they hold nothing past the turn\'s end', () => {
+    const h = harness(30 * 60_000)
+    h.typing.start('42')
+    h.advance(5_000)
+    h.typing.pause()
+    for (let i = 0; i < 150; i++) { h.advance(4000); h.subagent(); h.typing.tick() }
+    h.typing.resume()
+    h.advance(90_000); h.endTurn()
+    h.advance(4000); h.typing.tick()
+    expect(h.typing.active()).toEqual([])
+    expect(h.capped).toEqual([])
+  })
+
+  test('start nothing, and bring back no turn that has ended', () => {
+    const h = harness(60_000, '42')
+    h.subagent(); h.advance(100); h.typing.tick()
+    expect(h.sent).toEqual([])
+
+    h.typing.start('42')
+    h.advance(1000); h.endTurn()
+    h.advance(1000); h.subagent()
+    h.advance(1000); h.typing.tick()
+    h.advance(4000); h.subagent(); h.typing.tick()
+    expect(h.sent).toEqual(['42'])
+    expect(h.typing.active()).toEqual([])
+  })
+})
+
 describe('turn-end markers', () => {
   test('one file per session id and per Claude Code pid', () => {
     expect(markerFiles('/s', 'abc-123', [4242, 99])).toEqual(['/s/turns/session-abc-123', '/s/turns/pid-4242', '/s/turns/pid-99'])
@@ -176,22 +218,31 @@ describe('turn-end markers', () => {
   })
 })
 
-describe('hooks/busy.sh', () => {
-  const run = (env: Record<string, string>) => Bun.spawnSync(['sh', join(import.meta.dir, 'hooks', 'busy.sh')], {
-    stdin: new TextEncoder().encode('{"hook_event_name":"PreToolUse"}'),
+describe('hooks/busy.ts', () => {
+  const run = (stdin: string, env: Record<string, string>) => Bun.spawnSync(['bun', join(import.meta.dir, 'hooks', 'busy.ts')], {
+    stdin: new TextEncoder().encode(stdin),
     env: { PATH: process.env.PATH!, HOME: process.env.HOME!, ...env },
   })
 
-  test('touches busy-<Claude Code pid>', () => {
+  test('touches busy-<Claude Code pid> for Claude\'s own call, whatever its tool input holds', () => {
     const dir = mkdtempSync(join(tmpdir(), 'typing-'))
-    expect(run({ TELEGRAM_STATE_DIR: dir, CLAUDE_PID: '4242' }).exitCode).toBe(0)
+    const input = JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'mcp__a2a__send', tool_input: { agent_id: 'peer' } })
+    expect(run(input, { TELEGRAM_STATE_DIR: dir, CLAUDE_PID: '4242' }).exitCode).toBe(0)
     expect(readBusyAt(busyFiles(dir, [4242]))).toBeGreaterThan(0)
+    expect(readBusyAt(subagentFiles(dir, [4242]))).toBe(0)
   })
 
-  test('without CLAUDE_PID it writes nothing and still exits 0', () => {
+  test('a subagent\'s call touches subagent-<pid> instead', () => {
     const dir = mkdtempSync(join(tmpdir(), 'typing-'))
-    expect(run({ TELEGRAM_STATE_DIR: dir }).exitCode).toBe(0)
-    expect(readdirSync(dir)).toEqual([])
+    const input = JSON.stringify({ hook_event_name: 'PreToolUse', agent_id: 'a1', agent_type: 'Explore' })
+    expect(run(input, { TELEGRAM_STATE_DIR: dir, CLAUDE_PID: '4242' }).exitCode).toBe(0)
+    expect(readdirSync(join(dir, 'turns'))).toEqual(['subagent-4242'])
+  })
+
+  test('input it cannot read counts as Claude\'s own, and it still exits 0', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'typing-'))
+    expect(run('not json', { TELEGRAM_STATE_DIR: dir, CLAUDE_PID: '4242' }).exitCode).toBe(0)
+    expect(readdirSync(join(dir, 'turns'))).toEqual(['busy-4242'])
   })
 })
 

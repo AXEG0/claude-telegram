@@ -43,9 +43,14 @@ export function writeTurnEnd(files: string[], at: number = Date.now()): void {
   }
 }
 
-// hooks/busy.sh touches busy-<Claude Code pid> on every tool call and prompt.
+// hooks/busy.ts touches busy-<Claude Code pid> on every tool call and prompt
+// of Claude's own, and subagent-<pid> on every tool call of a subagent's.
 export function busyFiles(dir: string, pids: number[]): string[] {
   return pids.filter(pid => pid > 1).map(pid => join(dir, 'turns', `busy-${pid}`))
+}
+
+export function subagentFiles(dir: string, pids: number[]): string[] {
+  return pids.filter(pid => pid > 1).map(pid => join(dir, 'turns', `subagent-${pid}`))
 }
 
 export function readBusyAt(files: string[]): number {
@@ -112,6 +117,10 @@ export function createTyping(opts: {
   // no message started.
   busyAt?: () => number
   chat?: () => string | undefined
+  // The last tool call of a subagent. A foreground subagent works inside the
+  // turn, so this keeps the turn's typing clear of the cap; it never starts
+  // typing, nor brings back a turn that has ended.
+  subagentAt?: () => number
   now?: () => number
   capMs?: number
 }): Typing {
@@ -129,6 +138,7 @@ export function createTyping(opts: {
     tick() {
       const ended = opts.turnEndedAt()
       const busy = opts.busyAt?.() ?? 0
+      const sub = opts.subagentAt?.() ?? 0
       const t = now()
       const working = busy > ended
       if (working && t - busy < capMs) {
@@ -143,6 +153,7 @@ export function createTyping(opts: {
           since.delete(chatId)
           continue
         }
+        if (sub > began) since.set(chatId, (began = sub))
         // A permission prompt waits on the owner, so it does not count.
         if (!paused && t - began >= capMs) {
           since.delete(chatId)
@@ -165,7 +176,8 @@ export function createTyping(opts: {
       if (!paused) return
       paused = false
       const held = now() - pausedAt
-      for (const [chatId, began] of since) since.set(chatId, began + held)
+      // Activity during the prompt already moved the start; none goes past now.
+      for (const [chatId, began] of since) since.set(chatId, Math.min(began + held, now()))
     },
     active() {
       return [...since.keys()]

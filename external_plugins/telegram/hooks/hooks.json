@@ -66,7 +66,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/busy.sh\"",
+            "command": "bun \"${CLAUDE_PLUGIN_ROOT}/hooks/busy.ts\"",
             "async": true,
             "timeout": 5
           }
@@ -78,7 +78,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/busy.sh\"",
+            "command": "bun \"${CLAUDE_PLUGIN_ROOT}/hooks/busy.ts\"",
             "async": true,
             "timeout": 5
           }
