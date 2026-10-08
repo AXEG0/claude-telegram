@@ -179,6 +179,13 @@ describe('createTyping', () => {
     expect(h.capped).toEqual([])
   })
 
+  test('the grace covers the busy hook\'s timeout', () => {
+    const hooks = JSON.parse(readFileSync(join(import.meta.dir, 'hooks', 'hooks.json'), 'utf8'))
+    const timeout = hooks.hooks.PreToolUse[0].hooks[0].timeout
+    expect(hooks.hooks.PreToolUse[0].hooks[0].command).toContain('busy.ts')
+    expect(PROMPT_GRACE_MS).toBeGreaterThanOrEqual(timeout * 1000)
+  })
+
   test('a subagent working while Claude\'s prompt waits keeps typing paused', () => {
     const h = harness(60_000)
     h.typing.start('42')
