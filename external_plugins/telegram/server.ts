@@ -23,6 +23,7 @@ import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, 
 import { homedir } from 'os'
 import { execFileSync } from 'child_process'
 import { join, extname, sep } from 'path'
+import { createTyping, findClaudePid, markerFiles, readTurnEnd, REFRESH_MS } from './typing.ts'
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR
   ?? join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'channels', 'telegram')
@@ -94,6 +95,14 @@ const PERMISSION_REPLY_RE = /^\s*(y|yes|n|no)\s+([a-km-z]{5})\s*$/i
 
 const bot = new Bot(TOKEN)
 let botUsername = ''
+
+// "typing…" for the whole turn, not Telegram's 5 seconds. See typing.ts.
+const turnEndFiles = markerFiles(STATE_DIR, process.env.CLAUDE_CODE_SESSION_ID, findClaudePid())
+const typing = createTyping({
+  send: chat_id => void bot.api.sendChatAction(chat_id, 'typing').catch(() => {}),
+  turnEndedAt: () => readTurnEnd(turnEndFiles),
+})
+setInterval(() => typing.tick(), REFRESH_MS).unref()
 
 type PendingEntry = {
   senderId: string
@@ -437,6 +446,7 @@ mcp.setNotificationHandler(
   async ({ params }) => {
     const { request_id, tool_name, description, input_preview } = params
     pendingPermissions.set(request_id, { tool_name, description, input_preview })
+    typing.pause()
     const access = loadAccess()
     const text = `🔐 Permission: ${tool_name}`
     const keyboard = new InlineKeyboard()
@@ -776,6 +786,7 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
+  typing.resume()
   void mcp.notification({
     method: 'notifications/claude/channel/permission',
     params: { request_id, behavior },
@@ -933,6 +944,7 @@ async function handleInbound(
   // (non-allowlisted senders were dropped above), so we trust the reply.
   const permMatch = PERMISSION_REPLY_RE.exec(text)
   if (permMatch) {
+    typing.resume()
     void mcp.notification({
       method: 'notifications/claude/channel/permission',
       params: {
@@ -949,8 +961,8 @@ async function handleInbound(
     return
   }
 
-  // Typing indicator — signals "processing" until we reply (or ~5s elapses).
-  void bot.api.sendChatAction(chat_id, 'typing').catch(() => {})
+  // Typing indicator — signals "processing" until Claude's turn ends.
+  typing.start(chat_id)
 
   // Ack reaction — lets the user know we're processing. Fire-and-forget.
   // Telegram only accepts a fixed emoji whitelist — if the user configures

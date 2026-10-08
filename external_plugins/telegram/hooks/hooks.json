@@ -1,0 +1,26 @@
+{
+  "description": "Marks the end of each turn so the Telegram server stops re-sending its typing indicator",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "bun \"${CLAUDE_PLUGIN_ROOT}/hooks/turn-end.ts\"", "async": true, "timeout": 10 }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          { "type": "command", "command": "bun \"${CLAUDE_PLUGIN_ROOT}/hooks/turn-end.ts\"", "async": true, "timeout": 10 }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          { "type": "command", "command": "bun \"${CLAUDE_PLUGIN_ROOT}/hooks/turn-end.ts\"", "async": true, "timeout": 10 }
+        ]
+      }
+    ]
+  }
+}
