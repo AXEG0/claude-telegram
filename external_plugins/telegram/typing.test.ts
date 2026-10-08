@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync, readdirSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { ancestorPids, busyFiles, createTyping, markerFiles, readBusyAt, readTurnEnd, subagentFiles, writeTurnEnd } from './typing.ts'
+import { ancestorPids, busyFiles, createTyping, markerFiles, PROMPT_GRACE_MS, readBusyAt, readTurnEnd, subagentFiles, writeTurnEnd } from './typing.ts'
 
 function harness(capMs = 60_000, chat?: string) {
   let t = 1_000
@@ -109,6 +109,30 @@ describe('createTyping', () => {
     expect(h.sent).toEqual(['42', '42'])
     h.advance(2_000); h.typing.tick()
     expect(h.capped).toEqual(['42'])
+  })
+
+  test('Claude working again after a prompt answered in the terminal brings typing back', () => {
+    const h = harness()
+    h.typing.start('42')
+    h.advance(1000)
+    h.typing.pause()
+    // The hook of the call that raised the prompt.
+    h.advance(PROMPT_GRACE_MS - 500); h.work()
+    h.advance(3000); h.typing.tick()
+    expect(h.sent).toEqual(['42'])
+
+    h.advance(4000); h.work(); h.typing.tick()
+    expect(h.sent).toEqual(['42', '42'])
+    h.advance(4000); h.typing.tick()
+    expect(h.sent).toEqual(['42', '42', '42'])
+  })
+
+  test('a subagent working after the prompt brings typing back too', () => {
+    const h = harness()
+    h.typing.start('42')
+    h.typing.pause()
+    h.advance(PROMPT_GRACE_MS + 1); h.subagent(); h.typing.tick()
+    expect(h.sent).toEqual(['42', '42'])
   })
 
   test('a pause with no chat typing does not hold the next message', () => {

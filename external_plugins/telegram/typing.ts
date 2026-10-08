@@ -18,6 +18,10 @@ export const REFRESH_MS = 4000
 // A turn whose end never reaches the hook (an interrupt, a hung turn) stops
 // typing this long after its last activity, and onCap tells the chat.
 export const CAP_MS = 30 * 60 * 1000
+// Activity this long after a permission prompt appears means it was answered,
+// in Telegram or in the terminal. The hook of the call that raised the prompt
+// runs alongside it and lands well within this.
+export const PROMPT_GRACE_MS = 2000
 
 // The same directory server.ts computes as STATE_DIR, for the hook.
 export function stateDir(env: NodeJS.ProcessEnv = process.env): string {
@@ -130,6 +134,14 @@ export function createTyping(opts: {
   let paused = false
   let pausedAt = 0
 
+  const resume = () => {
+    if (!paused) return
+    paused = false
+    const held = now() - pausedAt
+    // Activity during the prompt already moved the start; none goes past now.
+    for (const [chatId, began] of since) since.set(chatId, Math.min(began + held, now()))
+  }
+
   return {
     start(chatId) {
       since.set(chatId, now())
@@ -141,6 +153,7 @@ export function createTyping(opts: {
       const sub = opts.subagentAt?.() ?? 0
       const t = now()
       const working = busy > ended
+      if (paused && Math.max(busy, sub) > pausedAt + PROMPT_GRACE_MS) resume()
       if (working && t - busy < capMs) {
         const chat = opts.chat?.()
         if (chat && !since.has(chat)) since.set(chat, busy)
@@ -172,13 +185,7 @@ export function createTyping(opts: {
         pausedAt = now()
       }
     },
-    resume() {
-      if (!paused) return
-      paused = false
-      const held = now() - pausedAt
-      // Activity during the prompt already moved the start; none goes past now.
-      for (const [chatId, began] of since) since.set(chatId, Math.min(began + held, now()))
-    },
+    resume,
     active() {
       return [...since.keys()]
     },
