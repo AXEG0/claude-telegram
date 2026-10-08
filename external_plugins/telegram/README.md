@@ -96,8 +96,9 @@ Telegram shows "typing…" while Claude's turn runs: from an inbound message, an
 for a turn that something else started (the terminal, a finished subagent, a
 scheduled task), in the private chat that last wrote to the bot. Telegram drops
 the indicator after a few seconds or when the bot sends, so the server re-sends
-it while the turn runs. The plugin's hooks mark the session busy on every tool
-call and prompt ([hooks/busy.sh](./hooks/busy.sh)) and record the turn end on
+it while the turn runs. The plugin's hooks mark the session busy on each of
+Claude's own tool calls and prompts ([hooks/busy.sh](./hooks/busy.sh); a
+subagent's work shows in its own message instead) and record the turn end on
 `Stop`, `StopFailure` and `SessionEnd` ([hooks/turn-end.ts](./hooks/turn-end.ts)),
 under `turns/` in the channel's state directory. The indicator holds while a
 permission prompt waits on you, and that wait does not count toward its 30

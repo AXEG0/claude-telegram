@@ -188,6 +188,16 @@ describe('hooks/busy.sh', () => {
     expect(readBusyAt(busyFiles(dir, [4242]))).toBeGreaterThan(0)
   })
 
+  test('a subagent\'s tool call does not count', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'typing-'))
+    const r = Bun.spawnSync(['sh', join(import.meta.dir, 'hooks', 'busy.sh')], {
+      stdin: new TextEncoder().encode('{"hook_event_name":"PreToolUse","agent_id":"a1","agent_type":"Explore"}'),
+      env: { PATH: process.env.PATH!, HOME: process.env.HOME!, TELEGRAM_STATE_DIR: dir, CLAUDE_PID: '4242' },
+    })
+    expect(r.exitCode).toBe(0)
+    expect(readdirSync(dir)).toEqual([])
+  })
+
   test('without CLAUDE_PID it writes nothing and still exits 0', () => {
     const dir = mkdtempSync(join(tmpdir(), 'typing-'))
     expect(run({ TELEGRAM_STATE_DIR: dir }).exitCode).toBe(0)
