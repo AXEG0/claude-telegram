@@ -129,9 +129,10 @@ escaped so that `$HOME/$USER` stays text and not a formula, while code and URLs
 keep theirs; formulas use `<tg-math>` or a ` ```math ` block. A tag Telegram
 would drop, such as the `<String>` in `Vec<String>`, goes out as text.
 
-A long reply goes out in parts cut between top-level blocks, never inside a
-`<details>`, each under 30000 UTF-8 bytes (Telegram cuts rich text near 35000
-bytes without an error) and 400 blocks. A block too big for one part is cut
+A long reply goes out in parts cut between top-level blocks, each under 30000
+UTF-8 bytes (Telegram cuts rich text near 35000 bytes without an error) and 400
+top-level blocks. A `<details>` section stays whole, whatever it holds; one that
+Telegram rejects goes out plain. A block too big for one part is cut
 where Markdown allows it: a code block is closed and reopened, a table repeats
 its header, and a list or quote is cut between its items. Any other block that
 big, and any part Telegram rejects, goes out plain as written. The parsing runs
