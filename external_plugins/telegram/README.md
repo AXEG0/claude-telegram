@@ -4,6 +4,20 @@ Connect a Telegram bot to your Claude Code with an MCP server.
 
 The MCP server logs into Telegram as a bot and provides tools to Claude to reply, react, or edit messages. When you message the bot, the server forwards the message to your Claude Code session.
 
+> This is AXEG0's fork of Anthropic's official Telegram plugin. It adds a typing
+> indicator that lasts the whole turn. Install it from this repo's marketplace and
+> start Claude Code with the development flag, since only Anthropic's own channel
+> plugins pass `--channels` during the research preview:
+>
+> ```
+> /plugin marketplace add AXEG0/claude-telegram
+> /plugin install telegram@claude-telegram
+> claude --dangerously-load-development-channels plugin:telegram@claude-telegram
+> ```
+>
+> It shares `~/.claude/channels/telegram/` with the official plugin, so the token
+> and pairing carry over. Enable one of the two at a time: both poll the same bot.
+
 ## Prerequisites
 
 - [Bun](https://bun.sh) — the MCP server runs on Bun. Install with `curl -fsSL https://bun.sh/install | bash`.
@@ -77,8 +91,15 @@ Quick reference: IDs are **numeric user IDs** (get yours from [@userinfobot](htt
 | `react` | Add an emoji reaction to a message by ID. **Only Telegram's fixed whitelist** is accepted (👍 👎 ❤ 🔥 👀 etc). |
 | `edit_message` | Edit a message the bot previously sent. Useful for "working…" → result progress updates. Only works on the bot's own messages. |
 
-Inbound messages trigger a typing indicator automatically — Telegram shows
-"botname is typing…" while the assistant works on a response.
+Inbound messages start a typing indicator that lasts until Claude's turn ends.
+Telegram drops the indicator after a few seconds or when the bot sends, so the
+server re-sends it while the turn runs. The plugin's `Stop`, `StopFailure` and
+`SessionEnd` hook ([hooks/turn-end.ts](./hooks/turn-end.ts)) records the turn end
+under `~/.claude/channels/telegram/turns/`, which stops it. The indicator holds
+while a permission prompt waits on you, and stops after 30 minutes if no turn end
+arrives. An interrupt (Esc) runs no hook, so after one the indicator lasts until
+the next turn ends or the 30 minutes pass. A message that arrives while Claude is
+busy can land in the next turn, which then shows no indicator.
 
 ## Photos
 
