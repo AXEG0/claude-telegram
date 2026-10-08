@@ -28,7 +28,7 @@ export function richEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
 // One line of the server's instructions, which Claude Code cuts at 2048
 // characters; it goes last, so a cut takes it before the access warning.
 export const RICH_INSTRUCTIONS =
-  'Rich messages: reply and edit_message render GitHub Markdown: headings, tables (inline formatting only, up to 20 columns), task lists, code, ' +
+  'Rich messages: replies and edits render GitHub Markdown: headings, tables (inline formatting, up to 20 columns), task lists, code, ' +
   '<details><summary>…</summary>…</details>, ==marked==, ||spoiler||. A literal == or || goes in backticks. Math only as <tg-math>…</tg-math>; a $ stays a dollar sign.'
 
 export const RICH_FORMAT_HELP =
