@@ -61,6 +61,14 @@ describe('richMarkdown', () => {
     expect(richMarkdown('<pre>\n<details>\n$x\n</pre>')).toBe('<pre>\n<details>\n$x\n</pre>')
   })
 
+  test('a tag that ends its line ends the block, as in Telegram: an indented line after it is code', () => {
+    for (const md of [
+      '<details><summary>Out</summary>\n    $ ls $HOME/$USER\n</details>',
+      '<details>\n    $ ls $HOME/$USER\n</details>',
+      '<details><summary>A</summary>\nbody\n</details>\n    $ ls $HOME/$USER',
+    ]) expect(richMarkdown(md)).toBe(md)
+  })
+
   test('a tag Telegram would drop becomes text; HTML it renders or drops stays', () => {
     expect(richMarkdown('Vec<String>, Promise<void> and </T>; <kbd>Ctrl</kbd> <b>b</b>'))
       .toBe('Vec&lt;String>, Promise&lt;void> and &lt;/T>; <kbd>Ctrl</kbd> <b>b</b>')
@@ -121,6 +129,8 @@ describe('richParts', () => {
 
   test('a <details> in code, raw <pre> or prose opens no section', () => {
     const one = { bytes: 1000, blocks: 1 }
+    expect(richParts('<details><summary>Ex</summary>\n```html\n<details>\n```\n</details>\n\na\n\nb', one).map(p => p.plain))
+      .toEqual(['<details><summary>Ex</summary>\n```html\n<details>\n```\n</details>', 'a', 'b'])
     expect(richParts('<pre>\n<details>\n</pre>\n\na\n\nb', one).map(p => p.plain)).toEqual(['<pre>\n<details>\n</pre>', 'a', 'b'])
     expect(richParts('Use <details> for a fold.\n\na\n\nb', one).map(p => p.plain)).toEqual(['Use <details> for a fold.', 'a', 'b'])
     expect(richParts('```\n<details>\n```\n\na\n\nb', one).map(p => p.plain)).toEqual(['```\n<details>\n```', 'a', 'b'])
@@ -130,6 +140,11 @@ describe('richParts', () => {
     const md = ['before', '<details><summary>More</summary>', 'one', 'two', '</details>', 'after'].join('\n\n')
     const parts = richParts(md, { bytes: 1000, blocks: 2 })
     expect(parts.map(p => p.plain)).toEqual(['before', '<details><summary>More</summary>\n\none\n\ntwo\n\n</details>', 'after'])
+  })
+
+  test('text of Unicode spaces is still sent', () => {
+    expect(richParts('\u3000').map(p => p.plain)).toEqual(['\u3000'])
+    expect(richParts('a\n\n\u00a0\n\nb').map(p => p.plain)).toEqual(['a\n\n\u00a0\n\nb'])
   })
 
   test('the parts cover the text once: a bare CR between blocks sends nothing twice', () => {
@@ -189,11 +204,14 @@ describe('richPartsAsync', () => {
     expect(await richPartsAsync('costs $5')).toEqual(richParts('costs $5'))
   })
 
-  test('text the parser has not split in time goes out plain', async () => {
+  test('text the parser has not split in time goes out plain, and the next text splits again', async () => {
     const deep = Array.from({ length: 400 }, (_, i) => ' '.repeat(i * 2) + '- x').join('\n')
     const t = Date.now()
-    expect(await richPartsAsync(deep, undefined, 300)).toEqual([{ plain: deep }])
+    const [stuck, behind] = await Promise.all([richPartsAsync(deep, undefined, 300), richPartsAsync('queued $x')])
+    expect(stuck).toEqual([{ plain: deep }])
+    expect(behind).toEqual([{ plain: 'queued $x' }])
     expect(Date.now() - t).toBeLessThan(2000)
+    expect(await richPartsAsync('next $x')).toEqual(richParts('next $x'))
   })
 })
 

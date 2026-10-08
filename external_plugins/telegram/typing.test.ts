@@ -167,6 +167,19 @@ describe('a subagent\'s tool calls', () => {
     expect(h.capped).toEqual(['42'])
   })
 
+  test('during a permission prompt they hold nothing past the turn\'s end', () => {
+    const h = harness(30 * 60_000)
+    h.typing.start('42')
+    h.advance(5_000)
+    h.typing.pause()
+    for (let i = 0; i < 150; i++) { h.advance(4000); h.subagent(); h.typing.tick() }
+    h.typing.resume()
+    h.advance(90_000); h.endTurn()
+    h.advance(4000); h.typing.tick()
+    expect(h.typing.active()).toEqual([])
+    expect(h.capped).toEqual([])
+  })
+
   test('start nothing, and bring back no turn that has ended', () => {
     const h = harness(60_000, '42')
     h.subagent(); h.advance(100); h.typing.tick()

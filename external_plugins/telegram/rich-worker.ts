@@ -4,9 +4,12 @@ import { richParts } from './rich.ts'
 declare var self: Worker
 
 self.onmessage = (e: MessageEvent) => {
+  const { id, text, limits } = e.data
   try {
-    postMessage({ parts: richParts(e.data.text, e.data.limits) })
+    postMessage({ id, parts: richParts(text, limits) })
   } catch (err) {
-    postMessage({ error: String(err) })
+    postMessage({ id, error: String(err) })
   }
 }
+
+postMessage({ loaded: true })

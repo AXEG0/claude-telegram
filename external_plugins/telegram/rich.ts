@@ -71,10 +71,12 @@ const endOf = (n: Nodes) => n.position?.end.offset ?? 0
 // Telegram reads Markdown inside <details>, while CommonMark reads a line
 // that starts with <details> or <summary> as an HTML block running to the
 // next blank line, so a summary on its own line went out unescaped. The parse
-// therefore reads each such tag as an inert word of the same length, which
-// keeps every line's indentation and so the lists and quotes around it. The
-// tags are found round by round, as each one settles the blocks after it;
-// offsets stay those of md, and the tags are sent as written.
+// therefore reads a tag that ends its line as a blank line, as Telegram ends
+// a block there (an indented line after it is code), and any other tag as an
+// inert word of the same length, which keeps the indentation of the text
+// after it and so the lists and quotes around it. The tags are found round by
+// round, as each one settles the blocks after it; tags in code are dropped.
+// Offsets stay those of md, and the tags are sent as written.
 function parseLikeTelegram(md: string): { root: Root; tags: Tag[] } {
   let root = parse(md)
   const tags: Tag[] = []
@@ -102,14 +104,22 @@ function parseLikeTelegram(md: string): { root: Root; tags: Tag[] } {
     let next = ''
     let at = 0
     for (const t of found) {
-      next += view.slice(at, t.from) + view.slice(t.from, t.to).replace(/[^\r\n]/g, 'x')
+      const tag = view.slice(t.from, t.to)
+      const endsLine = !/[\r\n]/.test(tag) && /^[ \t]*(\r|\n|$)/.test(view.slice(t.to, t.to + 200))
+      next += view.slice(at, t.from) + (endsLine ? ' '.repeat(tag.length - 1) + '\n' : tag.replace(/[^\r\n]/g, 'x'))
       at = t.to
     }
     view = next + view.slice(at)
     tags.push(...found)
     root = parse(view)
   }
-  return { root, tags: tags.sort((a, b) => a.from - b.from) }
+  const code: [number, number][] = []
+  const inCode = (node: Nodes) => {
+    if (node.type === 'code' || node.type === 'inlineCode') code.push([startOf(node), endOf(node)])
+    else if ('children' in node) for (const child of node.children as RootContent[]) inCode(child)
+  }
+  inCode(root)
+  return { root, tags: tags.filter(t => !code.some(([a, b]) => t.from >= a && t.from < b)).sort((a, b) => a.from - b.from) }
 }
 
 // What Telegram would misread in md, by source offset. A $ in text can open a
@@ -270,7 +280,7 @@ function trim(md: string, from: number, to: number): [number, number] {
     if (md[i] === '\n' || md[i] === '\r') from = i + 1
     else if (md[i] !== ' ' && md[i] !== '\t') break
   }
-  while (to > from && /\s/.test(md[to - 1]!)) to--
+  while (to > from && ' \t\r\n'.includes(md[to - 1]!)) to--
   return [from, to]
 }
 
@@ -388,38 +398,93 @@ export function plainFallback(err: unknown): boolean {
 
 // The parser takes seconds on pathological Markdown (400 nested list levels
 // took 5 s), and the server's one thread also polls, types and streams
-// subagents. Parts are therefore computed in a worker, and text it has not
-// split within ms, or failed on, goes out plain as one part.
+// subagents. Parts are therefore computed in one worker for the session (a
+// worker per call leaked half a megabyte each), replaced when a parse
+// overruns ms. Text not split in time, or that the parser fails on, goes out
+// plain as one part. Without a worker, as when its file does not load, parts
+// are computed here.
 export const RICH_PARSE_MS = 5000
 
-export function richPartsAsync(text: string, limits?: Limits, ms = RICH_PARSE_MS): Promise<RichPart[]> {
-  const plain = (why: string): RichPart[] => {
-    process.stderr.write(`telegram channel: rich parse failed, sending plain: ${why}\n`)
-    return [{ plain: text }]
-  }
-  let worker: Worker
+type Pending = { text: string; limits?: Limits; resolve: (parts: RichPart[]) => void }
+const pending = new Map<number, Pending>()
+let worker: Worker | undefined
+let workerLoaded = false
+let workerBroken = false
+let lastId = 0
+
+function plainPart(text: string, why: string): RichPart[] {
+  process.stderr.write(`telegram channel: rich parse failed, sending plain: ${why}\n`)
+  return [{ plain: text }]
+}
+
+function partsHere(text: string, limits?: Limits): RichPart[] {
   try {
-    worker = new Worker(new URL('./rich-worker.ts', import.meta.url).href)
+    return richParts(text, limits)
   } catch (err) {
-    try {
-      return Promise.resolve(richParts(text, limits))
-    } catch (err2) {
-      return Promise.resolve(plain(describe(err2)))
-    }
+    return plainPart(text, describe(err))
   }
-  return new Promise(resolve => {
-    let settled = false
-    const done = (parts: RichPart[]) => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      worker.terminate()
-      resolve(parts)
+}
+
+function stopWorker(settle: (p: Pending) => RichPart[]): void {
+  worker?.terminate()
+  worker = undefined
+  workerLoaded = false
+  const waiting = [...pending.values()]
+  pending.clear()
+  for (const p of waiting) p.resolve(settle(p))
+}
+
+function startWorker(): Worker | undefined {
+  if (worker || workerBroken) return worker
+  try {
+    const w = new Worker(new URL('./rich-worker.ts', import.meta.url).href)
+    w.onmessage = (e: MessageEvent) => {
+      if (e.data.loaded) {
+        workerLoaded = true
+        return
+      }
+      const p = pending.get(e.data.id)
+      if (!p) return
+      pending.delete(e.data.id)
+      p.resolve(e.data.parts ?? plainPart(p.text, String(e.data.error)))
     }
-    const timer = setTimeout(() => done(plain(`no result in ${ms} ms`)), ms)
-    worker.onmessage = (e: MessageEvent) => done(e.data.parts ?? plain(String(e.data.error)))
-    worker.onerror = (e: ErrorEvent) => done(plain(e.message))
-    worker.postMessage({ text, limits })
+    w.onerror = (e: ErrorEvent) => {
+      // A worker that never loaded will not load next time either.
+      if (!workerLoaded) {
+        workerBroken = true
+        process.stderr.write(`telegram channel: rich worker did not load, parsing in the server: ${e.message}\n`)
+        stopWorker(p => partsHere(p.text, p.limits))
+      } else stopWorker(p => plainPart(p.text, e.message))
+    }
+    w.unref()
+    worker = w
+  } catch (err) {
+    workerBroken = true
+    process.stderr.write(`telegram channel: rich worker did not start, parsing in the server: ${describe(err)}\n`)
+  }
+  return worker
+}
+
+export function richPartsAsync(text: string, limits?: Limits, ms = RICH_PARSE_MS): Promise<RichPart[]> {
+  const w = startWorker()
+  if (!w) return Promise.resolve(partsHere(text, limits))
+  const id = ++lastId
+  return new Promise(resolve => {
+    const timer = setTimeout(() => {
+      if (!pending.delete(id)) return
+      resolve(plainPart(text, `no result in ${ms} ms`))
+      // The worker is stuck on this text; what waits behind it goes plain too.
+      stopWorker(p => plainPart(p.text, 'parser restarted'))
+    }, ms)
+    pending.set(id, {
+      text,
+      limits,
+      resolve: parts => {
+        clearTimeout(timer)
+        resolve(parts)
+      },
+    })
+    w.postMessage({ id, text, limits })
   })
 }
 

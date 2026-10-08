@@ -176,7 +176,8 @@ export function createTyping(opts: {
       if (!paused) return
       paused = false
       const held = now() - pausedAt
-      for (const [chatId, began] of since) since.set(chatId, began + held)
+      // Activity during the prompt already moved the start; none goes past now.
+      for (const [chatId, began] of since) since.set(chatId, Math.min(began + held, now()))
     },
     active() {
       return [...since.keys()]
