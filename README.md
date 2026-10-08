@@ -1,97 +1,73 @@
-# Claude Code Plugins Directory
+<div align="center">
 
-A curated directory of high-quality plugins for Claude Code.
+# Telegram for Claude Code
 
-> **⚠️ Important:** Make sure you trust a plugin before installing, updating, or using it. Anthropic does not control what MCP servers, files, or other software are included in plugins and cannot verify that they will work as intended or that they won't change. See each plugin's homepage for more information.
+**Talk to your Claude Code session from Telegram, and watch it work.**
 
-## Structure
+[![Claude Code](https://img.shields.io/badge/Claude_Code-channel_plugin-D97757)](external_plugins/telegram/README.md)
+[![Telegram Bot API](https://img.shields.io/badge/Telegram_Bot_API-10.3-26A5E4?logo=telegram&logoColor=white)](https://core.telegram.org/bots/api)
+[![License](https://img.shields.io/badge/license-Apache_2.0-blue)](LICENSE)
 
-- **`/plugins`** - Internal plugins developed and maintained by Anthropic
-- **`/external_plugins`** - Third-party plugins from partners and the community
+</div>
 
-## Installation
+AXEG0's fork of Anthropic's official Telegram channel plugin. Your bot forwards
+messages into the Claude Code session, and Claude replies, reacts and edits
+through it.
 
-Plugins can be installed directly from this marketplace via Claude Code's plugin system.
+## ✨ Features
 
-To install, run `/plugin install {plugin-name}@claude-plugins-official`
+| Feature | What you get |
+| --- | --- |
+| ⌨️ **Typing for the whole turn** | "typing…" stays on while Claude works, whoever started the turn, and the bot tells you when Claude may be stuck. |
+| 🤖 **Live subagents** | Each subagent gets one message, edited as it runs: its step, time and tokens, then Thinking, Writing and Done. |
+| 📝 **Rich messages** | Headings, tables, task lists, code and collapsible sections render natively in Telegram. |
+| 🎙️ **Voice messages** | Voice notes, audio and video notes reach Claude as text, transcribed by OpenAI. |
+| 📦 **Bursts as one message** | Quick texts, a long paste Telegram split, and a photo with its question arrive together, so Claude answers once. |
+| ↩️ **Reply context** | Claude sees the message you replied to and the part you quoted. |
 
-or browse for the plugin in `/plugin > Discover`
+Plus everything from the official plugin: pairing and allowlists, photos and
+files, reactions, and permission prompts with Allow and Deny buttons.
 
-## Contributing
-
-### Internal Plugins
-
-Internal plugins are developed by Anthropic team members. See `/plugins/example-plugin` for a reference implementation.
-
-### External Plugins
-
-Third-party partners can submit plugins for inclusion in the marketplace. External plugins must meet quality and security standards for approval. To submit a new plugin, use the [plugin directory submission form](https://clau.de/plugin-directory-submission).
-
-## Plugin Structure
-
-Each plugin follows a standard structure:
+## 👀 In the chat
 
 ```
-plugin-name/
-├── .claude-plugin/
-│   └── plugin.json      # Plugin metadata (required)
-├── .mcp.json            # MCP server configuration (optional)
-├── commands/            # Slash commands (optional)
-├── agents/              # Agent definitions (optional)
-├── skills/              # Skill definitions (optional)
-└── README.md            # Documentation
+🤖 general-purpose · Review PRs 3 and 4
+⏳ Checking gate mention and server env · 4m 31s · 85.4k tokens
+
+🤖 Explore · Find the retry logic
+✅ Done in 1m 12s · 41.3k tokens
 ```
 
-## Plugin names are immutable
+## 🚀 Quick start
 
-The `name` field in a marketplace entry is an **immutable slug**. Once a plugin has been published, its `name` must not change — users have it installed under that slug, and renaming it breaks their install with a `plugin-not-found` error.
-
-- To change how a plugin is labeled in the UI, set or update `displayName` instead.
-- If a rename is genuinely unavoidable, add an entry to the top-level `renames` map in `.claude-plugin/marketplace.json` so existing installs auto-migrate:
-
-```json
-"renames": {
-  "old-name": "new-name"
-}
+```sh
+claude plugin marketplace add AXEG0/claude-telegram
+claude plugin install telegram@claude-telegram
+claude --dangerously-load-development-channels plugin:telegram@claude-telegram
 ```
 
-The Claude Code plugin loader reads this map and transparently rewrites the old slug to the new one on the user's next sync.
+Then give the bot its token with `/telegram:configure` and pair your account.
+The [setup guide](external_plugins/telegram/README.md#quick-setup) walks
+through BotFather, the token and pairing. With the official plugin installed,
+disable it first (`claude plugin disable telegram@claude-plugins-official`):
+both share the same token and pairing.
 
-## Skill-bundle plugins
+Turn on the optional features in `~/.claude/channels/telegram/.env`:
 
-When a plugin's source repository ships skills (`SKILL.md` files) without a `.claude-plugin/plugin.json` manifest, the marketplace entry can declare the skills directly using `strict: false` and an explicit `skills` array.
-
-```json
-{
-  "name": "example-bundle",
-  "description": "Brief description of the bundled skills.",
-  "author": { "name": "Author Name" },
-  "category": "development",
-  "source": {
-    "source": "git-subdir",
-    "url": "https://github.com/example-org/sdk.git",
-    "path": "packages/agent-skills",
-    "ref": "main",
-    "sha": "<commit sha>"
-  },
-  "strict": false,
-  "skills": [
-    "./skill-a",
-    "./skill-b",
-    "./skill-c"
-  ],
-  "homepage": "https://github.com/example-org/sdk"
-}
+```sh
+# Rich messages
+TELEGRAM_RICH_MESSAGES=true
+# Voice messages as text
+TELEGRAM_STT_OPENAI_KEY=sk-...
 ```
 
-Each path in `skills` is relative to `source.path` and points at a directory containing a `SKILL.md`. Paths can reach deeper than a single level — for example, `["./libA/skill-1", "./libB/skill-2"]` exposes a curated subset across multiple library subdirectories. Each skill is registered as `<plugin-name>:<skill-name>` in Claude Code.
+## 📖 Docs
 
-For the underlying schema, see [Strict mode](https://code.claude.com/docs/en/plugin-marketplaces) in the marketplace documentation.
+- [Plugin README](external_plugins/telegram/README.md): setup, settings, tools and how each feature behaves.
+- [ACCESS.md](external_plugins/telegram/ACCESS.md): DM policies, groups and allowlists.
 
-## License
+## About
 
-Please see each linked plugin for the relevant LICENSE file.
-
-## Documentation
-
-For more information on developing Claude Code plugins, see the [official documentation](https://code.claude.com/docs/en/plugins).
+Forked from [anthropics/claude-plugins-official](https://github.com/anthropics/claude-plugins-official).
+This marketplace publishes the Telegram plugin; the other directories come from
+the upstream repository. Licensed under [Apache 2.0](LICENSE).
