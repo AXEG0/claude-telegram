@@ -8,15 +8,18 @@ function harness(capMs = 60_000) {
   let t = 1_000
   let ended = 0
   const sent: string[] = []
+  const capped: string[] = []
   const typing = createTyping({
     send: id => sent.push(id),
     turnEndedAt: () => ended,
     now: () => t,
     capMs,
+    onCap: id => capped.push(id),
   })
   return {
     typing,
     sent,
+    capped,
     advance(ms: number) { t += ms },
     endTurn() { ended = t },
   }
@@ -45,12 +48,22 @@ describe('createTyping', () => {
     expect(h.sent).toEqual(['42', '42'])
   })
 
-  test('stops at the cap when no turn end arrives', () => {
+  test('stops at the cap when no turn end arrives, and says so once', () => {
     const h = harness(10_000)
     h.typing.start('42')
     h.advance(10_000); h.typing.tick()
+    h.advance(4000); h.typing.tick()
     expect(h.sent).toEqual(['42'])
+    expect(h.capped).toEqual(['42'])
     expect(h.typing.active()).toEqual([])
+  })
+
+  test('a turn that ends sends no stuck notice', () => {
+    const h = harness(10_000)
+    h.typing.start('42')
+    h.advance(9_000); h.endTurn()
+    h.advance(2_000); h.typing.tick()
+    expect(h.capped).toEqual([])
   })
 
   test('a pause holds typing but keeps the chat, and resume brings it back', () => {

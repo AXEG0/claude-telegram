@@ -24,6 +24,7 @@ import { homedir } from 'os'
 import { execFileSync } from 'child_process'
 import { join, extname, sep } from 'path'
 import { createTyping, findClaudePid, markerFiles, readTurnEnd, REFRESH_MS } from './typing.ts'
+import { STT_KINDS, sttConfig, transcribeTelegramFile } from './stt.ts'
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR
   ?? join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'channels', 'telegram')
@@ -101,8 +102,14 @@ const turnEndFiles = markerFiles(STATE_DIR, process.env.CLAUDE_CODE_SESSION_ID, 
 const typing = createTyping({
   send: chat_id => void bot.api.sendChatAction(chat_id, 'typing').catch(() => {}),
   turnEndedAt: () => readTurnEnd(turnEndFiles),
+  onCap: chat_id => void bot.api
+    .sendMessage(chat_id, '⚠️ No turn end for 30 minutes, so I may be stuck. Typing has stopped.')
+    .catch(() => {}),
 })
 setInterval(() => typing.tick(), REFRESH_MS).unref()
+
+// Speech to text for voice and audio, when a key is set. See stt.ts.
+const STT = sttConfig()
 
 type PendingEntry = {
   senderId: string
@@ -415,7 +422,7 @@ const mcp = new Server(
     instructions: [
       'The sender reads Telegram, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat.',
       '',
-      'Messages from Telegram arrive as <channel source="telegram" chat_id="..." message_id="..." user="..." ts="...">. If the tag has an image_path attribute, Read that file — it is a photo the sender attached. If the tag has attachment_file_id, call download_attachment with that file_id to fetch the file, then Read the returned path. Reply with the reply tool — pass chat_id back. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply, omit reply_to for normal responses.',
+      'Messages from Telegram arrive as <channel source="telegram" chat_id="..." message_id="..." user="..." ts="...">. If the tag has an image_path attribute, Read that file — it is a photo the sender attached. If the tag has transcribed_by, the content is a speech-to-text transcript of a voice or audio message, which can mishear words; audio_path is the recording. If the tag has attachment_file_id, call download_attachment with that file_id to fetch the file, then Read the returned path. Reply with the reply tool — pass chat_id back. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply, omit reply_to for normal responses.',
       '',
       'reply accepts file paths (files: ["/abs/path.png"]) for attachments. Use react to add emoji reactions, and edit_message for interim progress updates. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
       '',
@@ -976,13 +983,20 @@ async function handleInbound(
   }
 
   const imagePath = downloadImage ? await downloadImage() : undefined
+  const speech = STT && attachment && STT_KINDS.has(attachment.kind)
+    ? await transcribeTelegramFile({
+        api: bot.api, token: TOKEN!, inboxDir: INBOX_DIR, cfg: STT,
+        fileId: attachment.file_id, mime: attachment.mime, size: attachment.size,
+      })
+    : undefined
+  const caption = ctx.message?.caption
 
   // image_path goes in meta only — an in-content "[image attached — read: PATH]"
   // annotation is forgeable by any allowlisted sender typing that string.
   mcp.notification({
     method: 'notifications/claude/channel',
     params: {
-      content: text,
+      content: speech ? (caption ? `${caption}\n\n${speech.text}` : speech.text) : text,
       meta: {
         chat_id,
         ...(msgId != null ? { message_id: String(msgId) } : {}),
@@ -990,6 +1004,7 @@ async function handleInbound(
         user_id: String(from.id),
         ts: new Date((ctx.message?.date ?? 0) * 1000).toISOString(),
         ...(imagePath ? { image_path: imagePath } : {}),
+        ...(speech ? { transcribed_by: STT!.model, audio_path: speech.path } : {}),
         ...(attachment ? {
           attachment_kind: attachment.kind,
           attachment_file_id: attachment.file_id,

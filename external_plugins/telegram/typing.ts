@@ -14,7 +14,8 @@ import { homedir } from 'os'
 import { join } from 'path'
 
 export const REFRESH_MS = 4000
-// A turn whose end never reaches the hook (a killed session) stops typing here.
+// A turn whose end never reaches the hook (an interrupt, a hung turn) stops
+// typing here, and onCap tells the chat.
 export const CAP_MS = 30 * 60 * 1000
 
 // The same directory server.ts computes as STATE_DIR, for the hook.
@@ -82,6 +83,7 @@ export type Typing = {
 export function createTyping(opts: {
   send: (chatId: string) => void
   turnEndedAt: () => number
+  onCap?: (chatId: string) => void
   now?: () => number
   capMs?: number
 }): Typing {
@@ -100,8 +102,13 @@ export function createTyping(opts: {
       const ended = opts.turnEndedAt()
       const t = now()
       for (const [chatId, began] of since) {
-        if (ended >= began || t - began >= capMs) {
+        if (ended >= began) {
           since.delete(chatId)
+          continue
+        }
+        if (t - began >= capMs) {
+          since.delete(chatId)
+          opts.onCap?.(chatId)
           continue
         }
         if (!paused) opts.send(chatId)
