@@ -5,8 +5,8 @@ Connect a Telegram bot to your Claude Code with an MCP server.
 The MCP server logs into Telegram as a bot and provides tools to Claude to reply, react, or edit messages. When you message the bot, the server forwards the message to your Claude Code session.
 
 > This is AXEG0's fork of Anthropic's official Telegram plugin. It adds a typing
-> indicator that lasts the whole turn, speech to text for voice messages, and a
-> live message per subagent. Install it from this repo's marketplace and
+> indicator that lasts the whole turn, speech to text for voice messages, a live
+> message per subagent, and rich messages. Install it from this repo's marketplace and
 > start Claude Code with the development flag, since only Anthropic's own channel
 > plugins pass `--channels` during the research preview:
 >
@@ -113,6 +113,19 @@ Inbound photos are downloaded to `~/.claude/channels/telegram/inbox/` and the
 local path is included in the `<channel>` notification so the assistant can
 `Read` it. Telegram compresses photos — if you need the original file, send it
 as a document instead (long-press → Send as File).
+
+## Rich messages
+
+With `TELEGRAM_RICH_MESSAGES=true` in `~/.claude/channels/telegram/.env`, replies
+and edits render as Telegram rich messages (Bot API 10.3): Claude writes GitHub
+Markdown and Telegram shows native headings, tables, task lists, quotes, code
+blocks and collapsible `<details>` sections. The server sends Telegram's own rich
+Markdown through `sendRichMessage` and `editMessageText`, escaping every `$`
+outside code so that prices stay prices; formulas use `<tg-math>` or a ` ```math `
+block. Text over 32768 characters goes out in parts, and a part Telegram rejects
+goes out plain. `format: 'text'` or `'markdownv2'` on a call still picks the old
+modes. Off by default, as some Telegram clients show rich messages as
+unsupported.
 
 ## Subagents
 
