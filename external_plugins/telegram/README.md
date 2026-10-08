@@ -7,11 +7,12 @@ attachments.
 
 This is AXEG0's fork of Anthropic's Telegram plugin. It shows typing for the
 whole turn and tells the chat when Claude may be stuck, streams each subagent as
-a live message, sends replies as Telegram rich messages, transcribes voice
-messages, joins a burst of messages into one, and passes Claude what a message
-replies to. It keeps its state in `~/.claude/channels/telegram/`, the same
-directory as the official plugin, so a token and pairing carry over. Run one of
-the two at a time, as both poll the same bot.
+a live message, joins a burst of messages into one, and passes Claude what a
+message replies to. With rich messages on, it sends replies as Telegram rich
+messages, and with an OpenAI key, it transcribes voice messages. It keeps its
+state in `~/.claude/channels/telegram/`, the same directory as the official
+plugin, so a token and pairing carry over. Run one of the two at a time, as both
+poll the same bot.
 
 ## Prerequisites
 
@@ -59,25 +60,25 @@ This writes `TELEGRAM_BOT_TOKEN=...` to `~/.claude/channels/telegram/.env`. You 
 claude --dangerously-load-development-channels plugin:telegram@claude-telegram
 ```
 
-During the channels research preview, `--channels` loads Anthropic's own channel plugins, and a channel plugin from another marketplace loads through `--dangerously-load-development-channels`. Claude Code asks you to confirm the flag at each start.
+`--channels` loads the channel plugins on Claude Code's approved list, and this plugin loads through `--dangerously-load-development-channels`, which Claude Code asks you to confirm at each start.
 
 **5. Pair.**
 
-With Claude Code running from the previous step, DM your bot on Telegram. It replies with a pairing code; a bot that stays silent means the session runs without the flag from step 4. In your Claude Code session:
+With Claude Code running from the previous step, DM your bot on Telegram. It replies with a pairing code. When the bot stays silent, check that the session runs with the flag from step 4 and that the official plugin is disabled. In your Claude Code session:
 
 ```
 /telegram:access pair <code>
 ```
 
-Your next DM reaches Claude. Telegram bots accept DMs right away, and pairing looks up your numeric user ID for you.
+Your next DM reaches Claude. Pairing looks up your numeric user ID for you.
 
 **6. Lock it down.**
 
-Pairing is for capturing IDs. Once you're in, switch to `allowlist`, so that strangers get no pairing-code replies. Ask Claude to do it, or run `/telegram:access policy allowlist` directly.
+Pairing is for capturing IDs. Once you're in, switch to `allowlist`, so that strangers get no pairing-code replies. Ask Claude in your terminal session, or run `/telegram:access policy allowlist` directly.
 
 ## Configuration
 
-The server reads `~/.claude/channels/telegram/.env` when it starts, so a change takes effect after `/reload-plugins` or a session restart. A variable set in the shell environment takes precedence over the file.
+The server reads `.env` in its state directory when it starts, so a change takes effect after `/reload-plugins` or a session restart. The state directory is `~/.claude/channels/telegram/`, or `channels/telegram/` under `CLAUDE_CONFIG_DIR` when that is set, or `TELEGRAM_STATE_DIR`. The file holds one `NAME=value` per line, with the value unquoted. A variable set in the shell environment takes precedence over the file.
 
 | Variable | Effect |
 | --- | --- |
@@ -99,22 +100,27 @@ Quick reference: IDs are **numeric user IDs** (get yours from [@userinfobot](htt
 
 | Tool | Purpose |
 | --- | --- |
-| `reply` | Sends to a chat. Takes `chat_id` and `text`, with `reply_to` (a message ID) for native threading and `files` (absolute paths) for attachments. Images (`.jpg`/`.png`/`.gif`/`.webp`) go as photos with an inline preview, other files as documents, up to 50MB each, after the text. `format` picks `rich`, `text` or `markdownv2`; the default is `rich` with rich messages on and `text` otherwise. Long text goes out in several messages. Returns the sent message IDs. |
+| `reply` | Sends to a chat. Takes `chat_id` and `text`, with `reply_to` (a message ID) for native threading and `files` (absolute paths) for attachments. Images (`.jpg`/`.jpeg`/`.png`/`.gif`/`.webp`) go as photos with an inline preview, other files as documents, up to 50MB each, after the text. `format` picks `text` or `markdownv2`, and with rich messages on also `rich`, which is then the default. Long text goes out in several messages. Returns the sent message IDs. |
 | `react` | Adds an emoji reaction to a message by ID, from Telegram's fixed set of reaction emoji (👍 👎 ❤ 🔥 👀 and others). |
 | `download_attachment` | Downloads an attachment by the `attachment_file_id` on its message to the inbox and returns the local path. Telegram serves bot downloads up to 20MB. |
-| `edit_message` | Edits a message the bot sent, for progress updates such as "working…" turning into the result. Takes the same `format` as `reply`. An edit sends no notification, so a finished task gets a new reply. |
+| `edit_message` | Edits a message the bot sent, for progress updates such as "working…" turning into the result. Takes the same `format` as `reply`. An edit stays one message, so longer text goes in a new reply, and an edit sends no notification, so a finished task gets a new reply too. |
 
 ## Messages Claude receives
 
-Each message reaches Claude as a `<channel source="telegram" chat_id="…" message_id="…" user="…" ts="…">` tag around its text, with further attributes for what it carries.
+Texts, photos, files, voice and audio, videos, video notes and stickers reach
+Claude as a `<channel source="telegram" chat_id="…" message_id="…" user="…" user_id="…" ts="…">`
+tag around the message's text or caption, with further attributes for what the
+message carries.
 
 ### Photos and files
 
-Photos download on arrival to `~/.claude/channels/telegram/inbox/`, and
+Photos download on arrival to the inbox, `inbox/` in the state directory, and
 `image_path` on the tag gives Claude the file to `Read`. Telegram compresses
-photos; to pass the original, send it as a file (long-press → Send as File). A
-document, video or other file arrives as `attachment_file_id` with its kind,
-name, type and size, and Claude fetches it with `download_attachment`.
+photos; to pass the original, send it as a file (long-press → Send as File).
+A document, video, video note or sticker, and a voice note or audio file that
+goes untranscribed, arrives with `attachment_file_id` and `attachment_kind`,
+plus `attachment_name`, `attachment_mime` and `attachment_size` when Telegram
+gives them, and Claude fetches it with `download_attachment`.
 
 ### Voice messages
 
@@ -130,26 +136,30 @@ holds the messages after it.
 
 ### Bursts
 
-Messages one sender sends in quick succession reach Claude as one, so Claude
-answers the burst once rather than its first message alone. Texts join with
-line breaks, a long paste that Telegram split into pieces joins back whole, and
-photos join their album or the question sent with them. The message carries the
-last message's ID, every ID in `message_ids`, the first reply context, and every
-photo in `image_paths`, with the first in `image_path`. A batch goes out a
-moment after its last message, at once when it is full, and a few seconds after
-its first message at the latest. A document, voice note or command sends the
-waiting batch first and then goes alone. A message from another sender in the
-chat, or one that replies to a different message, sends the waiting batch first
-and starts its own.
+Texts and photos one sender sends in quick succession reach Claude as one
+message, so Claude answers the burst once rather than its first message alone.
+Texts join with line breaks, a long paste that Telegram split into pieces joins
+back whole, and photos join their album or the question sent with them. The
+joined message carries the last message's ID, every ID in `message_ids`, and the
+first reply context. Its first photo is in `image_path`, and with several
+photos, every photo is in `image_paths`, comma-separated.
+
+A batch goes out a moment after its last message, at once when it reaches its
+message limit, and a few seconds after its first message at the latest. A
+message that would take it past its size limit starts a new batch. Any other
+message (a file, voice note, video, sticker, or a text starting with `/`) sends
+the waiting batch first and then goes alone. A message from another sender in
+the chat, or one replying to a different message than an earlier reply in the
+batch, sends the waiting batch first and starts its own.
 
 ### Replies and quotes
 
-A message that replies to another carries what it replies to on the tag, as
-Telegram sends it: `reply_to_message_id`, `reply_to_user` (`this bot` for the
-bot's own messages), `reply_to_text` shortened to 300 characters,
-`reply_to_kind` for a photo, voice note or other media, and `reply_quote` for
-the part the sender highlighted. A reply to one of the bot's rich messages
-carries the text of its blocks.
+A message that replies to another carries what it replies to on the tag:
+`reply_to_message_id`, `reply_to_user` (`this bot` for the bot's own messages),
+`reply_to_text` on one line and shortened to 300 characters, `reply_to_kind`
+for a photo, voice note or other media, and `reply_quote` for the part the
+sender highlighted. A reply to one of the bot's rich messages carries the text
+of its blocks.
 
 ## What the chat shows
 
@@ -157,30 +167,31 @@ carries the text of its blocks.
 
 Telegram shows "typing…" while Claude's turn runs: from an inbound message, and
 for a turn something else started (the terminal, a finished subagent, a
-scheduled task) in the private chat that last wrote to the bot. Telegram drops
-the indicator after a few seconds or when the bot sends, so the server re-sends
-it while the turn runs.
+scheduled task) in the private chat that last wrote to the bot since the server
+started. Telegram drops the indicator after a few seconds or when the bot sends,
+so the server re-sends it while the turn runs.
 
 The plugin's hooks mark the session busy on each of Claude's tool calls and
 prompts ([hooks/busy.ts](./hooks/busy.ts)) and record the turn's end on `Stop`,
 `StopFailure` and `SessionEnd` ([hooks/turn-end.ts](./hooks/turn-end.ts)), under
-`turns/` in the state directory. A subagent's tool calls count as activity for
-the turn that waits on it, and the subagent's own work shows in its
-[own message](#subagents).
+`turns/` in the state directory. A subagent's tool calls start no typing, as the
+subagent's work shows in its [own message](#subagents); they count as activity
+for the turn that waits on the subagent.
 
-The indicator pauses while a permission prompt waits on you and resumes with
-the answer. After 30 minutes with neither activity nor a turn end, leaving out
-the time a prompt waited, the indicator stops and the bot tells the chat that Claude may be stuck or was
-interrupted. An interrupt (Esc) runs no hook, so after one the indicator lasts
-until the next turn ends or the 30 minutes pass. A message that arrives while
-Claude is busy can land in the next turn.
+The indicator pauses while a permission prompt waits on you, and resumes when
+you answer in Telegram or at Claude's next call to one of this plugin's tools.
+After 30 minutes with neither activity nor a turn end, leaving out the time a
+prompt waited, the indicator stops and the bot tells the chat that Claude may be
+stuck or was interrupted. An interrupt (Esc) runs no hook, so after one the
+indicator lasts until the next turn ends or the 30 minutes pass. A message that
+arrives while Claude is busy can wait for the next turn.
 
 ### Permission prompts
 
 When Claude Code asks permission for a tool call, the bot sends the request to
 every allowlisted DM with **See more** for the tool's input and **✅ Allow** /
-**❌ Deny** buttons. The answer goes to Claude Code, and the message keeps the
-outcome.
+**❌ Deny** buttons. An answer in Telegram goes to Claude Code, and the message
+you tapped keeps the outcome.
 
 ### Subagents
 
@@ -205,7 +216,7 @@ The messages go, without a notification, to the private chat that last wrote to
 the bot since the server started. All subagents in a chat share one edit budget,
 a message's clock moves while nothing else changes, and a rate limit holds the
 chat for as long as Telegram asks. A subagent whose transcript stays unchanged
-for 30 minutes shows as quiet until its stop arrives.
+for 30 minutes shows as quiet until its stop arrives, for up to two hours.
 
 ### Rich messages
 
@@ -215,16 +226,16 @@ tables, task lists, quotes, code blocks and collapsible `<details>` sections.
 The server parses the Markdown as Telegram reads it, Markdown inside `<details>`
 included, and sends it through `sendRichMessage` and `editMessageText`. A `$` in
 text goes out escaped, so `$HOME/$USER` stays text rather than a formula, while
-code and URLs keep theirs; formulas use `<tg-math>` or a ` ```math ` block. A
-tag Telegram would drop, such as the `<String>` in `Vec<String>`, goes out as
-text.
+code and URLs keep theirs; formulas go in `<tg-math>`. A tag that is not HTML,
+such as the `<String>` in `Vec<String>`, goes out as text.
 
 A long reply goes out in parts cut between top-level blocks, each within the
-size Telegram renders whole. A `<details>` section stays whole, whatever it
-holds. A block too big for one part is cut where Markdown allows it: a code
-block is closed and reopened, a table repeats its header, and a list or quote is
-cut between its items. Any other block that big, and any part Telegram rejects,
-goes out plain as written. The parsing runs in a worker, so the bot keeps
+size and block count Telegram renders whole. A `<details>` section stays in one
+part, and one too big for a part goes out plain. A block too big for one part is
+cut where Markdown allows it: a code block is closed and reopened, a table
+repeats its header, and a list or quote is cut between its items. Any other
+block that big, and any part Telegram refuses as invalid, goes out plain as
+written, in ordinary messages. The parsing runs in a worker, so the bot keeps
 polling meanwhile, and text the worker has not split within a few seconds goes
 out plain. `format: 'text'` or `'markdownv2'` on a call picks those modes
 instead. Rich messages are off by default, as some Telegram clients show them as
@@ -234,5 +245,5 @@ unsupported.
 
 Telegram's Bot API offers neither message history nor search, so the bot sees
 messages as they arrive. When Claude needs earlier context, it asks you to paste
-or summarise it. Photos download on arrival for the same reason, and other files
-stay fetchable through their `attachment_file_id`.
+or summarize it. Photos download on arrival, so that Claude can `Read` them at
+once, and other files download on request through their `attachment_file_id`.
