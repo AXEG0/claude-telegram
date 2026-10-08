@@ -2,11 +2,12 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync, readdirSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { ancestorPids, createTyping, markerFiles, readTurnEnd, writeTurnEnd } from './typing.ts'
+import { ancestorPids, busyFiles, createTyping, markerFiles, readBusyAt, readTurnEnd, writeTurnEnd } from './typing.ts'
 
-function harness(capMs = 60_000) {
+function harness(capMs = 60_000, chat?: string) {
   let t = 1_000
   let ended = 0
+  let busy = 0
   const sent: string[] = []
   const capped: string[] = []
   const typing = createTyping({
@@ -15,6 +16,8 @@ function harness(capMs = 60_000) {
     now: () => t,
     capMs,
     onCap: id => capped.push(id),
+    busyAt: () => busy,
+    chat: () => chat,
   })
   return {
     typing,
@@ -22,6 +25,7 @@ function harness(capMs = 60_000) {
     capped,
     advance(ms: number) { t += ms },
     endTurn() { ended = t },
+    work() { busy = t },
   }
 }
 
@@ -113,6 +117,42 @@ describe('createTyping', () => {
   })
 })
 
+describe('typing for a turn no message started', () => {
+  test('types into the last chat while the session is busy, until the turn ends', () => {
+    const h = harness(60_000, '42')
+    h.work()
+    h.advance(100); h.typing.tick()
+    h.advance(4000); h.work(); h.typing.tick()
+    expect(h.sent).toEqual(['42', '42'])
+    h.advance(1000); h.endTurn()
+    h.advance(4000); h.typing.tick()
+    expect(h.sent.length).toBe(2)
+    expect(h.typing.active()).toEqual([])
+  })
+
+  test('activity from before the last turn end starts nothing', () => {
+    const h = harness(60_000, '42')
+    h.work(); h.advance(10); h.endTurn()
+    h.advance(4000); h.typing.tick()
+    expect(h.sent).toEqual([])
+  })
+
+  test('the cap counts from the last activity', () => {
+    const h = harness(10_000, '42')
+    h.work(); h.typing.tick()
+    for (let i = 0; i < 5; i++) { h.advance(4000); h.work(); h.typing.tick() }
+    expect(h.capped).toEqual([])
+    h.advance(10_000); h.typing.tick()
+    expect(h.capped).toEqual(['42'])
+  })
+
+  test('nothing without a chat', () => {
+    const h = harness(60_000)
+    h.work(); h.advance(10); h.typing.tick()
+    expect(h.sent).toEqual([])
+  })
+})
+
 describe('turn-end markers', () => {
   test('one file per session id and per Claude Code pid', () => {
     expect(markerFiles('/s', 'abc-123', [4242, 99])).toEqual(['/s/turns/session-abc-123', '/s/turns/pid-4242', '/s/turns/pid-99'])
@@ -133,6 +173,25 @@ describe('turn-end markers', () => {
     writeTurnEnd([a!], 5)
     writeTurnEnd([b!], 9)
     expect(readTurnEnd([a!, b!])).toBe(9)
+  })
+})
+
+describe('hooks/busy.sh', () => {
+  const run = (env: Record<string, string>) => Bun.spawnSync(['sh', join(import.meta.dir, 'hooks', 'busy.sh')], {
+    stdin: new TextEncoder().encode('{"hook_event_name":"PreToolUse"}'),
+    env: { PATH: process.env.PATH!, HOME: process.env.HOME!, ...env },
+  })
+
+  test('touches busy-<Claude Code pid>', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'typing-'))
+    expect(run({ TELEGRAM_STATE_DIR: dir, CLAUDE_PID: '4242' }).exitCode).toBe(0)
+    expect(readBusyAt(busyFiles(dir, [4242]))).toBeGreaterThan(0)
+  })
+
+  test('without CLAUDE_PID it writes nothing and still exits 0', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'typing-'))
+    expect(run({ TELEGRAM_STATE_DIR: dir }).exitCode).toBe(0)
+    expect(readdirSync(dir)).toEqual([])
   })
 })
 

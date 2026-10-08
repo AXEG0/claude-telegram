@@ -1,5 +1,5 @@
 {
-  "description": "Marks the end of each turn, and the start and stop of each subagent, for the Telegram server's typing indicator and subagent stream",
+  "description": "Marks when this session is busy, when each turn ends, and when each subagent starts and stops, for the Telegram server's typing indicator and subagent stream",
   "hooks": {
     "Stop": [
       {
@@ -57,6 +57,30 @@
             "command": "bun \"${CLAUDE_PLUGIN_ROOT}/hooks/subagent.ts\"",
             "async": true,
             "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/busy.sh\"",
+            "async": true,
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/busy.sh\"",
+            "async": true,
+            "timeout": 5
           }
         ]
       }

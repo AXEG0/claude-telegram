@@ -1,4 +1,5 @@
-// Keeps Telegram's "typing…" on from an inbound message until Claude's turn
+// Keeps Telegram's "typing…" on while Claude's turn runs: from an inbound
+// message, or from any tool call or prompt in this session, until the turn
 // ends. Telegram clears the indicator after about 5 seconds, or as soon as
 // the bot sends a message, so it is re-sent every REFRESH_MS while the turn
 // runs. The plugin's Stop, StopFailure and SessionEnd hook (hooks/turn-end.ts)
@@ -9,13 +10,13 @@
 // before `bun install` has run.
 
 import { execFileSync } from 'child_process'
-import { mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { mkdirSync, readFileSync, statSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 
 export const REFRESH_MS = 4000
 // A turn whose end never reaches the hook (an interrupt, a hung turn) stops
-// typing here, and onCap tells the chat.
+// typing this long after its last activity, and onCap tells the chat.
 export const CAP_MS = 30 * 60 * 1000
 
 // The same directory server.ts computes as STATE_DIR, for the hook.
@@ -40,6 +41,22 @@ export function writeTurnEnd(files: string[], at: number = Date.now()): void {
     mkdirSync(join(f, '..'), { recursive: true, mode: 0o700 })
     writeFileSync(f, String(at))
   }
+}
+
+// hooks/busy.sh touches busy-<Claude Code pid> on every tool call and prompt.
+export function busyFiles(dir: string, pids: number[]): string[] {
+  return pids.filter(pid => pid > 1).map(pid => join(dir, 'turns', `busy-${pid}`))
+}
+
+export function readBusyAt(files: string[]): number {
+  let latest = 0
+  for (const f of files) {
+    try {
+      const at = statSync(f).mtimeMs
+      if (at > latest) latest = at
+    } catch {}
+  }
+  return latest
 }
 
 export function readTurnEnd(files: string[]): number {
@@ -91,6 +108,10 @@ export function createTyping(opts: {
   send: (chatId: string) => void
   turnEndedAt: () => number
   onCap?: (chatId: string) => void
+  // The last activity in this session, and the chat to type into for a turn
+  // no message started.
+  busyAt?: () => number
+  chat?: () => string | undefined
   now?: () => number
   capMs?: number
 }): Typing {
@@ -106,10 +127,18 @@ export function createTyping(opts: {
       if (!paused) opts.send(chatId)
     },
     tick() {
-      if (since.size === 0) return
       const ended = opts.turnEndedAt()
+      const busy = opts.busyAt?.() ?? 0
       const t = now()
-      for (const [chatId, began] of since) {
+      const working = busy > ended
+      if (working && t - busy < capMs) {
+        const chat = opts.chat?.()
+        if (chat && !since.has(chat)) since.set(chat, busy)
+      }
+      if (since.size === 0) return
+      for (let [chatId, began] of since) {
+        // Activity moves the start forward, so the cap counts from the last of it.
+        if (working && busy > began) since.set(chatId, (began = busy))
         if (ended >= began) {
           since.delete(chatId)
           continue

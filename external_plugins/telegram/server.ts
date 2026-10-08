@@ -23,7 +23,7 @@ import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, 
 import { homedir } from 'os'
 import { execFileSync } from 'child_process'
 import { join, extname, sep } from 'path'
-import { ancestorPids, createTyping, markerFiles, readTurnEnd, REFRESH_MS } from './typing.ts'
+import { ancestorPids, busyFiles, createTyping, markerFiles, readBusyAt, readTurnEnd, REFRESH_MS } from './typing.ts'
 import { STT_KINDS, sttConfig, transcribeTelegramFile } from './stt.ts'
 import { AGENT_TICK_MS, agentEventFile, createAgentStream, createEventReader } from './agents.ts'
 
@@ -101,9 +101,14 @@ let botUsername = ''
 // "typing…" for the whole turn, not Telegram's 5 seconds. See typing.ts.
 const ancestors = ancestorPids()
 const turnEndFiles = markerFiles(STATE_DIR, process.env.CLAUDE_CODE_SESSION_ID, ancestors)
+const busyMarkers = busyFiles(STATE_DIR, ancestors)
+// The private chat that last wrote: typing for turns it did not start, and subagents.
+let lastChat: string | undefined
 const typing = createTyping({
   send: chat_id => void bot.api.sendChatAction(chat_id, 'typing').catch(() => {}),
   turnEndedAt: () => readTurnEnd(turnEndFiles),
+  busyAt: () => readBusyAt(busyMarkers),
+  chat: () => lastChat,
   onCap: chat_id => void bot.api
     .sendMessage(chat_id, '⚠️ No turn end seen in 30 minutes: Claude may be stuck, or was interrupted. Typing has stopped.')
     .catch(() => {}),
@@ -111,9 +116,8 @@ const typing = createTyping({
 setInterval(() => typing.tick(), REFRESH_MS).unref()
 
 // Subagents, streamed to the private chat of the last inbound message. See agents.ts.
-let lastChat: string | undefined
 const agentStream = createAgentStream({
-  readEvents: createEventReader(ancestors.map(pid => agentEventFile(STATE_DIR, pid))),
+  readEvents: createEventReader(ancestors.map(pid => agentEventFile(STATE_DIR, pid)), false),
   chat: () => lastChat,
   send: async (chat_id, text) =>
     (await bot.api.sendMessage(chat_id, text, { disable_notification: true })).message_id,

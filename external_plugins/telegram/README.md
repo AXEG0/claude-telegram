@@ -92,17 +92,20 @@ Quick reference: IDs are **numeric user IDs** (get yours from [@userinfobot](htt
 | `react` | Add an emoji reaction to a message by ID. **Only Telegram's fixed whitelist** is accepted (👍 👎 ❤ 🔥 👀 etc). |
 | `edit_message` | Edit a message the bot previously sent. Useful for "working…" → result progress updates. Only works on the bot's own messages. |
 
-Inbound messages start a typing indicator that lasts until Claude's turn ends.
-Telegram drops the indicator after a few seconds or when the bot sends, so the
-server re-sends it while the turn runs. The plugin's `Stop`, `StopFailure` and
-`SessionEnd` hook ([hooks/turn-end.ts](./hooks/turn-end.ts)) records the turn end
-under `~/.claude/channels/telegram/turns/`, which stops it. The indicator holds
-while a permission prompt waits on you, and that wait does not count toward its
-30 minutes. After 30 minutes without a turn end it stops, and the bot tells the
-chat that Claude may be stuck or was interrupted. An interrupt (Esc)
+Telegram shows "typing…" while Claude's turn runs: from an inbound message, and
+for a turn that something else started (the terminal, a finished subagent, a
+scheduled task), in the private chat that last wrote to the bot. Telegram drops
+the indicator after a few seconds or when the bot sends, so the server re-sends
+it while the turn runs. The plugin's hooks mark the session busy on every tool
+call and prompt ([hooks/busy.sh](./hooks/busy.sh)) and record the turn end on
+`Stop`, `StopFailure` and `SessionEnd` ([hooks/turn-end.ts](./hooks/turn-end.ts)),
+under `turns/` in the channel's state directory. The indicator holds while a
+permission prompt waits on you, and that wait does not count toward its 30
+minutes. After 30 minutes without activity or a turn end it stops, and the bot
+tells the chat that Claude may be stuck or was interrupted. An interrupt (Esc)
 runs no hook, so after one the indicator lasts until the next turn ends or the
 30 minutes pass. A message that arrives while Claude is busy can land in the
-next turn, which then shows no indicator.
+next turn.
 
 ## Photos
 
@@ -123,11 +126,16 @@ while it runs, the way the CLI shows it:
 
 and ends as `✅ Done in 6m 10s · 89.8k tokens`. The plugin's `SubagentStart` and
 `SubagentStop` hook ([hooks/subagent.ts](./hooks/subagent.ts)) records each
-subagent under `~/.claude/channels/telegram/agents/`, and the server reads the
-subagent's own transcript for its current step and context size, and its meta
-file for its description. Messages go to the private chat that last wrote to the
-bot, without a notification, and only once someone has written since the server
-started.
+subagent under `agents/` in the channel's state directory, and the server reads
+the subagent's own transcript for its current step and context size, and its
+meta file for its description. A step shows the tool call's own description, or
+the tool with a file name or search pattern; commands, URLs and queries stay on
+the box. Messages go, without a notification, to the private chat that last
+wrote to the bot, from the first message after the server starts. All subagents
+in a chat share one edit every 3 seconds, a message's clock moves every 30
+seconds when nothing else changes, and a rate limit holds the chat for as long as
+Telegram asks. A subagent whose transcript stays unchanged for 30 minutes shows
+as quiet until its stop arrives.
 
 ## Voice messages
 

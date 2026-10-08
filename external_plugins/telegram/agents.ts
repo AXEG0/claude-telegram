@@ -17,11 +17,17 @@ import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync, readSync,
 import { join } from 'path'
 
 export const AGENT_TICK_MS = 3000
-// Telegram limits edits per chat; one edit per subagent at most this often.
-export const AGENT_EDIT_MS = 5000
-// A subagent whose stop never arrives, and whose transcript stops growing,
-// is closed after this long.
+// Telegram limits messages per chat, so all subagents in a chat share one
+// budget: one send or edit per this gap.
+export const CHAT_GAP_MS = 3000
+// With no new step or token count, a message is edited only this often, to
+// move its clock.
+export const CLOCK_REFRESH_MS = 30_000
+// A subagent whose transcript has not changed for this long is shown as quiet;
+// its stop still closes it.
 export const AGENT_STALE_MS = 30 * 60 * 1000
+// After this long quiet, a subagent is dropped without a stop.
+export const AGENT_DROP_MS = 2 * 60 * 60 * 1000
 const TAIL_BYTES = 256 * 1024
 
 export type AgentEvent = {
@@ -53,9 +59,12 @@ export function eventFromHook(input: {
   const event = input.hook_event_name === 'SubagentStart' ? 'start'
     : input.hook_event_name === 'SubagentStop' ? 'stop' : undefined
   if (!event || !input.agent_id || !/^[\w-]+$/.test(input.agent_id)) return undefined
-  const base = input.transcript_path?.endsWith('.jsonl')
-    ? join(input.transcript_path.slice(0, -'.jsonl'.length), 'subagents', `agent-${input.agent_id}`)
-    : undefined
+  const tp = input.transcript_path
+  // A nested subagent's hook may name its parent subagent's transcript, which
+  // already sits in the session's flat subagents directory.
+  const base = !tp?.endsWith('.jsonl') ? undefined
+    : /[\\/]subagents[\\/]agent-[^\\/]+\.jsonl$/.test(tp) ? join(tp, '..', `agent-${input.agent_id}`)
+    : join(tp.slice(0, -'.jsonl'.length), 'subagents', `agent-${input.agent_id}`)
   return { t: now, event, agent_id: input.agent_id, agent_type: input.agent_type, agent_base: base }
 }
 
@@ -135,14 +144,15 @@ export function progressFromTranscript(text: string): Progress {
   return p
 }
 
+// The tool call's own description when it has one. Otherwise the tool name,
+// with only a file's name or a search pattern beside it: commands, URLs and
+// queries can carry credentials and never leave the box.
 function stepFor(tool: string, input: Record<string, unknown>): string {
   if (typeof input.description === 'string' && input.description.trim()) return oneLine(input.description)
-  const target = ['file_path', 'path', 'pattern', 'url', 'query', 'command']
-    .map(k => input[k])
-    .find(v => typeof v === 'string' && v.trim()) as string | undefined
-  if (!target) return tool
-  const short = target.includes('/') && !target.includes(' ') ? target.split('/').filter(Boolean).pop() ?? target : target
-  return `${tool} ${oneLine(short)}`
+  const file = [input.file_path, input.path, input.notebook_path].find(v => typeof v === 'string' && v.trim()) as string | undefined
+  if (file) return `${tool} ${oneLine(file.split(/[\\/]/).filter(Boolean).pop() ?? '', 60)}`
+  if ((tool === 'Grep' || tool === 'Glob') && typeof input.pattern === 'string') return `${tool} ${oneLine(input.pattern, 40)}`
+  return tool
 }
 
 function oneLine(s: string, max = 80): string {
@@ -170,13 +180,17 @@ type Agent = {
   type: string
   base?: string
   description?: string
-  chatId: string
+  chatId?: string
   started: number
   progress: Progress
+  quietSince: number
   done?: number
   msgId?: number
+  // The message can no longer be edited, or sending keeps failing.
+  gone?: boolean
+  failures: number
   sending?: boolean
-  sentText?: string
+  sentKey?: string
   lastEdit: number
 }
 
@@ -184,23 +198,41 @@ export function render(a: Agent, now: number): string {
   const head = `🤖 ${a.type}${a.description ? ` · ${oneLine(a.description)}` : ''}`
   const tokens = a.progress.tokens ? ` · ${formatTokens(a.progress.tokens)} tokens` : ''
   if (a.done) return `${head}\n✅ Done in ${formatDuration(a.done - a.started)}${tokens}`
-  return `${head}\n⏳ ${a.progress.step ?? 'Starting…'} · ${formatDuration(now - a.started)}${tokens}`
+  const step = a.progress.step ?? 'Starting…'
+  if (now - a.quietSince > AGENT_STALE_MS) {
+    return `${head}\n⚠️ No activity for ${formatDuration(now - a.quietSince)} · last: ${step}${tokens}`
+  }
+  return `${head}\n⏳ ${step} · ${formatDuration(now - a.started)}${tokens}`
+}
+
+// What the message says apart from its clock.
+function contentKey(a: Agent, now: number): string {
+  return JSON.stringify([a.type, a.description, a.progress.step, a.progress.tokens, a.done,
+    now - a.quietSince > AGENT_STALE_MS])
 }
 
 export type AgentStream = { tick(): void; agents(): Agent[] }
 
+type ApiError = { description?: string; parameters?: { retry_after?: number } }
+
 export function createAgentStream(opts: {
   readEvents: () => AgentEvent[]
-  // The private chat to stream into, or undefined to stream nothing.
+  // The private chat to stream into, or undefined while there is none.
   chat: () => string | undefined
   send: (chatId: string, text: string) => Promise<number | undefined>
   edit: (chatId: string, msgId: number, text: string) => Promise<void>
   readFile?: (path: string) => string | undefined
+  mtime?: (path: string) => number | undefined
   now?: () => number
 }): AgentStream {
   const now = opts.now ?? Date.now
   const readFile = opts.readFile ?? tailOf
+  const mtime = opts.mtime ?? mtimeOf
   const agents = new Map<string, Agent>()
+  // Stops whose start has not been read yet: the two hooks run concurrently.
+  const earlyStops = new Map<string, number>()
+  const chatNext = new Map<string, number>()
+  let first = true
 
   function refresh(a: Agent) {
     if (!a.base) return
@@ -211,28 +243,39 @@ export function createAgentStream(opts: {
         if (typeof meta.agentType === 'string' && a.type === 'agent') a.type = meta.agentType
       } catch {}
     }
-    const tail = readFile(`${a.base}.jsonl`)
-    if (tail) a.progress = { ...a.progress, ...definedOnly(progressFromTranscript(tail)) }
+    const m = mtime(`${a.base}.jsonl`)
+    if (m && m > a.quietSince) {
+      a.quietSince = m
+      const tail = readFile(`${a.base}.jsonl`)
+      if (tail) a.progress = { ...a.progress, ...definedOnly(progressFromTranscript(tail)) }
+    }
   }
 
   function flush(a: Agent, t: number) {
-    if (a.sending) return
-    const text = render(a, t)
-    if (text === a.sentText) return
-    if (!a.done && a.msgId !== undefined && t - a.lastEdit < AGENT_EDIT_MS) return
+    if (a.sending || a.gone || !a.chatId) return
+    const key = contentKey(a, t)
+    if (key === a.sentKey && (a.done || t - a.lastEdit < CLOCK_REFRESH_MS)) return
+    const chatId = a.chatId
+    if (t < (chatNext.get(chatId) ?? 0)) return
+    chatNext.set(chatId, t + CHAT_GAP_MS)
     a.sending = true
     a.lastEdit = t
-    const finish = () => { a.sending = false }
+    const text = render(a, t)
+    const ok = () => { a.sentKey = key; a.failures = 0 }
+    const fail = (err: unknown) => {
+      const e = (err ?? {}) as ApiError
+      const desc = String(e.description ?? err)
+      if (/message is not modified/i.test(desc)) return ok()
+      a.lastEdit = 0 // retry once the chat allows, not at the next clock refresh
+      const retry = e.parameters?.retry_after
+      if (retry) chatNext.set(chatId, now() + retry * 1000)
+      if (/message to edit not found|message can't be edited/i.test(desc) || ++a.failures >= 5) a.gone = true
+    }
+    const done = () => { a.sending = false }
     if (a.msgId === undefined) {
-      opts.send(a.chatId, text)
-        .then(id => { a.msgId = id; a.sentText = text })
-        .catch(() => {})
-        .finally(finish)
+      opts.send(chatId, text).then(id => { a.msgId = id; ok() }, fail).finally(done)
     } else {
-      opts.edit(a.chatId, a.msgId, text)
-        .then(() => { a.sentText = text })
-        .catch(() => {})
-        .finally(finish)
+      opts.edit(chatId, a.msgId, text).then(ok, fail).finally(done)
     }
   }
 
@@ -241,29 +284,44 @@ export function createAgentStream(opts: {
       const t = now()
       for (const ev of opts.readEvents()) {
         if (ev.event === 'start') {
-          const chatId = opts.chat()
-          if (!chatId || agents.has(ev.agent_id)) continue
-          agents.set(ev.agent_id, {
+          const old = agents.get(ev.agent_id)
+          if (old && !old.done) continue
+          if (t - ev.t > AGENT_STALE_MS) continue
+          const a: Agent = {
             id: ev.agent_id,
             type: ev.agent_type || 'agent',
             base: ev.agent_base,
-            chatId,
             started: ev.t,
             progress: {},
+            quietSince: ev.t,
+            failures: 0,
             lastEdit: 0,
-          })
+          }
+          const stop = earlyStops.get(ev.agent_id)
+          if (stop !== undefined && stop >= ev.t) a.done = stop
+          earlyStops.delete(ev.agent_id)
+          agents.set(ev.agent_id, a)
         } else {
           const a = agents.get(ev.agent_id)
           if (a && !a.done) a.done = ev.t
+          else if (!a) earlyStops.set(ev.agent_id, ev.t)
         }
       }
+      // The first read is the backlog from before this server started: only
+      // subagents still running are of interest.
+      if (first) {
+        first = false
+        for (const a of agents.values()) if (a.done) agents.delete(a.id)
+        earlyStops.clear()
+      }
+      for (const [id, at] of earlyStops) if (t - at > 10 * 60 * 1000) earlyStops.delete(id)
+
       for (const a of agents.values()) {
+        a.chatId ??= opts.chat()
         refresh(a)
-        const quietSince = Math.max(a.started, a.progress.updatedAt ?? 0)
-        if (!a.done && t - quietSince > AGENT_STALE_MS) a.done = t
         flush(a, t)
-        // Keep a finished agent until its final text has gone out, or a minute.
-        if (a.done && !a.sending && (a.sentText === render(a, t) || t - a.done > 60_000)) agents.delete(a.id)
+        const finished = a.done && !a.sending && (a.gone || !a.chatId || a.sentKey === contentKey(a, t))
+        if (finished || t - a.quietSince > AGENT_DROP_MS) agents.delete(a.id)
       }
     },
     agents() {
@@ -278,6 +336,14 @@ function definedOnly(p: Progress): Progress {
   if (p.tokens !== undefined) out.tokens = p.tokens
   if (p.updatedAt !== undefined) out.updatedAt = p.updatedAt
   return out
+}
+
+function mtimeOf(path: string): number | undefined {
+  try {
+    return statSync(path).mtimeMs
+  } catch {
+    return undefined
+  }
 }
 
 // The last TAIL_BYTES of a file, from its first whole line.

@@ -3,8 +3,10 @@ import { appendFileSync, mkdtempSync, readFileSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
-  AGENT_EDIT_MS,
   AGENT_STALE_MS,
+  AGENT_TICK_MS,
+  CHAT_GAP_MS,
+  CLOCK_REFRESH_MS,
   agentEventFile,
   createAgentStream,
   createEventReader,
@@ -34,6 +36,11 @@ describe('eventFromHook', () => {
       agent_base: '/h/.claude/projects/p/sess-1/subagents/agent-a40507641cb2de577',
     })
     expect(eventFromHook({ hook_event_name: 'SubagentStop', agent_id: 'x1' })?.event).toBe('stop')
+    expect(eventFromHook({
+      hook_event_name: 'SubagentStart',
+      agent_id: 'n2',
+      transcript_path: '/h/p/sess-1/subagents/agent-parent.jsonl',
+    })?.agent_base).toBe('/h/p/sess-1/subagents/agent-n2')
     expect(eventFromHook({ hook_event_name: 'Stop', agent_id: 'x1' })).toBeUndefined()
     expect(eventFromHook({ hook_event_name: 'SubagentStart', agent_id: '../x' })).toBeUndefined()
   })
@@ -74,6 +81,14 @@ describe('progressFromTranscript', () => {
       .toBe('Grep typing.start')
   })
 
+  test('commands, URLs and queries never leave the box without a description', () => {
+    const step = (name: string, input: Record<string, unknown>) =>
+      progressFromTranscript(assistant([{ type: 'tool_use', name, input }])).step
+    expect(step('Bash', { command: 'curl -H "Authorization: Bearer ghp_x" https://x' })).toBe('Bash')
+    expect(step('WebFetch', { url: 'https://x/items?token=sk_live_1' })).toBe('WebFetch')
+    expect(step('Read', { file_path: 'C:\\Users\\me\\prod.env' })).toBe('Read prod.env')
+  })
+
   test('formats like the CLI', () => {
     expect(formatTokens(85402)).toBe('85.4k')
     expect(formatTokens(999)).toBe('999')
@@ -87,59 +102,150 @@ describe('createAgentStream', () => {
     let t = 1_000_000
     const events: AgentEvent[] = []
     const files = new Map<string, string>()
+    const mtimes = new Map<string, number>()
     const sent: { chat: string; text: string }[] = []
     const edits: { id: number; text: string }[] = []
+    let failEdit: unknown
+    let current = chat
     const stream = createAgentStream({
       readEvents: () => events.splice(0),
-      chat: () => chat ?? undefined,
+      chat: () => current ?? undefined,
       send: async (c, text) => { sent.push({ chat: c, text }); return 7 },
-      edit: async (_c, id, text) => { edits.push({ id, text }) },
+      edit: async (_c, id, text) => {
+        if (failEdit) throw failEdit
+        edits.push({ id, text })
+      },
       readFile: p => files.get(p),
+      mtime: p => mtimes.get(p),
       now: () => t,
     })
     const settle = () => new Promise(r => setTimeout(r, 0))
-    return { stream, events, files, sent, edits, settle, advance: (ms: number) => { t += ms }, now: () => t }
+    const tick = async () => { stream.tick(); await settle() }
+    const write = (path: string, text: string) => { files.set(path, text); mtimes.set(path, t) }
+    return {
+      stream, events, sent, edits, tick, write,
+      advance: (ms: number) => { t += ms },
+      now: () => t,
+      setChat: (c: string | null) => { current = c },
+      failEditWith: (e: unknown) => { failEdit = e },
+    }
   }
+  const start = (h: { now(): number }, id = 'a1', extra: Partial<AgentEvent> = {}): AgentEvent =>
+    ({ t: h.now(), event: 'start', agent_id: id, agent_type: 'general-purpose', agent_base: `/s/agent-${id}`, ...extra })
 
   test('one message per subagent, edited as it works, finished on stop', async () => {
     const h = harness()
-    h.files.set('/s/agent-a1.meta.json', JSON.stringify({ description: 'Review PRs 3 and 4', agentType: 'general-purpose' }))
-    h.events.push({ t: h.now(), event: 'start', agent_id: 'a1', agent_type: 'general-purpose', agent_base: '/s/agent-a1' })
-    h.stream.tick(); await h.settle()
+    await h.tick() // the backlog read
+    h.write('/s/agent-a1.meta.json', JSON.stringify({ description: 'Review PRs 3 and 4', agentType: 'general-purpose' }))
+    h.events.push(start(h))
+    await h.tick()
     expect(h.sent).toEqual([{ chat: '42', text: '🤖 general-purpose · Review PRs 3 and 4\n⏳ Starting… · 0s' }])
 
-    h.files.set('/s/agent-a1.jsonl', assistant([{ type: 'tool_use', name: 'Bash', input: { description: 'Checking gate mention' } }],
+    h.advance(CHAT_GAP_MS)
+    h.write('/s/agent-a1.jsonl', assistant([{ type: 'tool_use', name: 'Bash', input: { description: 'Checking gate mention' } }],
       { input_tokens: 85400 }, new Date(h.now()).toISOString()))
-    h.advance(AGENT_EDIT_MS)
-    h.stream.tick(); await h.settle()
-    expect(h.edits).toEqual([{ id: 7, text: '🤖 general-purpose · Review PRs 3 and 4\n⏳ Checking gate mention · 5s · 85.4k tokens' }])
+    await h.tick()
+    expect(h.edits).toEqual([{ id: 7, text: '🤖 general-purpose · Review PRs 3 and 4\n⏳ Checking gate mention · 3s · 85.4k tokens' }])
 
-    h.advance(1000)
-    h.stream.tick(); await h.settle()
-    expect(h.edits.length).toBe(1)
-
+    h.advance(CHAT_GAP_MS)
     h.events.push({ t: h.now(), event: 'stop', agent_id: 'a1' })
-    h.stream.tick(); await h.settle()
+    await h.tick()
     expect(h.edits.at(-1)).toEqual({ id: 7, text: '🤖 general-purpose · Review PRs 3 and 4\n✅ Done in 6s · 85.4k tokens' })
-    h.stream.tick(); await h.settle()
+    await h.tick()
     expect(h.stream.agents()).toEqual([])
   })
 
-  test('nothing streams without a private chat to stream into', async () => {
-    const h = harness(null)
-    h.events.push({ t: h.now(), event: 'start', agent_id: 'a1', agent_type: 'Explore' })
-    h.stream.tick(); await h.settle()
-    expect(h.sent).toEqual([])
-    expect(h.stream.agents()).toEqual([])
-  })
-
-  test('a subagent whose stop never comes is closed once its transcript goes quiet', async () => {
+  test('with nothing new, only the clock moves, and only every 30 seconds', async () => {
     const h = harness()
-    h.events.push({ t: h.now(), event: 'start', agent_id: 'a1', agent_type: 'Explore' })
-    h.stream.tick(); await h.settle()
-    h.advance(AGENT_STALE_MS + 1)
-    h.stream.tick(); await h.settle()
-    expect(h.edits.at(-1)?.text).toContain('✅ Done in')
+    await h.tick()
+    h.events.push(start(h))
+    await h.tick()
+    for (let i = 0; i < 9; i++) { h.advance(AGENT_TICK_MS); await h.tick() }
+    expect(h.edits).toEqual([])
+    h.advance(CLOCK_REFRESH_MS); await h.tick()
+    expect(h.edits.length).toBe(1)
+  })
+
+  test('all subagents in a chat share one budget', async () => {
+    const h = harness()
+    await h.tick()
+    for (const id of ['a1', 'a2', 'a3']) h.events.push(start(h, id))
+    await h.tick()
+    expect(h.sent.length).toBe(1)
+    h.advance(CHAT_GAP_MS); await h.tick()
+    expect(h.sent.length).toBe(2)
+  })
+
+  test('a rate limit holds the chat for retry_after', async () => {
+    const h = harness()
+    await h.tick()
+    h.events.push(start(h))
+    await h.tick()
+    h.failEditWith({ description: 'Too Many Requests', parameters: { retry_after: 20 } })
+    h.advance(CLOCK_REFRESH_MS); await h.tick()
+    h.failEditWith(undefined)
+    h.advance(CLOCK_REFRESH_MS - 15_000); await h.tick()
+    expect(h.edits).toEqual([])
+    h.advance(10_000); await h.tick()
+    expect(h.edits.length).toBe(1)
+  })
+
+  test('"message is not modified" counts as sent; a deleted message ends the stream for it', async () => {
+    const h = harness()
+    await h.tick()
+    h.events.push(start(h))
+    await h.tick()
+    h.failEditWith({ description: 'Bad Request: message is not modified' })
+    h.advance(CLOCK_REFRESH_MS); await h.tick()
+    h.failEditWith({ description: 'Bad Request: message to edit not found' })
+    h.advance(CLOCK_REFRESH_MS); await h.tick()
+    h.events.push({ t: h.now(), event: 'stop', agent_id: 'a1' })
+    await h.tick()
+    expect(h.stream.agents()).toEqual([])
+  })
+
+  test('a quiet subagent shows as quiet, never as done, and its late stop still closes it', async () => {
+    const h = harness()
+    await h.tick()
+    h.events.push(start(h))
+    await h.tick()
+    h.advance(AGENT_STALE_MS + 1); await h.tick()
+    expect(h.edits.at(-1)?.text).toContain('⚠️ No activity for 30m')
+    expect(h.edits.at(-1)?.text).not.toContain('Done')
+    h.advance(CHAT_GAP_MS)
+    h.events.push({ t: h.now(), event: 'stop', agent_id: 'a1' })
+    await h.tick()
+    expect(h.edits.at(-1)?.text).toContain('✅ Done in 30m')
+  })
+
+  test('a stop read before its start still closes the subagent', async () => {
+    const h = harness()
+    await h.tick()
+    const s = start(h)
+    h.advance(500)
+    h.events.push({ t: h.now(), event: 'stop', agent_id: 'a1' }, s)
+    await h.tick()
+    expect(h.sent.at(-1)?.text).toContain('✅ Done in 0s')
+    await h.tick()
+    expect(h.stream.agents()).toEqual([])
+  })
+
+  test('streams nothing without a chat, and picks one up once someone writes', async () => {
+    const h = harness(null)
+    await h.tick()
+    h.events.push(start(h))
+    await h.tick()
+    expect(h.sent).toEqual([])
+    h.setChat('42')
+    h.advance(1000); await h.tick()
+    expect(h.sent.length).toBe(1)
+  })
+
+  test('the backlog keeps only subagents still running', async () => {
+    const h = harness()
+    h.events.push(start(h, 'finished'), { t: h.now(), event: 'stop', agent_id: 'finished' }, start(h, 'running'))
+    await h.tick()
+    expect(h.stream.agents().map(a => a.id)).toEqual(['running'])
   })
 })
 
