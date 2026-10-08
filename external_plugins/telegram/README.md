@@ -179,7 +179,7 @@ subagent's work shows in its [own message](#subagents); they count as activity
 for the turn that waits on the subagent.
 
 The indicator pauses while a permission prompt waits on you, and resumes when
-you answer in Telegram, or once Claude works again after an answer in the
+you answer in Telegram, or at Claude's next tool call after an answer in the
 terminal.
 After 30 minutes with neither activity nor a turn end, leaving out the time a
 prompt waited, the indicator stops and the bot tells the chat that Claude may be

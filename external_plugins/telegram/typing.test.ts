@@ -117,7 +117,7 @@ describe('createTyping', () => {
     h.advance(1000)
     h.typing.pause()
     // The hook of the call that raised the prompt.
-    h.advance(PROMPT_GRACE_MS - 500); h.work()
+    h.advance(PROMPT_GRACE_MS - 1000); h.work()
     h.advance(3000); h.typing.tick()
     expect(h.sent).toEqual(['42'])
 
@@ -127,12 +127,65 @@ describe('createTyping', () => {
     expect(h.sent).toEqual(['42', '42', '42'])
   })
 
-  test('a subagent working after the prompt brings typing back too', () => {
+  test('activity at the end of the grace still counts as the prompt\'s own', () => {
     const h = harness()
     h.typing.start('42')
     h.typing.pause()
-    h.advance(PROMPT_GRACE_MS + 1); h.subagent(); h.typing.tick()
+    h.advance(PROMPT_GRACE_MS); h.work()
+    h.advance(1); h.typing.tick()
+    expect(h.sent).toEqual(['42'])
+  })
+
+  test('after a terminal answer, the cap counts from the activity that showed it', () => {
+    const h = harness(10_000)
+    h.typing.start('42')
+    h.typing.pause()
+    h.advance(60_000); h.typing.tick()
+    h.work()
+    h.advance(1000); h.typing.tick()
     expect(h.sent).toEqual(['42', '42'])
+    h.advance(8000); h.typing.tick()
+    expect(h.capped).toEqual([])
+    h.advance(1500); h.typing.tick()
+    expect(h.capped).toEqual(['42'])
+  })
+
+  test('a turn that ends between ticks after a terminal answer clears the chat', () => {
+    const h = harness()
+    h.typing.start('42')
+    h.advance(1000)
+    h.typing.pause()
+    // The hook of the call that raised the prompt.
+    h.advance(30); h.work()
+    for (let i = 0; i < 14; i++) { h.advance(4000); h.typing.tick() }
+    h.advance(1970); h.typing.tick()
+    h.advance(1000); h.work()
+    h.advance(1000); h.endTurn()
+    h.advance(500); h.typing.tick()
+    expect(h.typing.active()).toEqual([])
+    expect(h.sent).toEqual(['42'])
+  })
+
+  test('a second prompt before the next tick holds typing while it waits', () => {
+    const h = harness(60_000)
+    h.typing.start('42')
+    h.typing.pause()
+    // Answered in the terminal; the next call raises another prompt.
+    h.advance(30_000); h.work()
+    h.typing.pause()
+    h.advance(100); h.work()
+    for (let i = 0; i < 50; i++) { h.advance(4000); h.typing.tick() }
+    expect(h.sent).toEqual(['42'])
+    expect(h.capped).toEqual([])
+  })
+
+  test('a subagent working while Claude\'s prompt waits keeps typing paused', () => {
+    const h = harness(60_000)
+    h.typing.start('42')
+    h.typing.pause()
+    for (let i = 0; i < 50; i++) { h.advance(4000); h.subagent(); h.typing.tick() }
+    expect(h.sent).toEqual(['42'])
+    expect(h.capped).toEqual([])
   })
 
   test('a pause with no chat typing does not hold the next message', () => {
