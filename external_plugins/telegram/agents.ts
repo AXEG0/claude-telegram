@@ -37,6 +37,7 @@ export type AgentEvent = {
   agent_type?: string
   // <session transcript dir>/<session id>/subagents/agent-<id>, without suffix.
   agent_base?: string
+  outcome?: 'stopped'
 }
 
 export function agentEventFile(dir: string, pid: number): string {
@@ -55,7 +56,24 @@ export function eventFromHook(input: {
   agent_id?: string
   agent_type?: string
   transcript_path?: string
+  tool_name?: string
+  tool_input?: { task_id?: string }
+  tool_response?: unknown
 }, now: number = Date.now()): AgentEvent | undefined {
+  // TaskStop does not run SubagentStop. Only a successful stop of a local
+  // agent counts; a failed request or a stopped shell task must not close it.
+  if (input.hook_event_name === 'PostToolUse' && input.tool_name === 'TaskStop') {
+    let result = input.tool_response
+    if (typeof result === 'string') {
+      try { result = JSON.parse(result) } catch { return undefined }
+    }
+    if (!result || typeof result !== 'object') return undefined
+    const r = result as { task_id?: string; task_type?: string; message?: string }
+    if (r.task_type !== 'local_agent' || typeof r.task_id !== 'string'
+      || !/^[\w-]+$/.test(r.task_id) || r.task_id !== input.tool_input?.task_id
+      || typeof r.message !== 'string' || !r.message.startsWith(`Successfully stopped task: ${r.task_id}`)) return undefined
+    return { t: now, event: 'stop', agent_id: r.task_id, outcome: 'stopped' }
+  }
   const event = input.hook_event_name === 'SubagentStart' ? 'start'
     : input.hook_event_name === 'SubagentStop' ? 'stop' : undefined
   if (!event || !input.agent_id || !/^[\w-]+$/.test(input.agent_id)) return undefined
@@ -114,6 +132,24 @@ export type Progress = { step?: string; tokens?: number; updatedAt?: number }
 
 export const THINKING = '💭 Thinking…'
 export const WRITING = '✍️ Writing…'
+
+// Claude records an interruption in the agent's own transcript even when no
+// stop hook ran. Inspect the latest conversation entry, not quoted text in an
+// earlier message: an agent can be resumed after an interruption.
+export function interruptionFromTranscript(text: string): number | undefined {
+  const lines = text.split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    let e: { type?: string; timestamp?: string; message?: { content?: unknown } }
+    try { e = JSON.parse(lines[i]!) } catch { continue }
+    if (e.type !== 'user' && e.type !== 'assistant') continue
+    if (e.type !== 'user' || !Array.isArray(e.message?.content)) return undefined
+    const content = e.message.content as { type?: string; text?: string }[]
+    if (content.length !== 1 || content[0]?.type !== 'text'
+      || !/^\[Request interrupted by user(?: for tool use)?\]$/.test(content[0].text ?? '')) return undefined
+    const t = Date.parse(e.timestamp ?? '')
+    return Number.isFinite(t) ? t : undefined
+  }
+}
 
 // The current step and context size from the end of a subagent transcript.
 // The step is the running tool call's description, or its tool and target;
@@ -195,7 +231,9 @@ type Agent = {
   started: number
   progress: Progress
   quietSince: number
+  transcriptMtime?: number
   done?: number
+  outcome?: 'stopped'
   msgId?: number
   // The message can no longer be edited, or sending keeps failing.
   gone?: boolean
@@ -208,7 +246,7 @@ type Agent = {
 export function render(a: Agent, now: number): string {
   const head = `🤖 ${a.type}${a.description ? ` · ${oneLine(a.description)}` : ''}`
   const tokens = a.progress.tokens ? ` · ${formatTokens(a.progress.tokens)} tokens` : ''
-  if (a.done) return `${head}\n✅ Done in ${formatDuration(a.done - a.started)}${tokens}`
+  if (a.done !== undefined) return `${head}\n${a.outcome === 'stopped' ? '⏹ Stopped after' : '✅ Done in'} ${formatDuration(a.done - a.started)}${tokens}`
   const step = a.progress.step ?? 'Starting…'
   if (now - a.quietSince > AGENT_STALE_MS) {
     return `${head}\n⚠️ No activity for ${formatDuration(now - a.quietSince)} · last: ${step}${tokens}`
@@ -218,7 +256,7 @@ export function render(a: Agent, now: number): string {
 
 // What the message says apart from its clock.
 function contentKey(a: Agent, now: number): string {
-  return JSON.stringify([a.type, a.description, a.progress.step, a.progress.tokens, a.done,
+  return JSON.stringify([a.type, a.description, a.progress.step, a.progress.tokens, a.done, a.outcome,
     now - a.quietSince > AGENT_STALE_MS])
 }
 
@@ -241,7 +279,7 @@ export function createAgentStream(opts: {
   const mtime = opts.mtime ?? mtimeOf
   const agents = new Map<string, Agent>()
   // Stops whose start has not been read yet: the two hooks run concurrently.
-  const earlyStops = new Map<string, number>()
+  const earlyStops = new Map<string, AgentEvent>()
   const chatNext = new Map<string, number>()
   let first = true
 
@@ -255,17 +293,25 @@ export function createAgentStream(opts: {
       } catch {}
     }
     const m = mtime(`${a.base}.jsonl`)
-    if (m && m > a.quietSince) {
-      a.quietSince = m
+    if (m !== undefined && m !== a.transcriptMtime) {
+      a.transcriptMtime = m
+      a.quietSince = Math.max(a.quietSince, m)
       const tail = readFile(`${a.base}.jsonl`)
-      if (tail) a.progress = { ...a.progress, ...definedOnly(progressFromTranscript(tail)) }
+      if (tail) {
+        a.progress = { ...a.progress, ...definedOnly(progressFromTranscript(tail)) }
+        const interrupted = interruptionFromTranscript(tail)
+        if (interrupted !== undefined && interrupted >= a.started) {
+          a.done = interrupted
+          a.outcome = 'stopped'
+        }
+      }
     }
   }
 
   function flush(a: Agent, t: number) {
     if (a.sending || a.gone || !a.chatId) return
     const key = contentKey(a, t)
-    if (key === a.sentKey && (a.done || t - a.lastEdit < CLOCK_REFRESH_MS)) return
+    if (key === a.sentKey && (a.done !== undefined || t - a.lastEdit < CLOCK_REFRESH_MS)) return
     const chatId = a.chatId
     if (t < (chatNext.get(chatId) ?? 0)) return
     chatNext.set(chatId, t + CHAT_GAP_MS)
@@ -296,7 +342,7 @@ export function createAgentStream(opts: {
       for (const ev of opts.readEvents()) {
         if (ev.event === 'start') {
           const old = agents.get(ev.agent_id)
-          if (old && !old.done) continue
+          if (old && old.done === undefined) continue
           if (t - ev.t > AGENT_STALE_MS) continue
           const a: Agent = {
             id: ev.agent_id,
@@ -309,29 +355,39 @@ export function createAgentStream(opts: {
             lastEdit: 0,
           }
           const stop = earlyStops.get(ev.agent_id)
-          if (stop !== undefined && stop >= ev.t) a.done = stop
+          if (stop && stop.t >= ev.t) { a.done = stop.t; a.outcome = stop.outcome }
           earlyStops.delete(ev.agent_id)
           agents.set(ev.agent_id, a)
         } else {
           const a = agents.get(ev.agent_id)
-          if (a && !a.done) a.done = ev.t
-          else if (!a) earlyStops.set(ev.agent_id, ev.t)
+          if (a && ev.t >= a.started) {
+            a.done ??= ev.t
+            a.outcome ??= ev.outcome
+          } else if (!a) earlyStops.set(ev.agent_id, ev)
         }
       }
       // The first read is the backlog from before this server started: only
       // subagents still running are of interest.
       if (first) {
         first = false
-        for (const a of agents.values()) if (a.done) agents.delete(a.id)
+        for (const a of agents.values()) {
+          refresh(a)
+          if (a.done !== undefined) agents.delete(a.id)
+        }
         earlyStops.clear()
       }
-      for (const [id, at] of earlyStops) if (t - at > 10 * 60 * 1000) earlyStops.delete(id)
+      for (const [id, ev] of earlyStops) if (t - ev.t > 10 * 60 * 1000) earlyStops.delete(id)
 
       for (const a of agents.values()) {
         a.chatId ??= opts.chat()
         refresh(a)
+      }
+      // Terminal updates take the next available chat slot; a busy earlier
+      // agent must not starve a later agent's stopped/done line.
+      const pending = [...agents.values()].sort((a, b) => Number(b.done !== undefined) - Number(a.done !== undefined))
+      for (const a of pending) {
         flush(a, t)
-        const finished = a.done && !a.sending && (a.gone || !a.chatId || a.sentKey === contentKey(a, t))
+        const finished = a.done !== undefined && !a.sending && (a.gone || !a.chatId || a.sentKey === contentKey(a, t))
         if (finished || t - a.quietSince > AGENT_DROP_MS) agents.delete(a.id)
       }
     },

@@ -13,6 +13,7 @@ import {
   eventFromHook,
   formatDuration,
   formatTokens,
+  interruptionFromTranscript,
   progressFromTranscript,
   THINKING,
   WRITING,
@@ -45,6 +46,41 @@ describe('eventFromHook', () => {
     })?.agent_base).toBe('/h/p/sess-1/subagents/agent-n2')
     expect(eventFromHook({ hook_event_name: 'Stop', agent_id: 'x1' })).toBeUndefined()
     expect(eventFromHook({ hook_event_name: 'SubagentStart', agent_id: '../x' })).toBeUndefined()
+  })
+
+  const stopped = {
+    hook_event_name: 'PostToolUse', tool_name: 'TaskStop', tool_input: { task_id: 'a1' },
+    tool_response: { task_id: 'a1', task_type: 'local_agent', message: 'Successfully stopped task: a1 (Review)' },
+  }
+  test('a successful TaskStop records a stopped outcome, from an object or JSON response', () => {
+    expect(eventFromHook(stopped, 5)).toEqual({ t: 5, event: 'stop', agent_id: 'a1', outcome: 'stopped' })
+    expect(eventFromHook({ ...stopped, tool_response: JSON.stringify(stopped.tool_response) }, 5))
+      .toEqual(eventFromHook(stopped, 5))
+  })
+  test('failed stops and shell tasks do not close an agent', () => {
+    expect(eventFromHook({ ...stopped, tool_response: { error: 'Task not found' } })).toBeUndefined()
+    expect(eventFromHook({ ...stopped, tool_response: { ...stopped.tool_response, task_type: 'local_bash' } })).toBeUndefined()
+    expect(eventFromHook({ ...stopped, tool_input: { task_id: 'other' } })).toBeUndefined()
+    expect(eventFromHook({ ...stopped, tool_response: { ...stopped.tool_response, message: 'Failed to stop task' } })).toBeUndefined()
+    expect(eventFromHook({ ...stopped, tool_response: 'bad JSON' })).toBeUndefined()
+  })
+})
+
+const interrupted = (t: number) => JSON.stringify({
+  type: 'user', timestamp: new Date(t).toISOString(),
+  message: { role: 'user', content: [{ type: 'text', text: '[Request interrupted by user]' }] },
+})
+
+describe('interruptionFromTranscript', () => {
+  test('reads an explicit terminal interruption, ignoring a partial line and trailing metadata', () => {
+    expect(interruptionFromTranscript(interrupted(5000) + '\n' + JSON.stringify({ type: 'attachment' }) + '\n{"type":'))
+      .toBe(5000)
+  })
+  test('ignores an interruption followed by resumed work or quoted in an answer', () => {
+    expect(interruptionFromTranscript(interrupted(5000) + '\n' + assistant([{ type: 'text', text: 'Working again' }]))).toBeUndefined()
+    expect(interruptionFromTranscript(interrupted(5000) + '\n' + JSON.stringify({ type: 'user', message: { content: 'Continue' } }))).toBeUndefined()
+    expect(interruptionFromTranscript(assistant([{ type: 'text', text: '[Request interrupted by user]' }]))).toBeUndefined()
+    expect(interruptionFromTranscript(JSON.stringify({ type: 'user', message: { content: [{ type: 'text', text: '[Request interrupted by user]' }] } }))).toBeUndefined()
   })
 })
 
@@ -176,6 +212,55 @@ describe('createAgentStream', () => {
     expect(h.edits.length).toBe(1)
   })
 
+  test('a stopped transcript closes the existing message on the next tick without a stop event', async () => {
+    const h = harness()
+    await h.tick()
+    h.events.push(start(h))
+    h.write('/s/agent-a1.jsonl', assistant([{ type: 'text', text: 'Working' }], { input_tokens: 32300 }))
+    await h.tick()
+    expect(h.sent.at(-1)?.text).toContain(WRITING)
+    h.advance(AGENT_TICK_MS)
+    h.write('/s/agent-a1.jsonl', assistant([{ type: 'text', text: 'Working' }], { input_tokens: 32300 }) + '\n' + interrupted(h.now()))
+    await h.tick()
+    expect(h.edits.at(-1)).toEqual({ id: 7, text: '🤖 general-purpose\n⏹ Stopped after 3s · 32.3k tokens' })
+    await h.tick()
+    expect(h.stream.agents()).toEqual([])
+    expect(h.sent).toHaveLength(1)
+  })
+
+  test('TaskStop closes an agent even when its transcript is unavailable', async () => {
+    const h = harness()
+    await h.tick()
+    h.events.push(start(h)); await h.tick()
+    h.advance(CHAT_GAP_MS)
+    h.events.push({ t: h.now(), event: 'stop', agent_id: 'a1', outcome: 'stopped' })
+    await h.tick()
+    expect(h.edits.at(-1)?.text).toContain('⏹ Stopped after 3s')
+    await h.tick()
+    expect(h.stream.agents()).toEqual([])
+  })
+
+  test('an interruption already present at start is read even when its mtime equals the start', async () => {
+    const h = harness()
+    await h.tick()
+    h.events.push(start(h))
+    h.write('/s/agent-a1.jsonl', interrupted(h.now()))
+    await h.tick()
+    expect(h.sent.at(-1)?.text).toContain('⏹ Stopped after 0s')
+  })
+
+  test('a resumed agent ignores interruption evidence and stop hooks from its previous run', async () => {
+    const h = harness()
+    await h.tick()
+    const old = h.now()
+    h.write('/s/agent-a1.jsonl', interrupted(old))
+    h.advance(AGENT_TICK_MS)
+    h.events.push(start(h), { t: old, event: 'stop', agent_id: 'a1', outcome: 'stopped' })
+    await h.tick()
+    expect(h.sent.at(-1)?.text).toContain('⏳ Starting…')
+    expect(h.stream.agents()).toHaveLength(1)
+  })
+
   test('all subagents in a chat share one budget', async () => {
     const h = harness()
     await h.tick()
@@ -184,6 +269,19 @@ describe('createAgentStream', () => {
     expect(h.sent.length).toBe(1)
     h.advance(CHAT_GAP_MS); await h.tick()
     expect(h.sent.length).toBe(2)
+  })
+
+  test('terminal updates get the next chat slot ahead of another agent changing on every tick', async () => {
+    const h = harness()
+    await h.tick()
+    h.events.push(start(h, 'busy'), start(h, 'stopped'))
+    await h.tick()
+    h.advance(CHAT_GAP_MS); await h.tick()
+    h.advance(CHAT_GAP_MS)
+    h.write('/s/agent-busy.jsonl', assistant([{ type: 'text', text: 'Working' }]))
+    h.events.push({ t: h.now(), event: 'stop', agent_id: 'stopped', outcome: 'stopped' })
+    await h.tick()
+    expect(h.edits.at(-1)?.text).toContain('⏹ Stopped after 6s')
   })
 
   test('a rate limit holds the chat for retry_after', async () => {
@@ -251,11 +349,30 @@ describe('createAgentStream', () => {
     expect(h.sent.length).toBe(1)
   })
 
+  test('a TaskStop read before its start keeps the stopped outcome', async () => {
+    const h = harness()
+    await h.tick()
+    const s = start(h)
+    h.advance(CHAT_GAP_MS)
+    h.events.push({ t: h.now(), event: 'stop', agent_id: 'a1', outcome: 'stopped' }, s)
+    await h.tick()
+    expect(h.sent.at(-1)?.text).toContain('⏹ Stopped after 3s')
+  })
+
   test('the backlog keeps only subagents still running', async () => {
     const h = harness()
     h.events.push(start(h, 'finished'), { t: h.now(), event: 'stop', agent_id: 'finished' }, start(h, 'running'))
     await h.tick()
     expect(h.stream.agents().map(a => a.id)).toEqual(['running'])
+  })
+
+  test('interrupted agents in the startup backlog are not announced as running', async () => {
+    const h = harness()
+    h.events.push(start(h))
+    h.write('/s/agent-a1.jsonl', interrupted(h.now()))
+    await h.tick()
+    expect(h.sent).toEqual([])
+    expect(h.stream.agents()).toEqual([])
   })
 })
 
@@ -274,5 +391,21 @@ describe('hooks/subagent.ts', () => {
     expect(r.exitCode).toBe(0)
     const ev = JSON.parse(readFileSync(agentEventFile(dir, 4242), 'utf8').trim())
     expect(ev).toMatchObject({ event: 'start', agent_id: 'a9', agent_type: 'Explore', agent_base: '/p/sess/subagents/agent-a9' })
+  })
+
+  test('the registered TaskStop hook appends a successful stop with its outcome', () => {
+    const hooks = JSON.parse(readFileSync(join(import.meta.dir, 'hooks', 'hooks.json'), 'utf8')).hooks
+    expect(hooks.PostToolUse.some((h: { matcher: string }) => h.matcher === 'TaskStop')).toBe(true)
+    const dir = mkdtempSync(join(tmpdir(), 'agents-'))
+    const r = Bun.spawnSync(['bun', join(import.meta.dir, 'hooks', 'subagent.ts')], {
+      stdin: new TextEncoder().encode(JSON.stringify({
+        hook_event_name: 'PostToolUse', tool_name: 'TaskStop', tool_input: { task_id: 'a9' },
+        tool_response: { task_id: 'a9', task_type: 'local_agent', message: 'Successfully stopped task: a9 (Review)' },
+      })),
+      env: { PATH: process.env.PATH!, HOME: process.env.HOME!, TELEGRAM_STATE_DIR: dir, CLAUDE_PID: '4242' },
+    })
+    expect(r.exitCode).toBe(0)
+    const ev = JSON.parse(readFileSync(agentEventFile(dir, 4242), 'utf8').trim())
+    expect(ev).toMatchObject({ event: 'stop', agent_id: 'a9', outcome: 'stopped' })
   })
 })

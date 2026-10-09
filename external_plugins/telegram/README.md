@@ -204,8 +204,9 @@ runs, the way the CLI shows it:
 ⏳ Checking gate mention and server env · 4m 31s · 85.4k tokens
 ```
 
-It ends as `✅ Done in 6m 10s · 89.8k tokens`. The plugin's `SubagentStart` and
-`SubagentStop` hook ([hooks/subagent.ts](./hooks/subagent.ts)) records each
+It ends as `✅ Done in 6m 10s · 89.8k tokens`, or `⏹ Stopped after 6m 10s ·
+89.8k tokens` when interrupted. The plugin's `SubagentStart`, `SubagentStop` and
+successful `TaskStop` hooks ([hooks/subagent.ts](./hooks/subagent.ts)) record each
 subagent under `agents/` in the state directory, and the server reads the
 subagent's transcript for its current step and context size, and its meta file
 for its description. A step shows the running tool call's own description, or
@@ -216,8 +217,11 @@ the subagent writes its answer.
 The messages go, without a notification, to the private chat that last wrote to
 the bot since the server started. All subagents in a chat share one edit budget,
 a message's clock moves while nothing else changes, and a rate limit holds the
-chat for as long as Telegram asks. A subagent whose transcript stays unchanged
-for 30 minutes shows as quiet until its stop arrives, for up to two hours.
+chat for as long as Telegram asks. An explicit interruption in the subagent's
+transcript also closes its message on the next stream tick, even when no stop
+hook ran. Inactivity alone never counts as completion: a subagent whose
+transcript stays unchanged for 30 minutes shows as quiet until its stop
+arrives, for up to two hours.
 
 ### Rich messages
 
