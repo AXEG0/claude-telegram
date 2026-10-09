@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// SubagentStart and SubagentStop hook: appends the event to a file named for
+// SubagentStart, SubagentStop and successful TaskStop hook: appends the event to a file named for
 // this Claude Code process, which the server follows to stream subagents to
 // Telegram. See agents.ts. Always exits 0; a hook failure must never block
 // Claude.

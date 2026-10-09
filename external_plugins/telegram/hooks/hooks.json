@@ -61,6 +61,19 @@
         ]
       }
     ],
+    "PostToolUse": [
+      {
+        "matcher": "TaskStop",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun \"${CLAUDE_PLUGIN_ROOT}/hooks/subagent.ts\"",
+            "async": true,
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "hooks": [
