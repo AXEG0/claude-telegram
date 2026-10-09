@@ -30,6 +30,7 @@ import { editRich, RICH_FORMAT_HELP, RICH_INSTRUCTIONS, richEnabled, sendRich, t
 import { replyMeta } from './reply.ts'
 import { heartbeatTransformer } from './heartbeat.ts'
 import { batchGap, createBatcher } from './batch.ts'
+import { channelMode } from './polling.ts'
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR
   ?? join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'channels', 'telegram')
@@ -63,28 +64,34 @@ const INBOX_DIR = join(STATE_DIR, 'inbox')
 const PID_FILE = join(STATE_DIR, 'bot.pid')
 // Rewritten after every completed getUpdates; see heartbeat.ts.
 const HEARTBEAT_FILE = join(STATE_DIR, 'poll-heartbeat.json')
+const mode = channelMode()
+const POLLING = mode.poll
+if (mode.warning) process.stderr.write(mode.warning)
+if (!POLLING) process.stderr.write('telegram channel: send-only (Claude session did not load the Telegram channel)\n')
 
 // Telegram allows exactly one getUpdates consumer per token. If a previous
 // session crashed (SIGKILL, terminal closed) its server.ts grandchild can
 // survive as an orphan and hold the slot forever, so every new session sees
 // 409 Conflict. Kill any stale holder before we start polling.
 mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 })
-try {
-  const stale = parseInt(readFileSync(PID_FILE, 'utf8'), 10)
-  if (stale > 1 && stale !== process.pid) {
-    process.kill(stale, 0)
-    // PID files race with OS PID recycling — verify the holder is actually a
-    // server.ts process before SIGTERM. Otherwise a recycled PID can point at
-    // our own bun-run wrapper (kills our stdin → immediate self-shutdown) or
-    // an unrelated user process.
-    const cmd = execFileSync('ps', ['-p', String(stale), '-o', 'args='], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
-    if (cmd.includes('server.ts')) {
-      process.stderr.write(`telegram channel: replacing stale poller pid=${stale}\n`)
-      process.kill(stale, 'SIGTERM')
+if (POLLING) {
+  try {
+    const stale = parseInt(readFileSync(PID_FILE, 'utf8'), 10)
+    if (stale > 1 && stale !== process.pid) {
+      process.kill(stale, 0)
+      // PID files race with OS PID recycling — verify the holder is actually a
+      // server.ts process before SIGTERM. Otherwise a recycled PID can point at
+      // our own bun-run wrapper (kills our stdin → immediate self-shutdown) or
+      // an unrelated user process.
+      const cmd = execFileSync('ps', ['-p', String(stale), '-o', 'args='], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+      if (cmd.includes('server.ts')) {
+        process.stderr.write(`telegram channel: replacing stale poller pid=${stale}\n`)
+        process.kill(stale, 'SIGTERM')
+      }
     }
-  }
-} catch {}
-writeFileSync(PID_FILE, String(process.pid))
+  } catch {}
+  writeFileSync(PID_FILE, String(process.pid))
+}
 
 // Last-resort safety net — without these the process dies silently on any
 // unhandled promise rejection. With them it logs and keeps serving tools.
@@ -742,15 +749,17 @@ function shutdown(): void {
   if (shuttingDown) return
   shuttingDown = true
   process.stderr.write('telegram channel: shutting down\n')
-  try {
-    if (parseInt(readFileSync(PID_FILE, 'utf8'), 10) === process.pid) rmSync(PID_FILE)
-  } catch {}
+  if (POLLING) {
+    try {
+      if (parseInt(readFileSync(PID_FILE, 'utf8'), 10) === process.pid) rmSync(PID_FILE)
+    } catch {}
+  }
   // bot.stop() signals the poll loop to end; the current getUpdates request
   // may take up to its long-poll timeout to return. Force-exit after 2s.
   setTimeout(() => process.exit(0), 2000)
   // Messages still waiting in a batch go now: Telegram has counted them delivered.
   void batcher.flushAll()
-    .then(() => bot.stop())
+    .then(() => { if (POLLING && bot.isRunning()) bot.stop() })
     .finally(() => process.exit(0))
 }
 process.stdin.on('end', shutdown)
@@ -1106,7 +1115,7 @@ bot.catch(err => {
 // returned, and polling stopped permanently while the process stayed alive
 // (MCP stdin keeps it running). Outbound tools kept working but the bot was
 // deaf to inbound messages until a full restart.
-void (async () => {
+if (POLLING) void (async () => {
   for (let attempt = 1; ; attempt++) {
     try {
       await bot.start({

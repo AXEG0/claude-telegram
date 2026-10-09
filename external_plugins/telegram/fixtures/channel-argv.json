@@ -1,0 +1,10 @@
+{
+  "source": "argylle2 /proc/823860/cmdline, 2026-10-09",
+  "argv": [
+    "claude",
+    "--dangerously-skip-permissions",
+    "--dangerously-load-development-channels",
+    "plugin:telegram@claude-telegram",
+    "--continue"
+  ]
+}
