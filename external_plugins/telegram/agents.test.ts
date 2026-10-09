@@ -4,6 +4,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import {
   AGENT_STALE_MS,
+  AGENT_MESSAGE_LIMIT,
   AGENT_TICK_MS,
   CHAT_GAP_MS,
   CLOCK_REFRESH_MS,
@@ -152,14 +153,17 @@ describe('createAgentStream', () => {
     const sent: { chat: string; text: string }[] = []
     const edits: { id: number; text: string }[] = []
     let failEdit: unknown
+    let sendWait: Promise<void> | undefined
+    let editWait: Promise<void> | undefined
     let current = chat
     const stream = createAgentStream({
       readEvents: () => events.splice(0),
       chat: () => current ?? undefined,
-      send: async (c, text) => { sent.push({ chat: c, text }); return 7 },
+      send: async (c, text) => { sent.push({ chat: c, text }); const id = sent.length + 6; await sendWait; return id },
       edit: async (_c, id, text) => {
         if (failEdit) throw failEdit
         edits.push({ id, text })
+        await editWait
       },
       readFile: p => files.get(p),
       mtime: p => mtimes.get(p),
@@ -174,29 +178,31 @@ describe('createAgentStream', () => {
       now: () => t,
       setChat: (c: string | null) => { current = c },
       failEditWith: (e: unknown) => { failEdit = e },
+      holdSend: () => { let release!: () => void; sendWait = new Promise<void>(r => { release = r }); return () => { sendWait = undefined; release() } },
+      holdEdit: () => { let release!: () => void; editWait = new Promise<void>(r => { release = r }); return () => { editWait = undefined; release() } },
     }
   }
   const start = (h: { now(): number }, id = 'a1', extra: Partial<AgentEvent> = {}): AgentEvent =>
     ({ t: h.now(), event: 'start', agent_id: id, agent_type: 'general-purpose', agent_base: `/s/agent-${id}`, ...extra })
 
-  test('one message per subagent, edited as it works, finished on stop', async () => {
+  test('one panel with one row per subagent, edited as it works, frozen when all finish', async () => {
     const h = harness()
     await h.tick() // the backlog read
     h.write('/s/agent-a1.meta.json', JSON.stringify({ description: 'Review PRs 3 and 4', agentType: 'general-purpose' }))
     h.events.push(start(h))
     await h.tick()
-    expect(h.sent).toEqual([{ chat: '42', text: '🤖 general-purpose · Review PRs 3 and 4\n⏳ Starting… · 0s' }])
+    expect(h.sent).toEqual([{ chat: '42', text: '🤖 Subagents\n1. ⏳ general-purpose · Review PRs 3 and 4 · Starting… · 0s' }])
 
     h.advance(CHAT_GAP_MS)
     h.write('/s/agent-a1.jsonl', assistant([{ type: 'tool_use', name: 'Bash', input: { description: 'Checking gate mention' } }],
       { input_tokens: 85400 }, new Date(h.now()).toISOString()))
     await h.tick()
-    expect(h.edits).toEqual([{ id: 7, text: '🤖 general-purpose · Review PRs 3 and 4\n⏳ Checking gate mention · 3s · 85.4k tokens' }])
+    expect(h.edits).toEqual([{ id: 7, text: '🤖 Subagents\n1. ⏳ general-purpose · Review PRs 3 and 4 · Checking gate mention · 3s · 85.4k tokens' }])
 
     h.advance(CHAT_GAP_MS)
     h.events.push({ t: h.now(), event: 'stop', agent_id: 'a1' })
     await h.tick()
-    expect(h.edits.at(-1)).toEqual({ id: 7, text: '🤖 general-purpose · Review PRs 3 and 4\n✅ Done in 6s · 85.4k tokens' })
+    expect(h.edits.at(-1)).toEqual({ id: 7, text: '🤖 Subagents\n1. ✅ Done in 6s · general-purpose · Review PRs 3 and 4 · 85.4k tokens' })
     await h.tick()
     expect(h.stream.agents()).toEqual([])
   })
@@ -222,7 +228,7 @@ describe('createAgentStream', () => {
     h.advance(AGENT_TICK_MS)
     h.write('/s/agent-a1.jsonl', assistant([{ type: 'text', text: 'Working' }], { input_tokens: 32300 }) + '\n' + interrupted(h.now()))
     await h.tick()
-    expect(h.edits.at(-1)).toEqual({ id: 7, text: '🤖 general-purpose\n⏹ Stopped after 3s · 32.3k tokens' })
+    expect(h.edits.at(-1)).toEqual({ id: 7, text: '🤖 Subagents\n1. ⏹ Stopped after 3s · general-purpose · 32.3k tokens' })
     await h.tick()
     expect(h.stream.agents()).toEqual([])
     expect(h.sent).toHaveLength(1)
@@ -257,21 +263,23 @@ describe('createAgentStream', () => {
     h.advance(AGENT_TICK_MS)
     h.events.push(start(h), { t: old, event: 'stop', agent_id: 'a1', outcome: 'stopped' })
     await h.tick()
-    expect(h.sent.at(-1)?.text).toContain('⏳ Starting…')
+    expect(h.sent.at(-1)?.text).toContain('⏳ general-purpose · Starting…')
     expect(h.stream.agents()).toHaveLength(1)
   })
 
-  test('all subagents in a chat share one budget', async () => {
+  test('all simultaneous agents appear in a single send and share its edit budget', async () => {
     const h = harness()
     await h.tick()
     for (const id of ['a1', 'a2', 'a3']) h.events.push(start(h, id))
     await h.tick()
     expect(h.sent.length).toBe(1)
+    expect(h.sent[0]!.text.split('\n')).toHaveLength(4)
     h.advance(CHAT_GAP_MS); await h.tick()
-    expect(h.sent.length).toBe(2)
+    expect(h.sent.length).toBe(1)
+    expect(h.edits).toEqual([])
   })
 
-  test('terminal updates get the next chat slot ahead of another agent changing on every tick', async () => {
+  test('terminal rows and a busy agent update in the same edit', async () => {
     const h = harness()
     await h.tick()
     h.events.push(start(h, 'busy'), start(h, 'stopped'))
@@ -282,6 +290,161 @@ describe('createAgentStream', () => {
     h.events.push({ t: h.now(), event: 'stop', agent_id: 'stopped', outcome: 'stopped' })
     await h.tick()
     expect(h.edits.at(-1)?.text).toContain('⏹ Stopped after 6s')
+    expect(h.edits.at(-1)?.text).toContain(WRITING)
+  })
+
+  test('four rows appear promptly even when the first agent changes on every tick for two minutes', async () => {
+    const h = harness()
+    await h.tick()
+    h.events.push(start(h, 'busy'))
+    h.write('/s/agent-busy.meta.json', JSON.stringify({ description: 'Busy first agent' }))
+    await h.tick()
+    h.advance(AGENT_TICK_MS)
+    for (const id of ['second', 'third', 'fourth']) {
+      h.events.push(start(h, id))
+      h.write(`/s/agent-${id}.meta.json`, JSON.stringify({ description: id }))
+    }
+    for (let i = 0; i < 40; i++) {
+      h.write('/s/agent-busy.jsonl', assistant([{ type: 'tool_use', name: 'Bash', input: { description: `Step ${i}` } }]))
+      if (i === 1) h.events.push({ t: h.now(), event: 'stop', agent_id: 'second', outcome: 'stopped' })
+      if (i === 2) h.events.push({ t: h.now(), event: 'stop', agent_id: 'third' })
+      await h.tick()
+      const text = h.edits.at(-1)!.text
+      for (const label of ['Busy first agent', 'second', 'third', 'fourth']) expect(text).toContain(label)
+      expect(text).toContain(`Step ${i}`)
+      if (i >= 1) expect(text).toContain('2. ⏹ Stopped after')
+      if (i >= 2) expect(text).toContain('3. ✅ Done in')
+      h.advance(AGENT_TICK_MS)
+    }
+    expect(h.sent).toHaveLength(1)
+    expect(new Set(h.edits.map(e => e.id))).toEqual(new Set([7]))
+    expect(h.stream.agents().map(a => a.id)).toEqual(['busy', 'fourth'])
+  })
+
+  test('a completed panel stays intact and the next group gets a new message', async () => {
+    const h = harness()
+    await h.tick()
+    h.events.push(start(h, 'old')); await h.tick()
+    h.advance(CHAT_GAP_MS)
+    h.events.push({ t: h.now(), event: 'stop', agent_id: 'old' }); await h.tick()
+    const final = h.edits.at(-1)!
+    h.events.push(start(h, 'new')); await h.tick()
+    expect(h.sent).toHaveLength(1) // the shared chat rate limit crosses batches
+    h.advance(CHAT_GAP_MS); await h.tick()
+    expect(h.sent).toHaveLength(2)
+    h.advance(CHAT_GAP_MS)
+    h.events.push({ t: h.now(), event: 'stop', agent_id: 'new' }); await h.tick()
+    expect(h.edits.at(-1)?.id).toBe(8)
+    expect(h.edits.filter(e => e.id === 7)).toEqual([final])
+    expect(h.stream.agents()).toEqual([])
+  })
+
+  test('an agent starting while the first send is in flight joins the same message', async () => {
+    const h = harness()
+    await h.tick()
+    const release = h.holdSend()
+    h.events.push(start(h, 'first')); await h.tick()
+    h.advance(CHAT_GAP_MS)
+    h.events.push(start(h, 'second')); await h.tick()
+    expect(h.sent).toHaveLength(1)
+    expect(h.edits).toEqual([])
+    release(); await h.tick(); await h.tick()
+    expect(h.sent).toHaveLength(1)
+    expect(h.edits.at(-1)?.text.split('\n')).toHaveLength(3)
+    expect(h.edits.at(-1)?.id).toBe(7)
+  })
+
+  test('an ending received during an edit is not acknowledged by the older running frame', async () => {
+    const h = harness()
+    await h.tick()
+    h.events.push(start(h)); await h.tick()
+    const release = h.holdEdit()
+    h.advance(CLOCK_REFRESH_MS); await h.tick()
+    h.advance(CHAT_GAP_MS)
+    h.events.push({ t: h.now(), event: 'stop', agent_id: 'a1', outcome: 'stopped' }); await h.tick()
+    expect(h.stream.agents()).toHaveLength(1)
+    release(); await h.tick(); await h.tick()
+    expect(h.edits.at(-1)?.text).toContain('⏹ Stopped after')
+    expect(h.edits.at(-1)?.id).toBe(7)
+    expect(h.stream.agents()).toEqual([])
+  })
+
+  test('an agent starting during the final edit keeps the group open', async () => {
+    const h = harness()
+    await h.tick()
+    h.events.push(start(h, 'first')); await h.tick()
+    const release = h.holdEdit()
+    h.advance(CHAT_GAP_MS)
+    h.events.push({ t: h.now(), event: 'stop', agent_id: 'first' }); await h.tick()
+    h.events.push(start(h, 'second')); await h.tick()
+    release(); await h.tick()
+    h.advance(CHAT_GAP_MS); await h.tick()
+    expect(h.sent).toHaveLength(1)
+    expect(h.edits.at(-1)?.text).toContain('1. ✅ Done in')
+    expect(h.edits.at(-1)?.text).toContain('2. ⏳')
+    expect(h.stream.agents().map(a => a.id)).toEqual(['second'])
+  })
+
+  test('a resumed agent reuses its row while another agent keeps the group open', async () => {
+    const h = harness()
+    await h.tick()
+    h.events.push(start(h, 'resume'), start(h, 'running')); await h.tick()
+    h.advance(CHAT_GAP_MS)
+    h.events.push({ t: h.now(), event: 'stop', agent_id: 'resume', outcome: 'stopped' }); await h.tick()
+    expect(h.edits.at(-1)?.text).toContain('1. ⏹ Stopped after')
+    h.advance(CHAT_GAP_MS)
+    h.events.push(start(h, 'resume')); await h.tick()
+    expect(h.edits.at(-1)?.text).toContain('1. ⏳')
+    expect(h.edits.at(-1)?.text).not.toContain('Stopped')
+    expect(h.edits.at(-1)?.text.split('\n')).toHaveLength(3)
+    expect(h.sent).toHaveLength(1)
+  })
+
+  test('agents remain in the chat where they started while new agents can use another chat', async () => {
+    const h = harness()
+    await h.tick()
+    h.events.push(start(h, 'first')); await h.tick()
+    h.setChat('84')
+    h.events.push(start(h, 'second')); await h.tick()
+    expect(h.sent.map(s => s.chat)).toEqual(['42', '84'])
+    expect(h.sent.every(s => s.text.split('\n').length === 2)).toBe(true)
+  })
+
+  test('long Unicode labels and steps stay within one Telegram message without splitting emoji', async () => {
+    const h = harness()
+    await h.tick()
+    for (let i = 0; i < 60; i++) {
+      const id = `a${i}`
+      h.events.push(start(h, id, { agent_type: 'type\n'.repeat(100) }))
+      h.write(`/s/agent-${id}.meta.json`, JSON.stringify({ description: '😀'.repeat(100) }))
+      h.write(`/s/agent-${id}.jsonl`, assistant([{ type: 'tool_use', name: 'Bash', input: { description: '😀'.repeat(100) } }]))
+    }
+    await h.tick()
+    const text = h.sent[0]!.text
+    expect(text.length).toBeLessThanOrEqual(AGENT_MESSAGE_LIMIT)
+    expect(text.split('\n')).toHaveLength(61)
+    expect(text).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u)
+    expect(h.sent).toHaveLength(1)
+  })
+
+  test('an oversized group summarizes overflow and still acknowledges every terminal row', async () => {
+    const h = harness()
+    await h.tick()
+    for (let i = 0; i < 150; i++) h.events.push(start(h, `a${i}`))
+    await h.tick()
+    expect(h.sent[0]!.text.length).toBeLessThanOrEqual(AGENT_MESSAGE_LIMIT)
+    expect(h.sent[0]!.text).toContain('… 50 more agents')
+    h.advance(CHAT_GAP_MS)
+    h.events.push(start(h, 'new'))
+    h.write('/s/agent-new.meta.json', JSON.stringify({ description: 'New arrival' }))
+    await h.tick()
+    expect(h.edits.at(-1)?.text).toContain('New arrival')
+    h.advance(CHAT_GAP_MS)
+    for (const a of h.stream.agents()) h.events.push({ t: h.now(), event: 'stop', agent_id: a.id, outcome: 'stopped' })
+    for (let i = 0; i < 4; i++) { await h.tick(); h.advance(CHAT_GAP_MS) }
+    expect(h.stream.agents()).toEqual([])
+    expect(h.sent).toHaveLength(1)
+    expect(h.edits.every(e => e.text.length <= AGENT_MESSAGE_LIMIT)).toBe(true)
   })
 
   test('a rate limit holds the chat for retry_after', async () => {
@@ -298,7 +461,7 @@ describe('createAgentStream', () => {
     expect(h.edits.length).toBe(1)
   })
 
-  test('"message is not modified" counts as sent; a deleted message ends the stream for it', async () => {
+  test('"message is not modified" counts as sent; a deleted panel is replaced', async () => {
     const h = harness()
     await h.tick()
     h.events.push(start(h))
@@ -309,6 +472,11 @@ describe('createAgentStream', () => {
     h.advance(CLOCK_REFRESH_MS); await h.tick()
     h.events.push({ t: h.now(), event: 'stop', agent_id: 'a1' })
     await h.tick()
+    expect(h.stream.agents()).toHaveLength(1)
+    h.failEditWith(undefined)
+    h.advance(CHAT_GAP_MS); await h.tick()
+    expect(h.sent).toHaveLength(2)
+    expect(h.sent.at(-1)?.text).toContain('✅ Done in')
     expect(h.stream.agents()).toEqual([])
   })
 
