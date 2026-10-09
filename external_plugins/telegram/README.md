@@ -242,6 +242,15 @@ out plain. `format: 'text'` or `'markdownv2'` on a call picks those modes
 instead. Rich messages are off by default, as some Telegram clients show them as
 unsupported.
 
+## Polling heartbeat
+
+After every completed `getUpdates` long-poll, the server rewrites
+`poll-heartbeat.json` in the state directory with its pid and the time in epoch
+milliseconds, such as `{"pid":1234,"at":1791544879112}`. An idle poll returns at
+least every 30 seconds, so a heartbeat older than a minute or two means polling
+has stopped, even while the process lives. A failed poll writes nothing. The
+file is for a health check outside the process; the server never reads it.
+
 ## No history or search
 
 Telegram's Bot API offers neither message history nor search, so the bot sees

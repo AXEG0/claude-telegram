@@ -28,6 +28,7 @@ import { STT_KINDS, sttConfig, transcribeTelegramFile } from './stt.ts'
 import { AGENT_TICK_MS, agentEventFile, createAgentStream, createEventReader } from './agents.ts'
 import { editRich, RICH_FORMAT_HELP, RICH_INSTRUCTIONS, richEnabled, sendRich, type RawApi } from './rich.ts'
 import { replyMeta } from './reply.ts'
+import { heartbeatTransformer } from './heartbeat.ts'
 import { batchGap, createBatcher } from './batch.ts'
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR
@@ -60,6 +61,8 @@ if (!TOKEN) {
 }
 const INBOX_DIR = join(STATE_DIR, 'inbox')
 const PID_FILE = join(STATE_DIR, 'bot.pid')
+// Rewritten after every completed getUpdates; see heartbeat.ts.
+const HEARTBEAT_FILE = join(STATE_DIR, 'poll-heartbeat.json')
 
 // Telegram allows exactly one getUpdates consumer per token. If a previous
 // session crashed (SIGKILL, terminal closed) its server.ts grandchild can
@@ -100,6 +103,9 @@ const PERMISSION_REPLY_RE = /^\s*(y|yes|n|no)\s+([a-km-z]{5})\s*$/i
 
 const bot = new Bot(TOKEN)
 let botUsername = ''
+bot.api.config.use(heartbeatTransformer(HEARTBEAT_FILE, process.pid, Date.now, undefined, err => {
+  process.stderr.write(`telegram channel: poll heartbeat not written: ${err}\n`)
+}))
 
 // "typing…" for the whole turn, not Telegram's 5 seconds. See typing.ts.
 const ancestors = ancestorPids()
