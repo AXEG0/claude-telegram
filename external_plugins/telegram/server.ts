@@ -133,7 +133,7 @@ const typing = createTyping({
 })
 setInterval(() => typing.tick(), REFRESH_MS).unref()
 
-// Subagents, streamed to the private chat of the last inbound message. See agents.ts.
+// Subagents share one live message in the private chat of the last inbound message. See agents.ts.
 const agentStream = createAgentStream({
   readEvents: createEventReader(ancestors.map(pid => agentEventFile(STATE_DIR, pid)), false),
   chat: () => lastChat,

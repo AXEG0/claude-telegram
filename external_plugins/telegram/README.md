@@ -6,8 +6,8 @@ Claude answers through tools to reply, react, edit its messages and fetch
 attachments.
 
 This is AXEG0's fork of Anthropic's Telegram plugin. It shows typing for the
-whole turn and tells the chat when Claude may be stuck, streams each subagent as
-a live message, joins a burst of messages into one, and passes Claude what a
+whole turn and tells the chat when Claude may be stuck, streams concurrent
+subagents in one live message, joins a burst of messages into one, and passes Claude what a
 message replies to. With rich messages on, it sends replies as Telegram rich
 messages, and with an OpenAI key, it transcribes voice messages. It keeps its
 state in `~/.claude/channels/telegram/`, the same directory as the official
@@ -196,16 +196,19 @@ you tapped keeps the outcome.
 
 ### Subagents
 
-Each subagent Claude starts appears in the chat as one message, edited while it
-runs, the way the CLI shows it:
+Subagents running together share one live message, with one line per agent.
+Each edit carries every row, so a busy agent cannot delay the others:
 
 ```
-🤖 general-purpose · Review PRs 3 and 4
-⏳ Checking gate mention and server env · 4m 31s · 85.4k tokens
+🤖 Subagents
+1. ⏳ general-purpose · Review PRs 3 and 4 · Checking gate · 4m 31s · 85.4k tokens
+2. ✅ Done in 1m 12s · Explore · Find retry logic · 41.3k tokens
 ```
 
-It ends as `✅ Done in 6m 10s · 89.8k tokens`, or `⏹ Stopped after 6m 10s ·
-89.8k tokens` when interrupted. The plugin's `SubagentStart`, `SubagentStop` and
+An agent's line changes to `✅ Done in …`, or `⏹ Stopped after …` when
+interrupted. Finished rows stay visible while the others run. Once the whole
+group ends, its final message stays intact and the next group gets a new one.
+The plugin's `SubagentStart`, `SubagentStop` and
 successful `TaskStop` hooks ([hooks/subagent.ts](./hooks/subagent.ts)) record each
 subagent under `agents/` in the state directory, and the server reads the
 subagent's transcript for its current step and context size, and its meta file
@@ -214,11 +217,15 @@ the tool with a file name or search pattern (commands, URLs and queries stay on
 the machine), then `💭 Thinking…` once the tool returns and `✍️ Writing…` once
 the subagent writes its answer.
 
-The messages go, without a notification, to the private chat that last wrote to
-the bot since the server started. All subagents in a chat share one edit budget,
-a message's clock moves while nothing else changes, and a rate limit holds the
-chat for as long as Telegram asks. An explicit interruption in the subagent's
-transcript also closes its message on the next stream tick, even when no stop
+The message goes, without a notification, to the private chat that last wrote
+to the bot since the server started. Agents stay in the chat where they first
+appeared. The stream checks every three seconds and sends at most one update
+per chat in that interval. The clocks move while nothing else changes, and a
+rate limit holds the chat for as long as Telegram asks. Long rows shorten to
+fit Telegram's message limit; a group too large for shortened rows shows a
+count of the additional agents, prioritizing new rows and unreported endings
+over finished history. An explicit interruption in the subagent's transcript
+also ends its row on the next stream tick, even when no stop
 hook ran. Inactivity alone never counts as completion: a subagent whose
 transcript stays unchanged for 30 minutes shows as quiet until its stop
 arrives, for up to two hours.

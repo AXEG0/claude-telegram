@@ -1,7 +1,9 @@
 // Never contact Telegram in subprocess tests, even if the shell has a token.
 import { mock } from 'bun:test'
-import { appendFileSync } from 'fs'
+import { appendFileSync, existsSync, readFileSync } from 'fs'
 import * as grammy from 'grammy'
+
+let deliveredInbound = false
 
 const fakeFetch = (async (url: string | URL | Request, options?: RequestInit) => {
   const method = String(url).split('/').pop()!
@@ -14,6 +16,11 @@ const fakeFetch = (async (url: string | URL | Request, options?: RequestInit) =>
   if (method === 'getUpdates') {
     await Bun.sleep(25)
     result = []
+    const inbound = process.env.TELEGRAM_TEST_INBOUND
+    if (inbound && !deliveredInbound && existsSync(inbound)) {
+      result = JSON.parse(readFileSync(inbound, 'utf8'))
+      deliveredInbound = true
+    }
   }
   return new Response(JSON.stringify({ ok: true, result }), { headers: { 'content-type': 'application/json' } })
 }) as unknown as typeof fetch

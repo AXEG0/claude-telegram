@@ -1,8 +1,8 @@
-// Streams Claude Code's subagents to Telegram, one message per subagent that
-// is edited while it runs, the way the CLI shows them:
+// Streams concurrent Claude Code subagents in one live Telegram message:
 //
-//   🤖 general-purpose · Review claude-telegram PRs 3 and 4
-//   ⏳ Checking gate mention and server env · 4m 31s · 85.4k tokens
+//   🤖 Subagents
+//   1. ⏳ general-purpose · Review PRs · Checking gate · 4m 31s · 85.4k tokens
+//   2. ✅ Done in 1m 12s · Explore · Find retry logic · 41.3k tokens
 //
 // The plugin's SubagentStart and SubagentStop hook (hooks/subagent.ts)
 // appends one line per event to a file named for the Claude Code pid. The
@@ -204,7 +204,11 @@ function stepFor(tool: string, input: Record<string, unknown>): string {
 
 function oneLine(s: string, max = 80): string {
   const t = s.replace(/\s+/g, ' ').trim()
-  return t.length > max ? t.slice(0, max - 1) + '…' : t
+  if (t.length <= max) return t
+  let end = Math.max(0, max - 1)
+  // Telegram counts UTF-16 units; never cut an emoji between its surrogates.
+  if (end > 0 && /[\uD800-\uDBFF]/.test(t[end - 1]!)) end--
+  return t.slice(0, end) + '…'
 }
 
 export function formatDuration(ms: number): string {
@@ -234,8 +238,14 @@ type Agent = {
   transcriptMtime?: number
   done?: number
   outcome?: 'stopped'
+  shown?: boolean
+  dropped?: boolean
+}
+
+type Batch = {
+  chatId: string
+  members: Map<string, Agent>
   msgId?: number
-  // The message can no longer be edited, or sending keeps failing.
   gone?: boolean
   failures: number
   sending?: boolean
@@ -244,20 +254,42 @@ type Agent = {
 }
 
 export function render(a: Agent, now: number): string {
-  const head = `🤖 ${a.type}${a.description ? ` · ${oneLine(a.description)}` : ''}`
+  const label = `${oneLine(a.type, 32)}${a.description ? ` · ${oneLine(a.description)}` : ''}`
   const tokens = a.progress.tokens ? ` · ${formatTokens(a.progress.tokens)} tokens` : ''
-  if (a.done !== undefined) return `${head}\n${a.outcome === 'stopped' ? '⏹ Stopped after' : '✅ Done in'} ${formatDuration(a.done - a.started)}${tokens}`
-  const step = a.progress.step ?? 'Starting…'
+  if (a.done !== undefined) return `${a.outcome === 'stopped' ? '⏹ Stopped after' : '✅ Done in'} ${formatDuration(a.done - a.started)} · ${label}${tokens}`
+  const step = oneLine(a.progress.step ?? 'Starting…')
   if (now - a.quietSince > AGENT_STALE_MS) {
-    return `${head}\n⚠️ No activity for ${formatDuration(now - a.quietSince)} · last: ${step}${tokens}`
+    return `⚠️ No activity for ${formatDuration(now - a.quietSince)} · ${label} · last: ${step}${tokens}`
   }
-  return `${head}\n⏳ ${step} · ${formatDuration(now - a.started)}${tokens}`
+  return `⏳ ${label} · ${step} · ${formatDuration(now - a.started)}${tokens}`
 }
 
 // What the message says apart from its clock.
 function contentKey(a: Agent, now: number): string {
   return JSON.stringify([a.type, a.description, a.progress.step, a.progress.tokens, a.done, a.outcome,
-    now - a.quietSince > AGENT_STALE_MS])
+    a.done === undefined && now - a.quietSince > AGENT_STALE_MS, a.dropped])
+}
+
+export const AGENT_MESSAGE_LIMIT = 4096
+const MAX_PANEL_ROWS = 100
+
+function panel(batch: Batch, agents: Map<string, Agent>, t: number) {
+  const members = [...batch.members.values()]
+  let shown = members.map((a, i) => ({ a, ordinal: i + 1, key: contentKey(a, t) }))
+  if (shown.length > MAX_PANEL_ROWS) {
+    // If even shortened rows cannot all fit, show unacknowledged endings and
+    // new agents first, then running agents, ahead of finished history.
+    const priority = (a: Agent) => a.done !== undefined && agents.get(a.id) === a ? 0
+      : !a.shown ? 1 : a.done === undefined && !a.dropped ? 2 : 3
+    shown.sort((a, b) => priority(a.a) - priority(b.a) || a.ordinal - b.ordinal)
+    shown = shown.slice(0, MAX_PANEL_ROWS).sort((a, b) => a.ordinal - b.ordinal)
+  }
+  const header = '🤖 Subagents'
+  const suffix = members.length > shown.length ? `\n… ${members.length - shown.length} more agents` : ''
+  const width = Math.floor((AGENT_MESSAGE_LIMIT - header.length - suffix.length - shown.length) / Math.max(1, shown.length))
+  const text = header + shown.map(({ a, ordinal }) => '\n' + oneLine(`${ordinal}. ${render(a, t)}`, width)).join('') + suffix
+  const key = JSON.stringify([members.map(a => [a.id, contentKey(a, t)]), shown.map(s => s.ordinal)])
+  return { text, key, shown }
 }
 
 export type AgentStream = { tick(): void; agents(): Agent[] }
@@ -280,6 +312,7 @@ export function createAgentStream(opts: {
   const agents = new Map<string, Agent>()
   // Stops whose start has not been read yet: the two hooks run concurrently.
   const earlyStops = new Map<string, AgentEvent>()
+  const batches = new Map<string, Batch>()
   const chatNext = new Map<string, number>()
   let first = true
 
@@ -308,31 +341,63 @@ export function createAgentStream(opts: {
     }
   }
 
-  function flush(a: Agent, t: number) {
-    if (a.sending || a.gone || !a.chatId) return
-    const key = contentKey(a, t)
-    if (key === a.sentKey && (a.done !== undefined || t - a.lastEdit < CLOCK_REFRESH_MS)) return
-    const chatId = a.chatId
+  function flush(batch: Batch, t: number) {
+    if (batch.sending) return
+    if (batch.gone) {
+      for (const a of batch.members.values()) {
+        if ((a.done !== undefined || a.dropped) && agents.get(a.id) === a) agents.delete(a.id)
+      }
+      if (![...batch.members.values()].some(a => a.done === undefined && !a.dropped)) batches.delete(batch.chatId)
+      return
+    }
+    const frame = panel(batch, agents, t)
+    const running = [...batch.members.values()].some(a => a.done === undefined && !a.dropped)
+    if (frame.key === batch.sentKey && (!running || t - batch.lastEdit < CLOCK_REFRESH_MS)) return
+    const chatId = batch.chatId
     if (t < (chatNext.get(chatId) ?? 0)) return
     chatNext.set(chatId, t + CHAT_GAP_MS)
-    a.sending = true
-    a.lastEdit = t
-    const text = render(a, t)
-    const ok = () => { a.sentKey = key; a.failures = 0 }
+    batch.sending = true
+    batch.lastEdit = t
+    const ok = () => {
+      batch.sentKey = frame.key
+      batch.failures = 0
+      for (const { a, key } of frame.shown) {
+        a.shown = true
+        // An ending received while this send/edit was in flight still needs
+        // its own acknowledgement. A resumed run is a different Agent object.
+        if (contentKey(a, now()) === key && (a.done !== undefined || a.dropped)
+          && agents.get(a.id) === a) agents.delete(a.id)
+      }
+    }
     const fail = (err: unknown) => {
       const e = (err ?? {}) as ApiError
       const desc = String(e.description ?? err)
       if (/message is not modified/i.test(desc)) return ok()
-      a.lastEdit = 0 // retry once the chat allows, not at the next clock refresh
+      batch.lastEdit = 0 // retry once the chat allows, not at the next clock refresh
       const retry = e.parameters?.retry_after
-      if (retry) chatNext.set(chatId, now() + retry * 1000)
-      if (/message to edit not found|message can't be edited/i.test(desc) || ++a.failures >= 5) a.gone = true
+      if (retry) { chatNext.set(chatId, now() + retry * 1000); return }
+      if (/message to edit not found|message can't be edited/i.test(desc)) {
+        batch.msgId = undefined // replace a deleted panel on the next chat slot
+      } else if (++batch.failures >= 5) batch.gone = true
     }
-    const done = () => { a.sending = false }
-    if (a.msgId === undefined) {
-      opts.send(chatId, text).then(id => { a.msgId = id; ok() }, fail).finally(done)
+    const done = () => {
+      batch.sending = false
+      const finished = [...batch.members.values()].every(a => a.done !== undefined || a.dropped)
+      if (finished && (batch.gone || batch.sentKey === panel(batch, agents, now()).key)) {
+        // Leave the final message intact. The next overlapping group gets a
+        // new panel, without rewriting the previous group's completed rows.
+        if (batches.get(chatId) === batch) batches.delete(chatId)
+        for (const a of batch.members.values()) if (agents.get(a.id) === a) agents.delete(a.id)
+      }
+    }
+    if (batch.msgId === undefined) {
+      Promise.resolve().then(() => opts.send(chatId, frame.text)).then(id => {
+        if (id === undefined) { fail(new Error('Telegram send returned no message id')); return }
+        batch.msgId = id
+        ok()
+      }, fail).finally(done)
     } else {
-      opts.edit(chatId, a.msgId, text).then(ok, fail).finally(done)
+      Promise.resolve().then(() => opts.edit(chatId, batch.msgId!, frame.text)).then(ok, fail).finally(done)
     }
   }
 
@@ -351,8 +416,6 @@ export function createAgentStream(opts: {
             started: ev.t,
             progress: {},
             quietSince: ev.t,
-            failures: 0,
-            lastEdit: 0,
           }
           const stop = earlyStops.get(ev.agent_id)
           if (stop && stop.t >= ev.t) { a.done = stop.t; a.outcome = stop.outcome }
@@ -381,15 +444,19 @@ export function createAgentStream(opts: {
       for (const a of agents.values()) {
         a.chatId ??= opts.chat()
         refresh(a)
+        if (a.done === undefined && t - a.quietSince > AGENT_DROP_MS) a.dropped = true
+        if (!a.chatId) {
+          if (a.done !== undefined || a.dropped) agents.delete(a.id)
+          continue
+        }
+        let batch = batches.get(a.chatId)
+        if (!batch) {
+          batch = { chatId: a.chatId, members: new Map(), failures: 0, lastEdit: 0 }
+          batches.set(a.chatId, batch)
+        }
+        batch.members.set(a.id, a)
       }
-      // Terminal updates take the next available chat slot; a busy earlier
-      // agent must not starve a later agent's stopped/done line.
-      const pending = [...agents.values()].sort((a, b) => Number(b.done !== undefined) - Number(a.done !== undefined))
-      for (const a of pending) {
-        flush(a, t)
-        const finished = a.done !== undefined && !a.sending && (a.gone || !a.chatId || a.sentKey === contentKey(a, t))
-        if (finished || t - a.quietSince > AGENT_DROP_MS) agents.delete(a.id)
-      }
+      for (const batch of batches.values()) flush(batch, t)
     },
     agents() {
       return [...agents.values()]

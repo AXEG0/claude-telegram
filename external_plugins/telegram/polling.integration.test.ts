@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import fixture from './fixtures/channel-argv.json'
+import { AGENT_TICK_MS, appendAgentEvent, agentEventFile } from './agents.ts'
 
 const children: ChildProcessWithoutNullStreams[] = []
 const dirs: string[] = []
@@ -13,14 +14,14 @@ function state(): string {
   writeFileSync(join(dir, 'access.json'), JSON.stringify({ dmPolicy: 'allowlist', allowFrom: ['1'] }))
   return dir
 }
-async function until(check: () => boolean): Promise<void> {
-  const end = Date.now() + 4000
+async function until(check: () => boolean, timeout = 4000): Promise<void> {
+  const end = Date.now() + timeout
   while (!check()) {
     if (Date.now() > end) throw new Error('subprocess did not reach expected state')
     await Bun.sleep(10)
   }
 }
-function calls(dir: string): { pid: number; method: string }[] {
+function calls(dir: string): { pid: number; method: string; payload: any }[] {
   const file = join(dir, 'api.jsonl')
   return existsSync(file) ? readFileSync(file, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) : []
 }
@@ -35,6 +36,7 @@ function start(dir: string, argv: string[]) {
       TELEGRAM_RICH_MESSAGES: 'false',
       TELEGRAM_STT_OPENAI_KEY: '',
       TELEGRAM_TEST_API_LOG: join(dir, 'api.jsonl'),
+      TELEGRAM_TEST_INBOUND: join(dir, 'inbound.json'),
     },
     stdio: ['pipe', 'pipe', 'pipe'],
   })
@@ -85,6 +87,39 @@ afterEach(async () => {
 // Real /proc ancestry, real MCP transport, and the production server. Only
 // grammy's HTTP transport is fake; these tests never use the owner's bot.
 describe.skipIf(process.platform !== 'linux')('polling ownership in the running server', () => {
+  test('the channel server shows four agents and their endings in one shared message', async () => {
+    const dir = state()
+    writeFileSync(join(dir, 'inbound.json'), JSON.stringify([{
+      update_id: 1,
+      message: { message_id: 1, date: Math.floor(Date.now() / 1000), text: 'stream test',
+        from: { id: 1, is_bot: false, first_name: 'Owner' }, chat: { id: 1, type: 'private' } },
+    }]))
+    const channel = start(dir, fixture.argv)
+    await channel.ready()
+    const file = agentEventFile(dir, channel.child.pid!)
+    const base = join(dir, 'transcripts')
+    mkdirSync(base)
+    for (let i = 1; i <= 4; i++) {
+      const agentBase = join(base, `agent-a${i}`)
+      writeFileSync(`${agentBase}.meta.json`, JSON.stringify({ description: `Shared agent ${i}` }))
+      appendAgentEvent(file, { t: Date.now(), event: 'start', agent_id: `a${i}`, agent_type: 'general-purpose', agent_base: agentBase })
+    }
+    await until(() => calls(dir).some(c => c.method === 'sendMessage' && c.payload.text?.startsWith('🤖 Subagents')), AGENT_TICK_MS + 4000)
+    const sent = calls(dir).filter(c => c.method === 'sendMessage' && c.payload.text?.startsWith('🤖 Subagents'))
+    expect(sent).toHaveLength(1)
+    for (let i = 1; i <= 4; i++) expect(sent[0]!.payload.text).toContain(`Shared agent ${i}`)
+    expect(sent[0]!.payload.text.split('\n')).toHaveLength(5)
+    appendAgentEvent(file, { t: Date.now(), event: 'stop', agent_id: 'a2', outcome: 'stopped' })
+    appendAgentEvent(file, { t: Date.now(), event: 'stop', agent_id: 'a3' })
+    await until(() => calls(dir).some(c => c.method === 'editMessageText' && c.payload.text?.includes('2. ⏹ Stopped after')
+      && c.payload.text?.includes('3. ✅ Done in')), AGENT_TICK_MS + 4000)
+    const edit = calls(dir).findLast(c => c.method === 'editMessageText')!
+    expect(edit.payload.message_id).toBe(42)
+    for (let i = 1; i <= 4; i++) expect(edit.payload.text).toContain(`Shared agent ${i}`)
+    expect(calls(dir).filter(c => c.method === 'sendMessage' && c.payload.text?.startsWith('🤖 Subagents'))).toHaveLength(1)
+    await channel.close()
+  }, 15000)
+
   test.each([
     ['claude', '-p', 'hello'],
     ['claude', 'mcp', 'list'],

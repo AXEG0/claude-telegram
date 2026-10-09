@@ -19,7 +19,7 @@ through it.
 | Feature | What you get |
 | --- | --- |
 | ⌨️ **Typing for the whole turn** | "typing…" stays on while Claude works, whoever started the turn, and the bot tells you when Claude may be stuck. |
-| 🤖 **Live subagents** | Each subagent gets one message, edited as it runs: its step, time and tokens, then Thinking, Writing and Done. |
+| 🤖 **Live subagents** | Concurrent subagents share one live message: one row each with step, time and tokens, then Done or Stopped. |
 | 📝 **Rich messages** | Headings, tables, task lists, code and collapsible sections render natively in Telegram. |
 | 🎙️ **Voice messages** | Voice notes, audio and video notes reach Claude as text, transcribed by OpenAI. |
 | 📦 **Bursts as one message** | Quick texts, a long paste Telegram split, and a photo with its question arrive together, so Claude answers once. |
@@ -31,11 +31,9 @@ files, reactions, and permission prompts with Allow and Deny buttons.
 ## 👀 In the chat
 
 ```
-🤖 general-purpose · Review PRs 3 and 4
-⏳ Checking gate mention and server env · 4m 31s · 85.4k tokens
-
-🤖 Explore · Find the retry logic
-✅ Done in 1m 12s · 41.3k tokens
+🤖 Subagents
+1. ⏳ general-purpose · Review PRs 3 and 4 · Checking gate · 4m 31s · 85.4k tokens
+2. ✅ Done in 1m 12s · Explore · Find the retry logic · 41.3k tokens
 ```
 
 ## 🚀 Quick start
