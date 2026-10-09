@@ -242,6 +242,19 @@ out plain. `format: 'text'` or `'markdownv2'` on a call picks those modes
 instead. Rich messages are off by default, as some Telegram clients show them as
 unsupported.
 
+## Polling ownership
+
+Only a server whose nearest Claude Code ancestor has `claude` as its executable
+name and `plugin:telegram@claude-telegram` as a separate argument polls the bot.
+An ordinary session, `claude -p`, or `claude mcp list` serves outbound tools
+without consuming updates or touching `bot.pid`, so it leaves a live channel's
+poller in place. A new channel session still replaces the previous holder,
+including an orphan left by a crashed session.
+
+The server reads the ancestor tree through `/proc`. If it cannot read the tree,
+it logs a warning to stderr and polls as before. On hosts without readable
+`/proc`, use a separate `TELEGRAM_STATE_DIR` for probes and ordinary sessions.
+
 ## Polling heartbeat
 
 After every completed `getUpdates` long-poll, the server rewrites
