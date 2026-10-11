@@ -180,13 +180,13 @@ message. An edited reply carries what it replies to, as a new message does.
 
 An edit passes the same access check as a new message from the same sender in
 the same chat, read-only: it never starts pairing or writes `access.json`, and
-it never answers a permission prompt. It goes alone, after any burst from the
-sender that is still waiting. Telegram also reports changes that are not
-someone correcting text, such as a live location moving or a formatting change,
-so an edit without text or a caption sends nothing, and so does one whose text
-is what Claude last got for that message. The server remembers that text for
-the last 1000 messages since it started; an edit of a message outside that
-memory always goes through.
+it never answers a permission prompt. It goes alone, after any burst still
+waiting in the chat, so the chat keeps its order. Telegram also reports changes
+that are not someone correcting text, such as a live location moving or a
+formatting change, so an edit without text or a caption sends nothing, and so
+does one whose text is what Claude last got for that message. The server
+remembers that text for the last 1000 messages since it started; an edit of a
+message outside that memory always goes through.
 
 ## What the chat shows
 

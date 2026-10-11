@@ -1008,7 +1008,9 @@ bot.on('edited_message', async ctx => {
   if (!texts.changed(chat_id, msg.message_id, edit.text)) return
   typing.start(chat_id)
   if (msg.chat.type === 'private') lastChat = chat_id
-  // The sender's waiting batch goes first; an edit never joins a batch.
+  // Every batch waiting in the chat goes first, so the chat keeps its order;
+  // an edit never joins a batch.
+  batcher.flushChat(chat_id)
   batcher.flush(`${chat_id}:${msg.from!.id}`, edit.item)
 })
 

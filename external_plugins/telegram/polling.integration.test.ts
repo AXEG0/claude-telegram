@@ -269,6 +269,21 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     await channel.close()
   }, 15000)
 
+  test('in a group, an edit goes after the text another member sent before it', async () => {
+    const dir = state({ dmPolicy: 'allowlist', allowFrom: ['1'], groups: { '-100': { requireMention: false, allowFrom: [] } } })
+    const now = Math.floor(Date.now() / 1000)
+    const chat = { id: -100, type: 'supergroup', title: 'g' }
+    writeFileSync(join(dir, 'inbound.json'), JSON.stringify([
+      { update_id: 1, message: { message_id: 40, date: now, from: { id: 6, is_bot: false, first_name: 'A' }, chat, text: 'first' } },
+      { update_id: 2, edited_message: { message_id: 39, date: now, edit_date: now + 5, from: { id: 5, is_bot: false, first_name: 'B' }, chat, text: 'second, edited' } },
+    ]))
+    const channel = start(dir, fixture.argv)
+    await channel.ready()
+    await until(() => channel.inbound().length === 2, 6000)
+    expect(channel.inbound().map(n => [n.meta.user_id, n.content])).toEqual([['6', 'first'], ['5', 'second, edited']])
+    await channel.close()
+  }, 15000)
+
   test.each([
     ['claude', '-p', 'hello'],
     ['claude', 'mcp', 'list'],
