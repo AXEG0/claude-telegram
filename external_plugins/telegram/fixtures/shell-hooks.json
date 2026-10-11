@@ -1,0 +1,107 @@
+{
+  "background_bash": {
+    "session_id": "58c1df05-c28f-4da8-b0f5-0f583989ab2d",
+    "transcript_path": "/home/ec2-user/.claude/projects/-var-tmp-argylle-shell-probe-890-work/58c1df05-c28f-4da8-b0f5-0f583989ab2d.jsonl",
+    "cwd": "/var/tmp/argylle/shell-probe-890/work",
+    "prompt_id": "0af12f3d-780d-4229-81da-3f1f6848ee19",
+    "permission_mode": "dontAsk",
+    "effort": {
+      "level": "medium"
+    },
+    "hook_event_name": "PostToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "sleep 4; echo out-a; exit 3",
+      "description": "Probe failing shell",
+      "run_in_background": true
+    },
+    "tool_response": {
+      "stdout": "",
+      "stderr": "",
+      "interrupted": false,
+      "isImage": false,
+      "noOutputExpected": false,
+      "backgroundTaskId": "bqo62tie2"
+    },
+    "tool_use_id": "toolu_01TgmS6Lk1gdP2vg454dUCWt",
+    "duration_ms": 218
+  },
+  "foreground_bash": {
+    "session_id": "58c1df05-c28f-4da8-b0f5-0f583989ab2d",
+    "transcript_path": "/home/ec2-user/.claude/projects/-var-tmp-argylle-shell-probe-890-work/58c1df05-c28f-4da8-b0f5-0f583989ab2d.jsonl",
+    "cwd": "/var/tmp/argylle/shell-probe-890/work",
+    "prompt_id": "0af12f3d-780d-4229-81da-3f1f6848ee19",
+    "permission_mode": "dontAsk",
+    "effort": {
+      "level": "medium"
+    },
+    "hook_event_name": "PostToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "sleep 8",
+      "description": "Wait"
+    },
+    "tool_response": {
+      "stdout": "",
+      "stderr": "",
+      "interrupted": false,
+      "isImage": false,
+      "noOutputExpected": false
+    },
+    "tool_use_id": "toolu_015U6aXzDJhTXy4iaopzyURF",
+    "duration_ms": 8013
+  },
+  "task_stop_shell": {
+    "session_id": "58c1df05-c28f-4da8-b0f5-0f583989ab2d",
+    "transcript_path": "/home/ec2-user/.claude/projects/-var-tmp-argylle-shell-probe-890-work/58c1df05-c28f-4da8-b0f5-0f583989ab2d.jsonl",
+    "cwd": "/var/tmp/argylle/shell-probe-890/work",
+    "prompt_id": "0af12f3d-780d-4229-81da-3f1f6848ee19",
+    "permission_mode": "dontAsk",
+    "effort": {
+      "level": "medium"
+    },
+    "hook_event_name": "PostToolUse",
+    "tool_name": "TaskStop",
+    "tool_input": {
+      "task_id": "bm4vrn0w1"
+    },
+    "tool_response": {
+      "message": "Successfully stopped task: bm4vrn0w1 (sleep 120)",
+      "task_id": "bm4vrn0w1",
+      "task_type": "local_bash",
+      "command": "sleep 120"
+    },
+    "tool_use_id": "toolu_01RHVpB43UzxCoY6gPuQz1Zh",
+    "duration_ms": 3
+  },
+  "subagent_background_bash": {
+    "session_id": "bb751a00-55a2-4350-a485-34400fefbaa4",
+    "transcript_path": "/home/ec2-user/.claude/projects/-var-tmp-argylle-shell-probe-890-work2/bb751a00-55a2-4350-a485-34400fefbaa4.jsonl",
+    "cwd": "/var/tmp/argylle/shell-probe-890/work2",
+    "prompt_id": "8dd24e4e-2b58-4bdd-86f6-995591de0f60",
+    "permission_mode": "dontAsk",
+    "agent_id": "add97469c200c7229",
+    "agent_type": "general-purpose",
+    "effort": {
+      "level": "medium"
+    },
+    "hook_event_name": "PostToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "sleep 45; echo late",
+      "description": "Agent shell",
+      "run_in_background": true
+    },
+    "tool_response": {
+      "stdout": "",
+      "stderr": "",
+      "interrupted": false,
+      "isImage": false,
+      "noOutputExpected": false,
+      "backgroundTaskId": "b795t6qa7",
+      "backgroundEndsWithFinalResponse": true
+    },
+    "tool_use_id": "toolu_016q4LKPLXhoe1aqpndGmZqU",
+    "duration_ms": 247
+  }
+}

@@ -1,19 +1,23 @@
-// Streams concurrent Claude Code subagents in one live Telegram message:
+// Streams concurrent Claude Code subagents and background shells in one live
+// Telegram message:
 //
-//   🤖 Subagents
+//   🤖 Subagents · 🐚 Shells
 //   1. ⏳ general-purpose · Review PRs · Checking gate · 4m 31s · 85.4k tokens
-//   2. ✅ Done in 1m 12s · Explore · Find retry logic · 41.3k tokens
+//   2. ⏳ shell · Wait for CI · 2m 5s
+//   3. ❌ Failed after 12s (exit 1) · shell · Run the tests
 //
-// The plugin's SubagentStart and SubagentStop hook (hooks/subagent.ts)
-// appends one line per event to a file named for the Claude Code pid. The
-// server reads the files of its ancestors, then follows each subagent's own
-// transcript for its current step and token count, and its meta file for its
-// description.
+// The plugin's SubagentStart, SubagentStop and PostToolUse hook
+// (hooks/subagent.ts) appends one line per event to a file named for the
+// Claude Code pid. The server reads the files of its ancestors, then follows
+// each subagent's own transcript for its current step and token count, and its
+// meta file for its description; and each shell's output file for the line
+// Claude Code appends when the shell ends.
 //
 // This file carries no dependencies beyond Node's, so the hook can import it
 // before `bun install` has run.
 
-import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync, readSync, statSync } from 'fs'
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync } from 'fs'
+import { tmpdir } from 'os'
 import { join } from 'path'
 
 export const AGENT_TICK_MS = 3000
@@ -40,11 +44,25 @@ export type AgentEvent = {
   outcome?: 'stopped'
 }
 
+// A background shell. Its own event names and id field keep it out of an
+// older server's subagent rows.
+export type ShellEvent = {
+  t: number
+  event: 'shell_start' | 'shell_stop'
+  task_id: string
+  description?: string
+  // The file Claude Code writes the shell's output to.
+  output?: string
+  outcome?: 'stopped'
+}
+
+export type StreamEvent = AgentEvent | ShellEvent
+
 export function agentEventFile(dir: string, pid: number): string {
   return join(dir, 'agents', `pid-${pid}.jsonl`)
 }
 
-export function appendAgentEvent(file: string, ev: AgentEvent): void {
+export function appendAgentEvent(file: string, ev: StreamEvent): void {
   mkdirSync(join(file, '..'), { recursive: true, mode: 0o700 })
   appendFileSync(file, JSON.stringify(ev) + '\n')
 }
@@ -86,6 +104,89 @@ export function eventFromHook(input: {
   return { t: now, event, agent_id: input.agent_id, agent_type: input.agent_type, agent_base: base }
 }
 
+function parsedResponse(response: unknown): Record<string, unknown> | undefined {
+  let result = response
+  if (typeof result === 'string') {
+    try { result = JSON.parse(result) } catch { return undefined }
+  }
+  return result && typeof result === 'object' ? result as Record<string, unknown> : undefined
+}
+
+// PostToolUse hook input → shell event. A Bash call whose result names a
+// background task starts a shell, however it went to the background; its
+// description labels it, never its command. A successful TaskStop of a shell
+// stops it. Every other call is no event, before any file system access.
+export function shellEventFromHook(input: {
+  hook_event_name?: string
+  session_id?: string
+  tool_name?: string
+  tool_input?: { description?: unknown; task_id?: string }
+  tool_response?: unknown
+}, now: number = Date.now(), findOutput: (taskId: string, sessionId?: string) => string | undefined = shellOutputFile): ShellEvent | undefined {
+  if (input.hook_event_name !== 'PostToolUse') return undefined
+  if (input.tool_name === 'Bash') {
+    const r = parsedResponse(input.tool_response)
+    const id = r?.backgroundTaskId
+    if (typeof id !== 'string' || !/^[\w-]+$/.test(id)) return undefined
+    // Without its output file the stream could never see the shell end.
+    const output = findOutput(id, input.session_id)
+    if (!output) return undefined
+    const d = input.tool_input?.description
+    const description = typeof d === 'string' && d.trim() ? oneLine(d, 200) : undefined
+    return { t: now, event: 'shell_start', task_id: id, description, output }
+  }
+  if (input.tool_name === 'TaskStop') {
+    const r = parsedResponse(input.tool_response) as { task_id?: unknown; task_type?: unknown; message?: unknown } | undefined
+    if (r?.task_type !== 'local_bash' || typeof r.task_id !== 'string'
+      || !/^[\w-]+$/.test(r.task_id) || r.task_id !== input.tool_input?.task_id
+      || typeof r.message !== 'string' || !r.message.startsWith(`Successfully stopped task: ${r.task_id}`)) return undefined
+    return { t: now, event: 'shell_stop', task_id: r.task_id, outcome: 'stopped' }
+  }
+  return undefined
+}
+
+// Claude Code writes a background shell's output to
+// <CLAUDE_CODE_TMPDIR or the OS temp dir, resolved>/claude-<uid>/<project>/<session id>/tasks/<task id>.output.
+// The project key follows the session's start folder and the session id can
+// change, while the task id cannot, so this looks the file up by task id: in
+// the session's folder first, then in any.
+export function shellOutputFile(taskId: string, sessionId?: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
+  if (!/^[\w-]+$/.test(taskId)) return undefined
+  let base = env.CLAUDE_CODE_TMPDIR || tmpdir()
+  try { base = realpathSync(base) } catch {}
+  const root = join(base, `claude-${process.getuid?.() ?? 0}`)
+  const name = `${taskId}.output`
+  const list = (dir: string) => { try { return readdirSync(dir) } catch { return [] } }
+  const projects = list(root)
+  if (sessionId && /^[\w-]+$/.test(sessionId)) {
+    for (const p of projects) {
+      const f = join(root, p, sessionId, 'tasks', name)
+      if (existsSync(f)) return f
+    }
+  }
+  for (const p of projects) {
+    for (const s of list(join(root, p))) {
+      const f = join(root, p, s, 'tasks', name)
+      if (existsSync(f)) return f
+    }
+  }
+  return undefined
+}
+
+export type ShellEnd = { outcome?: 'stopped' | 'failed'; exitCode?: number }
+
+// The line Claude Code appends to a shell's output file once the shell ends:
+// `[exited with code N]`, with `unknown` for no code, or `[killed]` when it is
+// stopped: by TaskStop, by the end of the subagent that started it, or by
+// Claude exiting.
+export function shellEndFromOutput(text: string): ShellEnd | undefined {
+  const m = /(?:^|\n)\[(?:killed|exited with code (-?\d+|unknown))\]\n?$/.exec(text)
+  if (!m) return undefined
+  if (m[1] === undefined) return { outcome: 'stopped' }
+  if (m[1] === '0') return { exitCode: 0 }
+  return { outcome: 'failed', exitCode: m[1] === 'unknown' ? undefined : Number(m[1]) }
+}
+
 // Reads what was appended to each file since the last call.
 export function createEventReader(files: string[], fromNow = true) {
   const offsets = new Map<string, number>()
@@ -94,8 +195,8 @@ export function createEventReader(files: string[], fromNow = true) {
     try { size = statSync(f).size } catch {}
     offsets.set(f, fromNow ? size : 0)
   }
-  return (): AgentEvent[] => {
-    const out: AgentEvent[] = []
+  return (): StreamEvent[] => {
+    const out: StreamEvent[] = []
     for (const f of files) {
       let size: number
       try { size = statSync(f).size } catch { continue }
@@ -108,8 +209,9 @@ export function createEventReader(files: string[], fromNow = true) {
       offsets.set(f, off + Buffer.byteLength(text.slice(0, end + 1)))
       for (const line of text.slice(0, end).split('\n')) {
         try {
-          const ev = JSON.parse(line) as AgentEvent
-          if (ev.agent_id && (ev.event === 'start' || ev.event === 'stop')) out.push(ev)
+          const ev = JSON.parse(line) as StreamEvent
+          if (ev.event === 'start' || ev.event === 'stop' ? typeof ev.agent_id === 'string' && ev.agent_id
+            : (ev.event === 'shell_start' || ev.event === 'shell_stop') && typeof ev.task_id === 'string' && ev.task_id) out.push(ev)
         } catch {}
       }
     }
@@ -228,6 +330,9 @@ export function formatTokens(n: number): string {
 
 type Agent = {
   id: string
+  // The id names a subagent or a shell; the key keeps the two apart.
+  key: string
+  kind?: 'shell'
   type: string
   base?: string
   description?: string
@@ -237,10 +342,16 @@ type Agent = {
   quietSince: number
   transcriptMtime?: number
   done?: number
-  outcome?: 'stopped'
+  outcome?: 'stopped' | 'failed'
+  // A shell's output file, its last change, and its exit code once it ends.
+  output?: string
+  outputMtime?: number
+  exitCode?: number
   shown?: boolean
   dropped?: boolean
 }
+
+const shellKey = (taskId: string) => `shell:${taskId}`
 
 type Batch = {
   chatId: string
@@ -253,12 +364,27 @@ type Batch = {
   lastEdit: number
 }
 
+// A shell's line carries its description and clock; it ends as done, failed
+// with its exit code, or stopped. It never goes quiet: a shell can wait in
+// silence for as long as it likes, and Claude Code marks every ending.
+function renderShell(a: Agent, now: number): string {
+  const label = `shell${a.description ? ` · ${oneLine(a.description)}` : ''}`
+  if (a.done === undefined) return `⏳ ${label} · ${formatDuration(now - a.started)}`
+  const took = formatDuration(a.done - a.started)
+  if (a.outcome === 'stopped') return `⏹ Stopped after ${took} · ${label}`
+  if (a.outcome === 'failed') return `❌ Failed after ${took}${a.exitCode !== undefined ? ` (exit ${a.exitCode})` : ''} · ${label}`
+  return `✅ Done in ${took} · ${label}`
+}
+
+const isQuiet = (a: Agent, now: number) => a.kind !== 'shell' && a.done === undefined && now - a.quietSince > AGENT_STALE_MS
+
 export function render(a: Agent, now: number): string {
+  if (a.kind === 'shell') return renderShell(a, now)
   const label = `${oneLine(a.type, 32)}${a.description ? ` · ${oneLine(a.description)}` : ''}`
   const tokens = a.progress.tokens ? ` · ${formatTokens(a.progress.tokens)} tokens` : ''
   if (a.done !== undefined) return `${a.outcome === 'stopped' ? '⏹ Stopped after' : '✅ Done in'} ${formatDuration(a.done - a.started)} · ${label}${tokens}`
   const step = oneLine(a.progress.step ?? 'Starting…')
-  if (now - a.quietSince > AGENT_STALE_MS) {
+  if (isQuiet(a, now)) {
     return `⚠️ No activity for ${formatDuration(now - a.quietSince)} · ${label} · last: ${step}${tokens}`
   }
   return `⏳ ${label} · ${step} · ${formatDuration(now - a.started)}${tokens}`
@@ -266,8 +392,8 @@ export function render(a: Agent, now: number): string {
 
 // What the message says apart from its clock.
 function contentKey(a: Agent, now: number): string {
-  return JSON.stringify([a.type, a.description, a.progress.step, a.progress.tokens, a.done, a.outcome,
-    a.done === undefined && now - a.quietSince > AGENT_STALE_MS, a.dropped])
+  return JSON.stringify([a.kind, a.type, a.description, a.progress.step, a.progress.tokens, a.done, a.outcome,
+    a.exitCode, isQuiet(a, now), a.dropped])
 }
 
 export const AGENT_MESSAGE_LIMIT = 4096
@@ -279,16 +405,19 @@ function panel(batch: Batch, agents: Map<string, Agent>, t: number) {
   if (shown.length > MAX_PANEL_ROWS) {
     // If even shortened rows cannot all fit, show unacknowledged endings and
     // new agents first, then running agents, ahead of finished history.
-    const priority = (a: Agent) => a.done !== undefined && agents.get(a.id) === a ? 0
+    const priority = (a: Agent) => a.done !== undefined && agents.get(a.key) === a ? 0
       : !a.shown ? 1 : a.done === undefined && !a.dropped ? 2 : 3
     shown.sort((a, b) => priority(a.a) - priority(b.a) || a.ordinal - b.ordinal)
     shown = shown.slice(0, MAX_PANEL_ROWS).sort((a, b) => a.ordinal - b.ordinal)
   }
-  const header = '🤖 Subagents'
-  const suffix = members.length > shown.length ? `\n… ${members.length - shown.length} more agents` : ''
+  const shells = members.some(a => a.kind === 'shell')
+  const subagents = members.some(a => a.kind !== 'shell')
+  const header = [subagents && '🤖 Subagents', shells && '🐚 Shells'].filter(Boolean).join(' · ')
+  const noun = shells && subagents ? 'tasks' : shells ? 'shells' : 'agents'
+  const suffix = members.length > shown.length ? `\n… ${members.length - shown.length} more ${noun}` : ''
   const width = Math.floor((AGENT_MESSAGE_LIMIT - header.length - suffix.length - shown.length) / Math.max(1, shown.length))
   const text = header + shown.map(({ a, ordinal }) => '\n' + oneLine(`${ordinal}. ${render(a, t)}`, width)).join('') + suffix
-  const key = JSON.stringify([members.map(a => [a.id, contentKey(a, t)]), shown.map(s => s.ordinal)])
+  const key = JSON.stringify([members.map(a => [a.key, contentKey(a, t)]), shown.map(s => s.ordinal)])
   return { text, key, shown }
 }
 
@@ -297,7 +426,7 @@ export type AgentStream = { tick(): void; agents(): Agent[] }
 type ApiError = { description?: string; parameters?: { retry_after?: number } }
 
 export function createAgentStream(opts: {
-  readEvents: () => AgentEvent[]
+  readEvents: () => StreamEvent[]
   // The private chat to stream into, or undefined while there is none.
   chat: () => string | undefined
   send: (chatId: string, text: string) => Promise<number | undefined>
@@ -311,12 +440,27 @@ export function createAgentStream(opts: {
   const mtime = opts.mtime ?? mtimeOf
   const agents = new Map<string, Agent>()
   // Stops whose start has not been read yet: the two hooks run concurrently.
-  const earlyStops = new Map<string, AgentEvent>()
+  const earlyStops = new Map<string, StreamEvent>()
   const batches = new Map<string, Batch>()
   const chatNext = new Map<string, number>()
   let first = true
 
+  // A shell ends with the line Claude Code appends to its output file; the
+  // file's time then is when it ended.
+  function refreshShell(a: Agent) {
+    if (!a.output || a.done !== undefined) return
+    const m = mtime(a.output)
+    if (m === undefined || m === a.outputMtime) return
+    a.outputMtime = m
+    const end = shellEndFromOutput(readFile(a.output) ?? '')
+    if (!end) return
+    a.done = Math.max(a.started, m)
+    a.outcome = end.outcome
+    a.exitCode = end.exitCode
+  }
+
   function refresh(a: Agent) {
+    if (a.kind === 'shell') return refreshShell(a)
     if (!a.base) return
     if (a.description === undefined) {
       try {
@@ -345,7 +489,7 @@ export function createAgentStream(opts: {
     if (batch.sending) return
     if (batch.gone) {
       for (const a of batch.members.values()) {
-        if ((a.done !== undefined || a.dropped) && agents.get(a.id) === a) agents.delete(a.id)
+        if ((a.done !== undefined || a.dropped) && agents.get(a.key) === a) agents.delete(a.key)
       }
       if (![...batch.members.values()].some(a => a.done === undefined && !a.dropped)) batches.delete(batch.chatId)
       return
@@ -366,7 +510,7 @@ export function createAgentStream(opts: {
         // An ending received while this send/edit was in flight still needs
         // its own acknowledgement. A resumed run is a different Agent object.
         if (contentKey(a, now()) === key && (a.done !== undefined || a.dropped)
-          && agents.get(a.id) === a) agents.delete(a.id)
+          && agents.get(a.key) === a) agents.delete(a.key)
       }
     }
     const fail = (err: unknown) => {
@@ -387,7 +531,7 @@ export function createAgentStream(opts: {
         // Leave the final message intact. The next overlapping group gets a
         // new panel, without rewriting the previous group's completed rows.
         if (batches.get(chatId) === batch) batches.delete(chatId)
-        for (const a of batch.members.values()) if (agents.get(a.id) === a) agents.delete(a.id)
+        for (const a of batch.members.values()) if (agents.get(a.key) === a) agents.delete(a.key)
       }
     }
     if (batch.msgId === undefined) {
@@ -405,37 +549,37 @@ export function createAgentStream(opts: {
     tick() {
       const t = now()
       for (const ev of opts.readEvents()) {
-        if (ev.event === 'start') {
-          const old = agents.get(ev.agent_id)
+        const key = 'task_id' in ev ? shellKey(ev.task_id) : ev.agent_id
+        if (ev.event === 'start' || ev.event === 'shell_start') {
+          const old = agents.get(key)
           if (old && old.done === undefined) continue
-          if (t - ev.t > AGENT_STALE_MS) continue
-          const a: Agent = {
-            id: ev.agent_id,
-            type: ev.agent_type || 'agent',
-            base: ev.agent_base,
-            started: ev.t,
-            progress: {},
-            quietSince: ev.t,
-          }
-          const stop = earlyStops.get(ev.agent_id)
+          // A shell's output file says whether it still runs, however old.
+          if (ev.event === 'start' && t - ev.t > AGENT_STALE_MS) continue
+          const a: Agent = 'task_id' in ev
+            ? { id: ev.task_id, key, kind: 'shell', type: 'shell', description: ev.description, output: ev.output,
+              started: ev.t, progress: {}, quietSince: ev.t }
+            : { id: ev.agent_id, key, type: ev.agent_type || 'agent', base: ev.agent_base,
+              started: ev.t, progress: {}, quietSince: ev.t }
+          const stop = earlyStops.get(key)
           if (stop && stop.t >= ev.t) { a.done = stop.t; a.outcome = stop.outcome }
-          earlyStops.delete(ev.agent_id)
-          agents.set(ev.agent_id, a)
+          earlyStops.delete(key)
+          agents.set(key, a)
         } else {
-          const a = agents.get(ev.agent_id)
+          const a = agents.get(key)
           if (a && ev.t >= a.started) {
             a.done ??= ev.t
             a.outcome ??= ev.outcome
-          } else if (!a) earlyStops.set(ev.agent_id, ev)
+          } else if (!a) earlyStops.set(key, ev)
         }
       }
       // The first read is the backlog from before this server started: only
-      // subagents still running are of interest.
+      // subagents and shells still running are of interest. A shell whose
+      // output file is gone can no longer show its ending.
       if (first) {
         first = false
         for (const a of agents.values()) {
           refresh(a)
-          if (a.done !== undefined) agents.delete(a.id)
+          if (a.done !== undefined || (a.output && mtime(a.output) === undefined)) agents.delete(a.key)
         }
         earlyStops.clear()
       }
@@ -444,9 +588,9 @@ export function createAgentStream(opts: {
       for (const a of agents.values()) {
         a.chatId ??= opts.chat()
         refresh(a)
-        if (a.done === undefined && t - a.quietSince > AGENT_DROP_MS) a.dropped = true
+        if (a.kind !== 'shell' && a.done === undefined && t - a.quietSince > AGENT_DROP_MS) a.dropped = true
         if (!a.chatId) {
-          if (a.done !== undefined || a.dropped) agents.delete(a.id)
+          if (a.done !== undefined || a.dropped) agents.delete(a.key)
           continue
         }
         let batch = batches.get(a.chatId)
@@ -454,7 +598,7 @@ export function createAgentStream(opts: {
           batch = { chatId: a.chatId, members: new Map(), failures: 0, lastEdit: 0 }
           batches.set(a.chatId, batch)
         }
-        batch.members.set(a.id, a)
+        batch.members.set(a.key, a)
       }
       for (const batch of batches.values()) flush(batch, t)
     },

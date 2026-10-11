@@ -1,8 +1,9 @@
 import { describe, expect, test } from 'bun:test'
-import { appendFileSync, mkdtempSync, readFileSync, writeFileSync } from 'fs'
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
+  AGENT_DROP_MS,
   AGENT_STALE_MS,
   AGENT_MESSAGE_LIMIT,
   AGENT_TICK_MS,
@@ -16,10 +17,16 @@ import {
   formatTokens,
   interruptionFromTranscript,
   progressFromTranscript,
+  shellEndFromOutput,
+  shellEventFromHook,
+  shellOutputFile,
   THINKING,
   WRITING,
   type AgentEvent,
+  type ShellEvent,
+  type StreamEvent,
 } from './agents.ts'
+import shellHooks from './fixtures/shell-hooks.json'
 
 const assistant = (content: unknown[], usage?: Record<string, number>, ts = '2026-10-08T15:00:00.000Z') =>
   JSON.stringify({ type: 'assistant', timestamp: ts, message: { content, usage } })
@@ -67,6 +74,87 @@ describe('eventFromHook', () => {
   })
 })
 
+// The fixtures are hook inputs recorded from Claude Code 2.1.296.
+describe('shellEventFromHook', () => {
+  test('a background Bash call starts a shell labelled by its description, never its command', () => {
+    const asked: [string, string | undefined][] = []
+    const ev = shellEventFromHook(shellHooks.background_bash, 5, (id, session) => { asked.push([id, session]); return `/t/${id}.output` })
+    expect(ev).toEqual({ t: 5, event: 'shell_start', task_id: 'bqo62tie2', description: 'Probe failing shell', output: '/t/bqo62tie2.output' })
+    expect(asked).toEqual([['bqo62tie2', '58c1df05-c28f-4da8-b0f5-0f583989ab2d']])
+    expect(JSON.stringify(ev)).not.toContain('exit 3')
+    expect(shellEventFromHook(shellHooks.subagent_background_bash, 5, id => `/t/${id}.output`))
+      .toMatchObject({ event: 'shell_start', task_id: 'b795t6qa7', description: 'Agent shell' })
+    expect(eventFromHook(shellHooks.background_bash)).toBeUndefined()
+  })
+
+  test('a call without a background task looks for no file; a bad id or a missing file is no event', () => {
+    let lookups = 0
+    const find = (id: string) => { lookups++; return `/t/${id}.output` }
+    expect(shellEventFromHook(shellHooks.foreground_bash, 5, find)).toBeUndefined()
+    expect(shellEventFromHook({ ...shellHooks.background_bash, hook_event_name: 'PreToolUse' }, 5, find)).toBeUndefined()
+    expect(lookups).toBe(0)
+    const bg = shellHooks.background_bash
+    expect(shellEventFromHook({ ...bg, tool_response: { ...bg.tool_response, backgroundTaskId: '../x' } }, 5, find)).toBeUndefined()
+    expect(shellEventFromHook(bg, 5, () => undefined)).toBeUndefined()
+    expect(shellEventFromHook({ ...bg, tool_input: { ...bg.tool_input, description: ' \n ' } }, 5, find)?.description).toBeUndefined()
+    expect(shellEventFromHook({ ...bg, tool_response: JSON.stringify(bg.tool_response) }, 5, find)?.task_id).toBe('bqo62tie2')
+  })
+
+  test('a successful TaskStop of a shell stops it without its command; other stops do not', () => {
+    const stop = shellHooks.task_stop_shell
+    const ev = shellEventFromHook(stop, 5)
+    expect(ev).toEqual({ t: 5, event: 'shell_stop', task_id: 'bm4vrn0w1', outcome: 'stopped' })
+    expect(eventFromHook(stop)).toBeUndefined()
+    expect(shellEventFromHook({ ...stop, tool_response: { ...stop.tool_response, task_type: 'local_agent' } })).toBeUndefined()
+    expect(shellEventFromHook({ ...stop, tool_response: { ...stop.tool_response, message: 'Failed to stop task' } })).toBeUndefined()
+    expect(shellEventFromHook({ ...stop, tool_input: { task_id: 'other' } })).toBeUndefined()
+    expect(shellEventFromHook({ ...stop, tool_response: { error: 'Task not found' } })).toBeUndefined()
+  })
+})
+
+describe('shellOutputFile', () => {
+  const uid = process.getuid?.() ?? 0
+  function tree() {
+    const tmp = mkdtempSync(join(tmpdir(), 'shell-out-'))
+    const tasks = join(tmp, `claude-${uid}`, '-home-me-project', 'sess-1', 'tasks')
+    mkdirSync(tasks, { recursive: true })
+    mkdirSync(join(tmp, `claude-${uid}`, '-other-project', 'sess-2'), { recursive: true })
+    writeFileSync(join(tasks, 'b1.output'), '')
+    return { env: { CLAUDE_CODE_TMPDIR: tmp }, file: join(realpathSync(tmp), `claude-${uid}`, '-home-me-project', 'sess-1', 'tasks', 'b1.output') }
+  }
+  test('finds the task file in the session folder, or by task id when the session id has changed', () => {
+    const { env, file } = tree()
+    expect(shellOutputFile('b1', 'sess-1', env)).toBe(file)
+    expect(shellOutputFile('b1', 'sess-new', env)).toBe(file)
+    expect(shellOutputFile('b1', undefined, env)).toBe(file)
+  })
+  test('a missing task, a missing temp folder or an unsafe id finds nothing', () => {
+    const { env } = tree()
+    expect(shellOutputFile('b2', 'sess-1', env)).toBeUndefined()
+    expect(shellOutputFile('b1', 'sess-1', { CLAUDE_CODE_TMPDIR: '/nonexistent/tmp' })).toBeUndefined()
+    expect(shellOutputFile('../b1', 'sess-1', env)).toBeUndefined()
+    expect(shellOutputFile('b1', '../sess-1', env)).toBeDefined() // an unsafe session id is only skipped
+  })
+})
+
+describe('shellEndFromOutput', () => {
+  test('reads the line Claude Code appends when a shell ends', () => {
+    // Byte for byte as Claude Code 2.1.296 wrote them.
+    expect(shellEndFromOutput('ok\n\n[exited with code 0]\n')).toEqual({ exitCode: 0 })
+    expect(shellEndFromOutput('out-a\n\n[exited with code 3]\n')).toEqual({ outcome: 'failed', exitCode: 3 })
+    expect(shellEndFromOutput('\n[killed]\n')).toEqual({ outcome: 'stopped' })
+    expect(shellEndFromOutput('\n[exited with code 0]\n')).toEqual({ exitCode: 0 })
+    expect(shellEndFromOutput('x\n[exited with code unknown]\n')).toEqual({ outcome: 'failed', exitCode: undefined })
+    expect(shellEndFromOutput('x\n[exited with code -1]\n')).toEqual({ outcome: 'failed', exitCode: -1 })
+  })
+  test('a running shell has no ending, even when its output mentions one', () => {
+    expect(shellEndFromOutput('')).toBeUndefined()
+    expect(shellEndFromOutput('building\n')).toBeUndefined()
+    expect(shellEndFromOutput('\n[exited with code 0]\nmore output\n')).toBeUndefined()
+    expect(shellEndFromOutput('echo [killed]\n')).toBeUndefined()
+  })
+})
+
 const interrupted = (t: number) => JSON.stringify({
   type: 'user', timestamp: new Date(t).toISOString(),
   message: { role: 'user', content: [{ type: 'text', text: '[Request interrupted by user]' }] },
@@ -95,6 +183,20 @@ describe('createEventReader', () => {
     expect(read().map(e => e.agent_id)).toEqual(['new'])
     appendFileSync(f, 'op","agent_id":"new"}\n')
     expect(read()).toEqual([{ t: 3, event: 'stop', agent_id: 'new' }])
+  })
+
+  test('reads shell events beside subagent events, and drops lines without an id', () => {
+    const f = join(mkdtempSync(join(tmpdir(), 'agents-')), 'pid-1.jsonl')
+    const read = createEventReader([f], false)
+    const lines: unknown[] = [
+      { t: 1, event: 'shell_start', task_id: 'b1', description: 'Build', output: '/t/b1.output' },
+      { t: 2, event: 'start', agent_id: 'a1' },
+      { t: 3, event: 'shell_stop', task_id: 'b1', outcome: 'stopped' },
+      { t: 4, event: 'shell_start', agent_id: 'a2' },
+      { t: 5, event: 'start', task_id: 'b2' },
+    ]
+    writeFileSync(f, lines.map(l => JSON.stringify(l) + '\n').join(''))
+    expect(read().map(e => [e.event, 'task_id' in e ? e.task_id : e.agent_id])).toEqual([['shell_start', 'b1'], ['start', 'a1'], ['shell_stop', 'b1']])
   })
 })
 
@@ -147,7 +249,7 @@ describe('progressFromTranscript', () => {
 describe('createAgentStream', () => {
   function harness(chat: string | null = '42') {
     let t = 1_000_000
-    const events: AgentEvent[] = []
+    const events: StreamEvent[] = []
     const files = new Map<string, string>()
     const mtimes = new Map<string, number>()
     const sent: { chat: string; text: string }[] = []
@@ -184,6 +286,135 @@ describe('createAgentStream', () => {
   }
   const start = (h: { now(): number }, id = 'a1', extra: Partial<AgentEvent> = {}): AgentEvent =>
     ({ t: h.now(), event: 'start', agent_id: id, agent_type: 'general-purpose', agent_base: `/s/agent-${id}`, ...extra })
+  const shell = (h: { now(): number }, id: string, description?: string): ShellEvent =>
+    ({ t: h.now(), event: 'shell_start', task_id: id, description, output: `/t/${id}.output` })
+
+  test('shells share the subagents’ message and end as failed, done or stopped while the subagent keeps updating', async () => {
+    const h = harness()
+    await h.tick()
+    h.write('/s/agent-a1.meta.json', JSON.stringify({ description: 'Review PRs' }))
+    h.events.push(start(h), shell(h, 'b1', 'Run tests'), shell(h, 'b2', 'Wait for CI'), shell(h, 'b3', 'Install'))
+    for (const id of ['b1', 'b2', 'b3']) h.write(`/t/${id}.output`, '')
+    await h.tick()
+    expect(h.sent).toEqual([{ chat: '42', text: '🤖 Subagents · 🐚 Shells\n'
+      + '1. ⏳ general-purpose · Review PRs · Starting… · 0s\n2. ⏳ shell · Run tests · 0s\n3. ⏳ shell · Wait for CI · 0s\n4. ⏳ shell · Install · 0s' }])
+
+    h.advance(CHAT_GAP_MS)
+    h.write('/t/b1.output', 'FAIL agents.test.ts\n\n[exited with code 1]\n')
+    h.write('/t/b3.output', 'ok\n\n[exited with code 0]\n')
+    h.write('/s/agent-a1.jsonl', assistant([{ type: 'tool_use', name: 'Bash', input: { description: 'Checking gate' } }], { input_tokens: 85400 }))
+    await h.tick()
+    expect(h.edits.at(-1)).toEqual({ id: 7, text: '🤖 Subagents · 🐚 Shells\n'
+      + '1. ⏳ general-purpose · Review PRs · Checking gate · 3s · 85.4k tokens\n2. ❌ Failed after 3s (exit 1) · shell · Run tests\n'
+      + '3. ⏳ shell · Wait for CI · 3s\n4. ✅ Done in 3s · shell · Install' })
+
+    h.advance(CHAT_GAP_MS)
+    h.events.push({ t: h.now(), event: 'shell_stop', task_id: 'b2', outcome: 'stopped' })
+    h.write('/s/agent-a1.jsonl', assistant([{ type: 'text', text: 'Found it' }], { input_tokens: 90000 }))
+    await h.tick()
+    expect(h.edits.at(-1)?.text).toBe('🤖 Subagents · 🐚 Shells\n'
+      + '1. ⏳ general-purpose · Review PRs · ✍️ Writing… · 6s · 90.0k tokens\n2. ❌ Failed after 3s (exit 1) · shell · Run tests\n'
+      + '3. ⏹ Stopped after 6s · shell · Wait for CI\n4. ✅ Done in 3s · shell · Install')
+
+    h.advance(CHAT_GAP_MS)
+    h.write('/t/b2.output', '\n[killed]\n')
+    h.events.push({ t: h.now(), event: 'stop', agent_id: 'a1' })
+    await h.tick()
+    expect(h.edits.at(-1)?.text).toContain('1. ✅ Done in 9s · general-purpose · Review PRs · 90.0k tokens\n')
+    expect(h.edits.at(-1)?.text).toContain('3. ⏹ Stopped after 6s · shell · Wait for CI\n')
+    await h.tick()
+    expect(h.stream.agents()).toEqual([])
+    expect(h.sent).toHaveLength(1)
+    expect(new Set(h.edits.map(e => e.id))).toEqual(new Set([7]))
+  })
+
+  test('a shell killed with no hook, as when its subagent ends, shows as stopped', async () => {
+    const h = harness()
+    await h.tick()
+    h.events.push(shell(h, 'b1', 'Agent shell'))
+    h.write('/t/b1.output', '')
+    await h.tick()
+    h.advance(CHAT_GAP_MS)
+    h.write('/t/b1.output', '\n[killed]\n')
+    await h.tick()
+    expect(h.edits.at(-1)).toEqual({ id: 7, text: '🐚 Shells\n1. ⏹ Stopped after 3s · shell · Agent shell' })
+  })
+
+  test('a shell that ended before its first tick shows its ending in the first message, labelled without a description', async () => {
+    const h = harness()
+    await h.tick()
+    h.events.push(shell(h, 'b1'))
+    h.advance(2000)
+    h.write('/t/b1.output', 'x\n\n[exited with code 2]\n')
+    await h.tick()
+    expect(h.sent).toEqual([{ chat: '42', text: '🐚 Shells\n1. ❌ Failed after 2s (exit 2) · shell' }])
+    await h.tick()
+    expect(h.stream.agents()).toEqual([])
+  })
+
+  test('a shell waiting in silence for hours stays running, never quiet or dropped', async () => {
+    const h = harness()
+    await h.tick()
+    h.events.push(shell(h, 'b1', 'Wait for CI'))
+    h.write('/t/b1.output', '')
+    await h.tick()
+    h.advance(AGENT_DROP_MS + 2 * AGENT_STALE_MS)
+    await h.tick()
+    expect(h.edits.at(-1)?.text).toBe('🐚 Shells\n1. ⏳ shell · Wait for CI · 3h 0m')
+    expect(h.stream.agents().map(a => a.id)).toEqual(['b1'])
+    h.advance(CHAT_GAP_MS)
+    h.write('/t/b1.output', '\n[exited with code 0]\n')
+    await h.tick()
+    expect(h.edits.at(-1)?.text).toBe('🐚 Shells\n1. ✅ Done in 3h 0m · shell · Wait for CI')
+  })
+
+  test('a shell stop read before its start still stops it', async () => {
+    const h = harness()
+    await h.tick()
+    const s = shell(h, 'b1', 'Long wait')
+    h.advance(CHAT_GAP_MS)
+    h.events.push({ t: h.now(), event: 'shell_stop', task_id: 'b1', outcome: 'stopped' }, s)
+    await h.tick()
+    expect(h.sent.at(-1)?.text).toBe('🐚 Shells\n1. ⏹ Stopped after 3s · shell · Long wait')
+  })
+
+  test('a shell and a subagent with the same id never end each other', async () => {
+    const h = harness()
+    await h.tick()
+    h.events.push(start(h, 'x1'), shell(h, 'x1', 'Same id'))
+    await h.tick()
+    h.advance(CHAT_GAP_MS)
+    h.events.push({ t: h.now(), event: 'stop', agent_id: 'x1', outcome: 'stopped' })
+    await h.tick()
+    expect(h.edits.at(-1)?.text).toBe('🤖 Subagents · 🐚 Shells\n1. ⏹ Stopped after 3s · general-purpose\n2. ⏳ shell · Same id · 3s')
+    h.advance(CHAT_GAP_MS)
+    h.events.push({ t: h.now(), event: 'shell_stop', task_id: 'x1', outcome: 'stopped' })
+    await h.tick()
+    expect(h.edits.at(-1)?.text).toBe('🤖 Subagents · 🐚 Shells\n1. ⏹ Stopped after 3s · general-purpose\n2. ⏹ Stopped after 6s · shell · Same id')
+  })
+
+  test('the backlog keeps only shells still running, however long ago they started', async () => {
+    const h = harness()
+    h.events.push(shell(h, 'old', 'Long CI wait'))
+    h.advance(AGENT_STALE_MS * 2)
+    h.events.push(shell(h, 'done', 'Finished'), shell(h, 'run', 'Running'))
+    h.write('/t/old.output', '')
+    h.write('/t/done.output', '\n[exited with code 0]\n')
+    h.write('/t/run.output', 'partial\n')
+    h.events.push(shell(h, 'gone', 'Output file removed'))
+    await h.tick()
+    expect(h.stream.agents().map(a => a.id)).toEqual(['old', 'run'])
+  })
+
+  test('an oversized group of shells counts the rest as shells', async () => {
+    const h = harness()
+    await h.tick()
+    for (let i = 0; i < 150; i++) h.events.push(shell(h, `b${i}`, `Shell ${i}`))
+    await h.tick()
+    expect(h.sent[0]!.text.length).toBeLessThanOrEqual(AGENT_MESSAGE_LIMIT)
+    expect(h.sent[0]!.text).toStartWith('🐚 Shells\n1. ⏳ shell · Shell 0 · 0s\n')
+    expect(h.sent[0]!.text).toEndWith('\n… 50 more shells')
+  })
 
   test('one panel with one row per subagent, edited as it works, frozen when all finish', async () => {
     const h = harness()
@@ -575,5 +806,53 @@ describe('hooks/subagent.ts', () => {
     expect(r.exitCode).toBe(0)
     const ev = JSON.parse(readFileSync(agentEventFile(dir, 4242), 'utf8').trim())
     expect(ev).toMatchObject({ event: 'stop', agent_id: 'a9', outcome: 'stopped' })
+  })
+
+  // The real hook, real files and the stream's own file readers: a background
+  // shell recorded from Claude Code, then its exit code line.
+  test('the registered Bash hook records a background shell that the stream follows to its exit code', async () => {
+    const hooks = JSON.parse(readFileSync(join(import.meta.dir, 'hooks', 'hooks.json'), 'utf8')).hooks
+    const bashHook = hooks.PostToolUse.find((h: { matcher: string }) => h.matcher === 'Bash')
+    expect(bashHook.hooks).toMatchObject([{ command: 'bun "${CLAUDE_PLUGIN_ROOT}/hooks/subagent.ts"', async: true }])
+    const dir = mkdtempSync(join(tmpdir(), 'agents-'))
+    const tmp = mkdtempSync(join(tmpdir(), 'shell-tmp-'))
+    const input = shellHooks.background_bash
+    const tasks = join(tmp, `claude-${process.getuid?.() ?? 0}`, '-var-tmp-argylle-shell-probe-890-work', input.session_id, 'tasks')
+    mkdirSync(tasks, { recursive: true })
+    const output = join(tasks, 'bqo62tie2.output')
+    writeFileSync(output, '')
+    const run = (stdin: unknown) => Bun.spawnSync(['bun', join(import.meta.dir, 'hooks', 'subagent.ts')], {
+      stdin: new TextEncoder().encode(JSON.stringify(stdin)),
+      env: { PATH: process.env.PATH!, HOME: process.env.HOME!, TELEGRAM_STATE_DIR: dir, CLAUDE_PID: '4242', CLAUDE_CODE_TMPDIR: tmp },
+    })
+    const file = agentEventFile(dir, 4242)
+    expect(run(shellHooks.foreground_bash).exitCode).toBe(0)
+    expect(existsSync(file)).toBe(false)
+    expect(run(input).exitCode).toBe(0)
+    expect(run(shellHooks.task_stop_shell).exitCode).toBe(0)
+    const events = readFileSync(file, 'utf8').trim().split('\n').map(l => JSON.parse(l))
+    expect(events).toMatchObject([
+      { event: 'shell_start', task_id: 'bqo62tie2', description: 'Probe failing shell', output: realpathSync(output) },
+      { event: 'shell_stop', task_id: 'bm4vrn0w1', outcome: 'stopped' },
+    ])
+    expect(readFileSync(file, 'utf8')).not.toContain('sleep')
+
+    let clock = Date.now()
+    const sent: string[] = []
+    const stream = createAgentStream({
+      readEvents: createEventReader([file], false),
+      chat: () => '42',
+      send: async (_c, text) => { sent.push(text); return 7 },
+      edit: async (_c, _id, text) => { sent.push(text) },
+      now: () => clock,
+    })
+    stream.tick()
+    await new Promise(r => setTimeout(r, 0))
+    expect(sent).toEqual(['🐚 Shells\n1. ⏳ shell · Probe failing shell · 0s'])
+    appendFileSync(output, 'out-a\n\n[exited with code 3]\n')
+    clock += CHAT_GAP_MS
+    stream.tick()
+    await new Promise(r => setTimeout(r, 0))
+    expect(sent.at(-1)).toMatch(/^🐚 Shells\n1\. ❌ Failed after \d+s \(exit 3\) · shell · Probe failing shell$/)
   })
 })
