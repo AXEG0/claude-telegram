@@ -401,6 +401,7 @@ describe('createAgentStream', () => {
     h.write('/t/old.output', '')
     h.write('/t/done.output', '\n[exited with code 0]\n')
     h.write('/t/run.output', 'partial\n')
+    h.events.push(shell(h, 'gone', 'Output file removed'))
     await h.tick()
     expect(h.stream.agents().map(a => a.id)).toEqual(['old', 'run'])
   })

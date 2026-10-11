@@ -573,12 +573,13 @@ export function createAgentStream(opts: {
         }
       }
       // The first read is the backlog from before this server started: only
-      // subagents still running are of interest.
+      // subagents and shells still running are of interest. A shell whose
+      // output file is gone can no longer show its ending.
       if (first) {
         first = false
         for (const a of agents.values()) {
           refresh(a)
-          if (a.done !== undefined) agents.delete(a.key)
+          if (a.done !== undefined || (a.output && mtime(a.output) === undefined)) agents.delete(a.key)
         }
         earlyStops.clear()
       }
