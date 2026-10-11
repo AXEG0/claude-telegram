@@ -7,7 +7,7 @@ attachments.
 
 This is AXEG0's fork of Anthropic's Telegram plugin. It shows typing for the
 whole turn and tells the chat when Claude may be stuck, streams concurrent
-subagents in one live message, joins a burst of messages into one, and passes Claude what a
+subagents and background shells in one live message, joins a burst of messages into one, and passes Claude what a
 message replies to. With rich messages on, it sends replies as Telegram rich
 messages, and with an OpenAI key, it transcribes voice messages. It keeps its
 state in `~/.claude/channels/telegram/`, the same directory as the official
@@ -175,7 +175,7 @@ The plugin's hooks mark the session busy on each of Claude's tool calls and
 prompts ([hooks/busy.ts](./hooks/busy.ts)) and record the turn's end on `Stop`,
 `StopFailure` and `SessionEnd` ([hooks/turn-end.ts](./hooks/turn-end.ts)), under
 `turns/` in the state directory. A subagent's tool calls start no typing, as the
-subagent's work shows in its [own message](#subagents); they count as activity
+subagent's work shows in its [own message](#subagents-and-shells); they count as activity
 for the turn that waits on the subagent.
 
 The indicator pauses while a permission prompt waits on you, and resumes when
@@ -194,20 +194,29 @@ every allowlisted DM with **See more** for the tool's input and **✅ Allow** /
 **❌ Deny** buttons. An answer in Telegram goes to Claude Code, and the message
 you tapped keeps the outcome.
 
-### Subagents
+### Subagents and shells
 
-Subagents running together share one live message, with one line per agent.
-Each edit carries every row, so a busy agent cannot delay the others:
+Subagents and background shells running together share one live message, with
+one line each. Each edit carries every row, so a busy agent cannot delay the
+others:
 
 ```
-🤖 Subagents
+🤖 Subagents · 🐚 Shells
 1. ⏳ general-purpose · Review PRs 3 and 4 · Checking gate · 4m 31s · 85.4k tokens
 2. ✅ Done in 1m 12s · Explore · Find retry logic · 41.3k tokens
+3. ⏳ shell · Wait for CI · 2m 5s
+4. ❌ Failed after 12s (exit 1) · shell · Run the tests
 ```
 
 An agent's line changes to `✅ Done in …`, or `⏹ Stopped after …` when
-interrupted. Finished rows stay visible while the others run. Once the whole
-group ends, its final message stays intact and the next group gets a new one.
+interrupted. A shell's line carries the description Claude gave the command,
+never the command itself, and its running time. It changes to `✅ Done in …`
+when the shell exits with 0, `❌ Failed after … (exit N)` when it exits with
+another code, and `⏹ Stopped after …` when it is stopped, by TaskStop or by the
+end of the subagent that started it. Finished rows stay visible while the
+others run. Once the whole group ends, its final message stays intact and the
+next group gets a new one. The header names what the message carries:
+`🤖 Subagents`, `🐚 Shells`, or both.
 The plugin's `SubagentStart`, `SubagentStop` and
 successful `TaskStop` hooks ([hooks/subagent.ts](./hooks/subagent.ts)) record each
 subagent under `agents/` in the state directory, and the server reads the
@@ -216,6 +225,12 @@ for its description. A step shows the running tool call's own description, or
 the tool with a file name or search pattern (commands, URLs and queries stay on
 the machine), then `💭 Thinking…` once the tool returns and `✍️ Writing…` once
 the subagent writes its answer.
+
+The same hook on `PostToolUse` for Bash records a shell when a Bash call goes to
+the background, with the file Claude Code writes the shell's output to. Claude
+Code runs no hook when a shell ends; it appends `[exited with code N]` or
+`[killed]` to that file instead, and the server reads the end of the file for
+that line. A successful `TaskStop` of a shell also ends its row.
 
 The message goes, without a notification, to the private chat that last wrote
 to the bot since the server started. Agents stay in the chat where they first
@@ -228,7 +243,8 @@ over finished history. An explicit interruption in the subagent's transcript
 also ends its row on the next stream tick, even when no stop
 hook ran. Inactivity alone never counts as completion: a subagent whose
 transcript stays unchanged for 30 minutes shows as quiet until its stop
-arrives, for up to two hours.
+arrives, for up to two hours. A shell never shows as quiet: it may wait in
+silence for as long as it runs, and its output file records every ending.
 
 ### Rich messages
 

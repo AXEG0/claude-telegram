@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import fixture from './fixtures/channel-argv.json'
@@ -117,6 +117,42 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     expect(edit.payload.message_id).toBe(42)
     for (let i = 1; i <= 4; i++) expect(edit.payload.text).toContain(`Shared agent ${i}`)
     expect(calls(dir).filter(c => c.method === 'sendMessage' && c.payload.text?.startsWith('🤖 Subagents'))).toHaveLength(1)
+    await channel.close()
+  }, 15000)
+
+  test('the channel server shows background shells beside an agent and each shell’s ending in the same message', async () => {
+    const dir = state()
+    writeFileSync(join(dir, 'inbound.json'), JSON.stringify([{
+      update_id: 1,
+      message: { message_id: 1, date: Math.floor(Date.now() / 1000), text: 'shell test',
+        from: { id: 1, is_bot: false, first_name: 'Owner' }, chat: { id: 1, type: 'private' } },
+    }]))
+    const channel = start(dir, fixture.argv)
+    await channel.ready()
+    const file = agentEventFile(dir, channel.child.pid!)
+    const tasks = join(dir, 'tasks')
+    mkdirSync(tasks)
+    const agentBase = join(tasks, 'agent-a1')
+    writeFileSync(`${agentBase}.meta.json`, JSON.stringify({ description: 'Shared agent' }))
+    appendAgentEvent(file, { t: Date.now(), event: 'start', agent_id: 'a1', agent_type: 'general-purpose', agent_base: agentBase })
+    for (const [id, description] of [['b1', 'Passing shell'], ['b2', 'Failing shell'], ['b3', 'Stopped shell']]) {
+      writeFileSync(join(tasks, `${id}.output`), '')
+      appendAgentEvent(file, { t: Date.now(), event: 'shell_start', task_id: id!, description, output: join(tasks, `${id}.output`) })
+    }
+    const panel = (c: { method: string; payload: any }) => c.payload.text?.startsWith('🤖 Subagents · 🐚 Shells\n')
+    await until(() => calls(dir).some(c => c.method === 'sendMessage' && panel(c)), AGENT_TICK_MS + 4000)
+    const sent = calls(dir).find(c => c.method === 'sendMessage' && panel(c))!
+    expect(sent.payload.text).toMatch(/^🤖 Subagents · 🐚 Shells\n1\. ⏳ general-purpose · Shared agent · Starting… · \d+s\n2\. ⏳ shell · Passing shell · \d+s\n3\. ⏳ shell · Failing shell · \d+s\n4\. ⏳ shell · Stopped shell · \d+s$/)
+    appendFileSync(join(tasks, 'b1.output'), 'ok\n\n[exited with code 0]\n')
+    appendFileSync(join(tasks, 'b2.output'), 'FAIL\n\n[exited with code 3]\n')
+    appendAgentEvent(file, { t: Date.now(), event: 'shell_stop', task_id: 'b3', outcome: 'stopped' })
+    await until(() => calls(dir).some(c => c.method === 'editMessageText' && panel(c) && c.payload.text.includes('2. ✅ Done in')
+      && c.payload.text.includes('3. ❌ Failed after') && c.payload.text.includes('4. ⏹ Stopped after')), AGENT_TICK_MS + 4000)
+    const edit = calls(dir).findLast(c => c.method === 'editMessageText')!
+    expect(edit.payload.message_id).toBe(42)
+    expect(edit.payload.text).toMatch(/\n1\. ⏳ general-purpose · Shared agent · /)
+    expect(edit.payload.text).toMatch(/\n3\. ❌ Failed after \d+s \(exit 3\) · shell · Failing shell\n/)
+    expect(calls(dir).filter(c => c.method === 'sendMessage' && panel(c))).toHaveLength(1)
     await channel.close()
   }, 15000)
 
