@@ -7,8 +7,9 @@ attachments.
 
 This is AXEG0's fork of Anthropic's Telegram plugin. It shows typing for the
 whole turn and tells the chat when Claude may be stuck, streams concurrent
-subagents and background shells in one live message, joins a burst of messages into one, and passes Claude what a
-message replies to. With rich messages on, it sends replies as Telegram rich
+subagents and background shells in one live message, joins a burst of messages
+into one, passes Claude what a message replies to, and passes on the new text
+of a message you edit. With rich messages on, it sends replies as Telegram rich
 messages, and with an OpenAI key, it transcribes voice messages. It keeps its
 state in `~/.claude/channels/telegram/`, the same directory as the official
 plugin, so a token and pairing carry over. Run one of the two at a time, as both
@@ -160,6 +161,32 @@ A message that replies to another carries what it replies to on the tag:
 for a photo, voice note or other media, and `reply_quote` for the part the
 sender highlighted. A reply to one of the bot's rich messages carries the text
 of its blocks.
+
+### Edits
+
+When you edit a message you sent, its new text or caption reaches Claude as a
+message of its own. The tag carries the message's own `message_id` and
+`edited="true"`, and its `ts` is the time of the edit:
+
+```
+<channel source="telegram" chat_id="1" message_id="10" edited="true" user="owner" user_id="1" ts="2026-10-11T12:05:00.000Z">
+deploy to prod
+</channel>
+```
+
+A caption edit also carries `attachment_kind` (`photo`, `document` and the
+other captioned kinds) and no file to fetch, since the file came with the
+message. An edited reply carries what it replies to, as a new message does.
+
+An edit passes the same access check as a new message from the same sender in
+the same chat, read-only: it never starts pairing or writes `access.json`, and
+it never answers a permission prompt. It goes alone, after any burst from the
+sender that is still waiting. Telegram also reports changes that are not
+someone correcting text, such as a live location moving or a formatting change,
+so an edit without text or a caption sends nothing, and so does one whose text
+is what Claude last got for that message. The server remembers that text for
+the last 1000 messages since it started; an edit of a message outside that
+memory always goes through.
 
 ## What the chat shows
 

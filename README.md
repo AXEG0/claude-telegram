@@ -24,6 +24,7 @@ through it.
 | 🎙️ **Voice messages** | Voice notes, audio and video notes reach Claude as text, transcribed by OpenAI. |
 | 📦 **Bursts as one message** | Quick texts, a long paste Telegram split, and a photo with its question arrive together, so Claude answers once. |
 | ↩️ **Reply context** | Claude sees the message you replied to and the part you quoted. |
+| ✏️ **Edits** | Edit a message you sent, and Claude gets its new text as an edit of that message. |
 
 Plus everything from the official plugin: pairing and allowlists, photos and
 files, reactions, and permission prompts with Allow and Deny buttons.
