@@ -32,6 +32,7 @@ import { heartbeatTransformer } from './heartbeat.ts'
 import { batchGap, createBatcher } from './batch.ts'
 import { createTextMemory, editEvent } from './edit.ts'
 import { channelMode } from './polling.ts'
+import { alertConfig, createIdleAlarm, idleText, RECOVERED_TEXT, stuckText } from './alerts.ts'
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR
   ?? join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'channels', 'telegram')
@@ -122,17 +123,41 @@ const busyMarkers = busyFiles(STATE_DIR, ancestors)
 const subagentMarkers = subagentFiles(STATE_DIR, ancestors)
 // The private chat that last wrote: typing for turns it did not start, and subagents.
 let lastChat: string | undefined
+// The stuck notice, the idle backstop and their recovery. See alerts.ts.
+const ALERTS = alertConfig()
+for (const warning of ALERTS.warnings) process.stderr.write(warning)
+function alert(chat_id: string, text: string): void {
+  void bot.api.sendMessage(chat_id, text).catch(err => {
+    process.stderr.write(`telegram channel: alert to ${chat_id} not sent: ${err}\n`)
+  })
+}
+// Chats to tell Claude is back, once each, after this tick's checks.
+const recovered = new Set<string>()
 const typing = createTyping({
   send: chat_id => void bot.api.sendChatAction(chat_id, 'typing').catch(() => {}),
   turnEndedAt: () => readTurnEnd(turnEndFiles),
   busyAt: () => readBusyAt(busyMarkers),
   chat: () => lastChat,
   subagentAt: () => readBusyAt(subagentMarkers),
-  onCap: chat_id => void bot.api
-    .sendMessage(chat_id, '⚠️ No turn end seen in 30 minutes: Claude may be stuck, or was interrupted. Typing has stopped.')
-    .catch(() => {}),
+  capMs: ALERTS.capMs,
+  onCap: chat_id => alert(chat_id, stuckText(ALERTS.capMs)),
+  onRecover: chat_id => recovered.add(chat_id),
 })
-setInterval(() => typing.tick(), REFRESH_MS).unref()
+// Only the server that polls watches for a session gone idle: any other
+// instance belongs to a probe or a session that is not the channel.
+const IDLE = ALERTS.idle
+const idle = POLLING && IDLE ? createIdleAlarm({
+  activityAt: () => Math.max(readBusyAt(busyMarkers), readBusyAt(subagentMarkers), readTurnEnd(turnEndFiles)),
+  idleMs: IDLE.ms,
+  onIdle: () => alert(IDLE.chat, idleText(IDLE.ms)),
+  onRecover: () => recovered.add(IDLE.chat),
+}) : undefined
+setInterval(() => {
+  typing.tick()
+  idle?.tick()
+  for (const chat_id of recovered) alert(chat_id, RECOVERED_TEXT)
+  recovered.clear()
+}, REFRESH_MS).unref()
 
 // Subagents share one live message in the private chat of the last inbound message. See agents.ts.
 const agentStream = createAgentStream({
@@ -502,6 +527,7 @@ mcp.setNotificationHandler(
     const { request_id, tool_name, description, input_preview } = params
     pendingPermissions.set(request_id, { tool_name, description, input_preview })
     typing.pause()
+    idle?.pause()
     const access = loadAccess()
     const text = `🔐 Permission: ${tool_name}`
     const keyboard = new InlineKeyboard()
@@ -593,6 +619,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
 mcp.setRequestHandler(CallToolRequestSchema, async req => {
   // A tool call means Claude is running again, e.g. after a prompt answered in the terminal.
   typing.resume()
+  idle?.resume()
   const args = (req.params.arguments ?? {}) as Record<string, unknown>
   try {
     switch (req.params.name) {
@@ -880,6 +907,7 @@ bot.on('callback_query:data', async ctx => {
   }
 
   typing.resume()
+  idle?.resume()
   // Text sent before the answer reaches Claude before it.
   if (ctx.chat) batcher.flushChat(String(ctx.chat.id))
   void mcp.notification({
@@ -1063,6 +1091,7 @@ async function handleInbound(
     // Text sent before the answer reaches Claude before it.
     batcher.flushChat(chat_id)
     typing.resume()
+    idle?.resume()
     void mcp.notification({
       method: 'notifications/claude/channel/permission',
       params: {

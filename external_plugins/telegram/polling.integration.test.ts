@@ -5,6 +5,8 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import fixture from './fixtures/channel-argv.json'
 import { AGENT_TICK_MS, appendAgentEvent, agentEventFile } from './agents.ts'
+import { idleText, RECOVERED_TEXT, stuckText } from './alerts.ts'
+import { REFRESH_MS } from './typing.ts'
 
 const children: ChildProcessWithoutNullStreams[] = []
 const dirs: string[] = []
@@ -161,6 +163,60 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     expect(calls(dir).filter(c => c.method === 'sendMessage' && panel(c))).toHaveLength(1)
     await channel.close()
   }, 15000)
+
+  // A turn the server sees start and never end; the session's own marker ends it.
+  test('a turn with no activity gets the stuck notice in its chat, and a turn end brings Claude back', async () => {
+    const dir = state()
+    writeFileSync(join(dir, 'inbound.json'), JSON.stringify([{
+      update_id: 1,
+      message: { message_id: 1, date: Math.floor(Date.now() / 1000), text: 'stuck test',
+        from: { id: 1, is_bot: false, first_name: 'Owner' }, chat: { id: 1, type: 'private' } },
+    }]))
+    const channel = start(dir, fixture.argv, { TELEGRAM_STUCK_MINUTES: '0.01' })
+    await channel.ready()
+    const notices = () => calls(dir).filter(c => c.method === 'sendMessage' && c.payload.chat_id === '1')
+    await until(() => notices().length > 0, 2 * REFRESH_MS + 4000)
+    expect(notices()[0]!.payload.text).toBe(stuckText(600))
+    expect(notices()[0]!.payload.disable_notification).toBeUndefined()
+    mkdirSync(join(dir, 'turns'), { recursive: true })
+    writeFileSync(join(dir, 'turns', `pid-${channel.child.pid}`), String(Date.now()))
+    await until(() => notices().length > 1, 2 * REFRESH_MS + 4000)
+    expect(notices().map(c => c.payload.text)).toEqual([stuckText(600), RECOVERED_TEXT])
+    await channel.close()
+  }, 25000)
+
+  // The idle time is longer than one tick, so an alert that counted from no
+  // activity at all would come on the first tick, before the time is up.
+  test('the channel tells the alert chat when the session shows no activity, counting from its start, and when it is back', async () => {
+    const dir = state()
+    const begin = Date.now()
+    const channel = start(dir, fixture.argv, { TELEGRAM_ALERT_CHAT: '77', TELEGRAM_ALERT_IDLE_MINUTES: '0.1' })
+    await channel.ready()
+    const alerts = () => calls(dir).filter(c => c.method === 'sendMessage' && c.payload.chat_id === '77')
+    await until(() => alerts().length > 0, 6000 + 2 * REFRESH_MS + 4000)
+    const idleAt = Date.now()
+    expect(idleAt - begin).toBeGreaterThanOrEqual(6000)
+    expect(alerts()[0]!.payload.text).toBe(idleText(6000))
+    // A file's mtime comes from the kernel's coarse clock, which can trail
+    // Date.now() by a few milliseconds; the mark must land after the alert.
+    await Bun.sleep(50)
+    mkdirSync(join(dir, 'turns'), { recursive: true })
+    writeFileSync(join(dir, 'turns', `busy-${channel.child.pid}`), '')
+    await until(() => alerts().length > 1, 2 * REFRESH_MS + 4000)
+    expect(alerts().map(c => c.payload.text)).toEqual([idleText(6000), RECOVERED_TEXT])
+    expect(calls(dir).filter(c => c.method === 'sendMessage' && c.payload.chat_id !== '77')).toEqual([])
+    await channel.close()
+  }, 35000)
+
+  test('a send-only instance never sends the idle alert', async () => {
+    const dir = state()
+    const sender = start(dir, ['claude', 'mcp', 'list'], { TELEGRAM_ALERT_CHAT: '77', TELEGRAM_ALERT_IDLE_MINUTES: '0.01' })
+    await sender.ready()
+    await Bun.sleep(600 + 2 * REFRESH_MS)
+    expect(calls(dir)).toEqual([])
+    expect(sender.child.exitCode).toBeNull()
+    await sender.close()
+  }, 20000)
 
   test('an edit of a text, a photo caption and a document caption reaches Claude as its own event', async () => {
     const dir = state()

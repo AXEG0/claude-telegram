@@ -6,7 +6,7 @@ Claude answers through tools to reply, react, edit its messages and fetch
 attachments.
 
 This is AXEG0's fork of Anthropic's Telegram plugin. It shows typing for the
-whole turn and tells the chat when Claude may be stuck, streams concurrent
+whole turn, tells you when Claude may be stuck and when it is back, streams concurrent
 subagents and background shells in one live message, joins a burst of messages
 into one, passes Claude what a message replies to, and passes on the new text
 of a message you edit. With rich messages on, it sends replies as Telegram rich
@@ -88,6 +88,9 @@ The server reads `.env` in its state directory when it starts, so a change takes
 | `TELEGRAM_STT_OPENAI_KEY` | An OpenAI API key, which turns on [speech to text](#voice-messages). |
 | `TELEGRAM_STT_MODEL` | The transcription model, `gpt-transcribe` unless set. |
 | `TELEGRAM_STT_LANGUAGES` | Languages to pin, comma-separated, such as `en,zh`. |
+| `TELEGRAM_STUCK_MINUTES` | Minutes a turn goes without activity before the [stuck notice](#stuck-alerts), `10` unless set. |
+| `TELEGRAM_ALERT_CHAT` | A chat ID, which turns on the [idle alert](#stuck-alerts) and receives it. |
+| `TELEGRAM_ALERT_IDLE_MINUTES` | Minutes the session goes without activity before the idle alert, `45` unless set. |
 | `TELEGRAM_ACCESS_MODE` | `static` pins access to `access.json` as it was at start; see [ACCESS.md](./ACCESS.md). |
 | `TELEGRAM_STATE_DIR` | The state directory, set in the shell environment. A directory per instance runs several bots on one machine, each with its own token and allowlist. |
 
@@ -109,7 +112,7 @@ Quick reference: IDs are **numeric user IDs** (get yours from [@userinfobot](htt
 ## Messages Claude receives
 
 Texts, photos, files, voice and audio, videos, video notes and stickers reach
-Claude as a `<channel source="telegram" chat_id="…" message_id="…" user="…" user_id="…" ts="…">`
+Claude as a `<channel source="plugin:telegram:telegram" chat_id="…" message_id="…" user="…" user_id="…" ts="…">`
 tag around the message's text or caption, with further attributes for what the
 message carries.
 
@@ -169,7 +172,7 @@ message of its own. The tag carries the message's own `message_id` and
 `edited="true"`, and its `ts` is the time of the edit:
 
 ```
-<channel source="telegram" chat_id="1" message_id="10" edited="true" user="owner" user_id="1" ts="2026-10-11T12:05:00.000Z">
+<channel source="plugin:telegram:telegram" chat_id="1" message_id="10" edited="true" user="owner" user_id="1" ts="2026-10-11T12:05:00.000Z">
 deploy to prod
 </channel>
 ```
@@ -198,8 +201,9 @@ scheduled task) in the private chat that last wrote to the bot since the server
 started. Telegram drops the indicator after a few seconds or when the bot sends,
 so the server re-sends it while the turn runs.
 
-The plugin's hooks mark the session busy on each of Claude's tool calls and
-prompts ([hooks/busy.ts](./hooks/busy.ts)) and record the turn's end on `Stop`,
+The plugin's hooks mark the session busy at the start and the end of each of
+Claude's tool calls and on each prompt ([hooks/busy.ts](./hooks/busy.ts)), and
+record the turn's end on `Stop`,
 `StopFailure` and `SessionEnd` ([hooks/turn-end.ts](./hooks/turn-end.ts)), under
 `turns/` in the state directory. A subagent's tool calls start no typing, as the
 subagent's work shows in its [own message](#subagents-and-shells); they count as activity
@@ -208,11 +212,37 @@ for the turn that waits on the subagent.
 The indicator pauses while a permission prompt waits on you, and resumes when
 you answer in Telegram, or at Claude's next tool call after an answer in the
 terminal.
-After 30 minutes with neither activity nor a turn end, leaving out the time a
-prompt waited, the indicator stops and the bot tells the chat that Claude may be
-stuck or was interrupted. An interrupt (Esc) runs no hook, so after one the
-indicator lasts until the next turn ends or the 30 minutes pass. A message that
+After 10 minutes with neither activity nor a turn end, leaving out the time a
+prompt waited, the indicator stops and the bot sends the [stuck
+notice](#stuck-alerts). An interrupt (Esc) runs no hook, so after one the
+indicator lasts until the next turn ends or the 10 minutes pass. A message that
 arrives while Claude is busy can wait for the next turn.
+
+### Stuck alerts
+
+Two alerts tell you that Claude may be stuck, both from the activity the hooks
+record: prompts, the start and end of tool calls, a subagent's tool calls, and
+turn ends.
+
+- **The stuck notice** goes to the chat that is typing, when its turn shows no
+  activity for 10 minutes (`TELEGRAM_STUCK_MINUTES`): "⚠️ No turn end seen in 10
+  minutes: Claude may be stuck, or was interrupted. Typing has stopped." A
+  foreground tool call that runs longer than that, such as a long command, gets
+  it too.
+- **The idle alert** goes to `TELEGRAM_ALERT_CHAT`, when the session shows no
+  activity at all for 45 minutes (`TELEGRAM_ALERT_IDLE_MINUTES`), whether or not
+  a turn is typing: "⚠️ No activity in this Claude Code session for 45 minutes:
+  no prompt, tool call or turn end. It may be stuck." It is off unless that chat
+  is set, and runs only in the server that polls the bot. It suits a session
+  that runs a turn on a schedule shorter than the idle time, such as a heartbeat
+  every 30 minutes; a session that can sit idle longer than that gets the alert
+  each time it does. The time counts from the server's start, so a new session
+  waits the full time, and leaves out the time a permission prompt waits.
+
+Each alert goes once per silence, with Telegram's notification. The first
+activity after it sends "✅ Back to normal: Claude is active again." once to each
+chat that got an alert. When the session ends, the server ends with it and sends
+nothing, so a session that dies needs a check outside the machine.
 
 ### Permission prompts
 

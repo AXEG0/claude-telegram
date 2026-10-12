@@ -1,5 +1,5 @@
 {
-  "description": "Marks when this session is busy, when each turn ends, when each subagent starts and stops, and when each background shell starts or is stopped, for the Telegram server's typing indicator and its subagent and shell stream",
+  "description": "Marks when this session is busy, when each tool call ends, when each turn ends, when each subagent starts and stops, and when each background shell starts or is stopped, for the Telegram server's typing indicator, its stuck and idle alerts, and its subagent and shell stream",
   "hooks": {
     "Stop": [
       {
@@ -83,6 +83,16 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun \"${CLAUDE_PLUGIN_ROOT}/hooks/busy.ts\"",
+            "async": true,
+            "timeout": 5
+          }
+        ]
       }
     ],
     "PreToolUse": [
@@ -98,6 +108,18 @@
       }
     ],
     "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun \"${CLAUDE_PLUGIN_ROOT}/hooks/busy.ts\"",
+            "async": true,
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
       {
         "hooks": [
           {

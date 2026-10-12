@@ -16,8 +16,10 @@ import { join } from 'path'
 
 export const REFRESH_MS = 4000
 // A turn whose end never reaches the hook (an interrupt, a hung turn) stops
-// typing this long after its last activity, and onCap tells the chat.
-export const CAP_MS = 30 * 60 * 1000
+// typing this long after its last activity, and onCap tells the chat. The
+// first activity after that calls onRecover. TELEGRAM_STUCK_MINUTES sets it;
+// see alerts.ts.
+export const CAP_MS = 10 * 60 * 1000
 // Claude's own activity this long after a permission prompt appears means the
 // prompt was answered in the terminal. The busy hook of the call that raised
 // the prompt runs alongside it, within the hook's timeout in hooks.json.
@@ -117,6 +119,7 @@ export function createTyping(opts: {
   send: (chatId: string) => void
   turnEndedAt: () => number
   onCap?: (chatId: string) => void
+  onRecover?: (chatId: string) => void
   // The last activity in this session, and the chat to type into for a turn
   // no message started.
   busyAt?: () => number
@@ -131,6 +134,8 @@ export function createTyping(opts: {
   const now = opts.now ?? Date.now
   const capMs = opts.capMs ?? CAP_MS
   const since = new Map<string, number>()
+  // Chats told the turn may be stuck, and when.
+  const capped = new Map<string, number>()
   let paused = false
   let pausedAt = 0
 
@@ -149,6 +154,13 @@ export function createTyping(opts: {
       // the start below, so the cap counts from there. A subagent can work
       // while Claude's own prompt waits, so its activity resumes nothing.
       if (paused && busy > pausedAt + PROMPT_GRACE_MS) paused = false
+      // Any activity after a stuck notice means Claude is back.
+      const last = Math.max(busy, ended, sub)
+      for (const [chatId, at] of capped) {
+        if (last <= at) continue
+        capped.delete(chatId)
+        opts.onRecover?.(chatId)
+      }
       if (working && t - busy < capMs) {
         const chat = opts.chat?.()
         if (chat && !since.has(chat)) since.set(chat, busy)
@@ -165,6 +177,7 @@ export function createTyping(opts: {
         // A permission prompt waits on the owner, so it does not count.
         if (!paused && t - began >= capMs) {
           since.delete(chatId)
+          capped.set(chatId, t)
           opts.onCap?.(chatId)
           continue
         }

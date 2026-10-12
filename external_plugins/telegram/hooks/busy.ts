@@ -1,6 +1,8 @@
 #!/usr/bin/env bun
-// PreToolUse and UserPromptSubmit hook: marks this Claude Code process busy,
-// so the Telegram server types while a turn runs, whoever started it. A
+// PreToolUse, PostToolUse, PostToolUseFailure and UserPromptSubmit hook: marks
+// this Claude Code process busy, so the Telegram server types while a turn
+// runs, whoever started it. The mark at a tool call's end restarts the stuck
+// clock after a long call, which the mark at its start alone would not. A
 // subagent's tool call carries agent_id and marks it only as working on: that
 // keeps a chat that is already typing clear of the stuck notice, and starts
 // nothing, as subagents have their own messages. See typing.ts. Always exits
