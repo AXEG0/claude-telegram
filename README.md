@@ -18,7 +18,8 @@ through it.
 
 | Feature | What you get |
 | --- | --- |
-| ⌨️ **Typing for the whole turn** | "typing…" stays on while Claude works, whoever started the turn, and the bot tells you when Claude may be stuck. |
+| ⌨️ **Typing for the whole turn** | "typing…" stays on while Claude works, whoever started the turn. |
+| 🚨 **Stuck alerts** | The bot tells you when a turn shows no activity for 10 minutes, or, with an alert chat set, the whole session for 45, and again when Claude is back. |
 | 🤖 **Live subagents and shells** | Concurrent subagents and background shells share one live message: one row each with step, time and tokens, or a shell's description and time, then Done, Failed with its exit code, or Stopped. |
 | 📝 **Rich messages** | Headings, tables, task lists, code and collapsible sections render natively in Telegram. |
 | 🎙️ **Voice messages** | Voice notes, audio and video notes reach Claude as text, transcribed by OpenAI. |

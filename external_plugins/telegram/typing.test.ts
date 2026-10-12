@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync, readdirSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { ancestorPids, busyFiles, createTyping, markerFiles, PROMPT_GRACE_MS, readBusyAt, readTurnEnd, subagentFiles, writeTurnEnd } from './typing.ts'
+import { ancestorPids, busyFiles, CAP_MS, createTyping, markerFiles, PROMPT_GRACE_MS, readBusyAt, readTurnEnd, subagentFiles, writeTurnEnd } from './typing.ts'
 
 function harness(capMs = 60_000, chat?: string) {
   let t = 1_000
@@ -11,12 +11,14 @@ function harness(capMs = 60_000, chat?: string) {
   let sub = 0
   const sent: string[] = []
   const capped: string[] = []
+  const recovered: string[] = []
   const typing = createTyping({
     send: id => sent.push(id),
     turnEndedAt: () => ended,
     now: () => t,
     capMs,
     onCap: id => capped.push(id),
+    onRecover: id => recovered.push(id),
     busyAt: () => busy,
     chat: () => chat,
     subagentAt: () => sub,
@@ -25,6 +27,7 @@ function harness(capMs = 60_000, chat?: string) {
     typing,
     sent,
     capped,
+    recovered,
     advance(ms: number) { t += ms },
     endTurn() { ended = t },
     work() { busy = t },
@@ -63,6 +66,59 @@ describe('createTyping', () => {
     expect(h.sent).toEqual(['42'])
     expect(h.capped).toEqual(['42'])
     expect(h.typing.active()).toEqual([])
+  })
+
+  test('the default cap is 10 minutes', () => {
+    expect(CAP_MS).toBe(10 * 60 * 1000)
+  })
+
+  test('activity after the stuck notice reports Claude back once', () => {
+    const h = harness(10_000)
+    h.typing.start('42')
+    h.advance(10_000); h.typing.tick()
+    expect(h.capped).toEqual(['42'])
+    h.advance(4000); h.typing.tick()
+    expect(h.recovered).toEqual([])
+    h.work()
+    h.advance(4000); h.typing.tick()
+    h.advance(4000); h.typing.tick()
+    expect(h.recovered).toEqual(['42'])
+  })
+
+  test('a turn end after the stuck notice reports Claude back, a subagent\'s call too', () => {
+    const a = harness(10_000)
+    a.typing.start('42')
+    a.advance(10_000); a.typing.tick()
+    a.advance(1); a.endTurn()
+    a.advance(4000); a.typing.tick()
+    expect(a.recovered).toEqual(['42'])
+
+    const b = harness(10_000)
+    b.typing.start('7')
+    b.advance(10_000); b.typing.tick()
+    b.advance(1); b.subagent()
+    b.advance(4000); b.typing.tick()
+    expect(b.recovered).toEqual(['7'])
+  })
+
+  test('a new message after the stuck notice is not Claude coming back', () => {
+    const h = harness(10_000)
+    h.typing.start('42')
+    h.advance(10_000); h.typing.tick()
+    h.advance(1000); h.typing.start('42')
+    h.advance(4000); h.typing.tick()
+    expect(h.recovered).toEqual([])
+  })
+
+  test('no stuck notice, no recovery message', () => {
+    const h = harness(10_000)
+    h.typing.start('42')
+    h.advance(4000); h.work()
+    h.advance(4000); h.typing.tick()
+    h.endTurn()
+    h.advance(4000); h.typing.tick()
+    expect(h.capped).toEqual([])
+    expect(h.recovered).toEqual([])
   })
 
   test('a turn that ends sends no stuck notice', () => {
@@ -321,6 +377,16 @@ describe('hooks/busy.ts', () => {
     const input = JSON.stringify({ hook_event_name: 'PreToolUse', agent_id: 'a1', agent_type: 'Explore' })
     expect(run(input, { TELEGRAM_STATE_DIR: dir, CLAUDE_PID: '4242' }).exitCode).toBe(0)
     expect(readdirSync(join(dir, 'turns'))).toEqual(['subagent-4242'])
+  })
+
+  test('runs at every tool call\'s start and end, failed ones included, and at every prompt', () => {
+    const hooks = JSON.parse(readFileSync(join(import.meta.dir, 'hooks', 'hooks.json'), 'utf8')).hooks
+    const busy = 'bun "${CLAUDE_PLUGIN_ROOT}/hooks/busy.ts"'
+    for (const event of ['PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'UserPromptSubmit']) {
+      const entries = hooks[event].filter((h: { matcher?: string; hooks: { command: string }[] }) =>
+        !h.matcher && h.hooks.some(x => x.command === busy))
+      expect(entries).toHaveLength(1)
+    }
   })
 
   test('input it cannot read counts as Claude\'s own, and it still exits 0', () => {
