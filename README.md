@@ -26,6 +26,7 @@ through it.
 | 📦 **Bursts as one message** | Quick texts, a long paste Telegram split, and a photo with its question arrive together, so Claude answers once. |
 | ↩️ **Reply context** | Claude sees the message you replied to and the part you quoted. |
 | ✏️ **Edits** | Edit a message you sent, and Claude gets its new text as an edit of that message. |
+| 🤝 **Other bots** | Claude talks to another bot that has bot-to-bot communication on, and the live subagent message and stuck alerts that would go to the bot go to you. |
 
 Plus everything from the official plugin: pairing and allowlists, photos and
 files, reactions, and permission prompts with Allow and Deny buttons.

@@ -1,45 +1,46 @@
 import { describe, expect, test } from 'bun:test'
-import { alertConfig, createIdleAlarm, duration, idleText, IDLE_MINUTES, RECOVERED_TEXT, STUCK_MINUTES, stuckText } from './alerts.ts'
+import { alertConfig, createIdleAlarm, duration, idleText, IDLE_MINUTES, NO_OWNER, RECOVERED_TEXT, STUCK_MINUTES, stuckText } from './alerts.ts'
 import { PROMPT_GRACE_MS } from './typing.ts'
 
 const MIN = 60_000
 
 describe('alertConfig', () => {
-  test('a 10-minute stuck notice and no idle alert unless set', () => {
+  test('a 10-minute stuck notice and no owner chat unless set', () => {
     expect(STUCK_MINUTES).toBe(10)
-    expect(alertConfig({})).toEqual({ capMs: 10 * MIN, warnings: [] })
+    expect(alertConfig({})).toEqual({ capMs: 10 * MIN, idleMs: 45 * MIN, warnings: [] })
   })
 
-  test('an alert chat turns on the idle alert at 45 minutes', () => {
+  test('the alert chat is the owner chat, with the idle alert at 45 minutes', () => {
     expect(IDLE_MINUTES).toBe(45)
     expect(alertConfig({ TELEGRAM_ALERT_CHAT: ' 64024129 ' })).toEqual({
-      capMs: 10 * MIN, idle: { chat: '64024129', ms: 45 * MIN }, warnings: [],
+      capMs: 10 * MIN, owner: '64024129', idleMs: 45 * MIN, warnings: [],
     })
-    expect(alertConfig({ TELEGRAM_ALERT_CHAT: '-1001234' }).idle?.chat).toBe('-1001234')
+    expect(alertConfig({ TELEGRAM_ALERT_CHAT: '-1001234' }).owner).toBe('-1001234')
   })
 
   test('both times take minutes, fractions included', () => {
     const c = alertConfig({ TELEGRAM_STUCK_MINUTES: '15', TELEGRAM_ALERT_CHAT: '1', TELEGRAM_ALERT_IDLE_MINUTES: '0.5' })
-    expect(c).toEqual({ capMs: 15 * MIN, idle: { chat: '1', ms: 30_000 }, warnings: [] })
+    expect(c).toEqual({ capMs: 15 * MIN, owner: '1', idleMs: 30_000, warnings: [] })
   })
 
-  test('the idle time alone turns nothing on', () => {
-    expect(alertConfig({ TELEGRAM_ALERT_IDLE_MINUTES: '45' }).idle).toBeUndefined()
+  test('the idle time alone names no owner chat', () => {
+    expect(alertConfig({ TELEGRAM_ALERT_IDLE_MINUTES: '45' }).owner).toBeUndefined()
   })
 
   test('a value it cannot use falls back and says so', () => {
     for (const bad of ['0', '-3', 'ten', 'Infinity']) {
       const c = alertConfig({ TELEGRAM_STUCK_MINUTES: bad, TELEGRAM_ALERT_CHAT: '1', TELEGRAM_ALERT_IDLE_MINUTES: bad })
       expect(c.capMs).toBe(10 * MIN)
-      expect(c.idle?.ms).toBe(45 * MIN)
+      expect(c.idleMs).toBe(45 * MIN)
       expect(c.warnings).toHaveLength(2)
     }
   })
 
-  test('an alert chat that is not a chat id leaves the idle alert off and says so', () => {
+  test('an alert chat that is not a chat id names no owner chat and says what that leaves off', () => {
     const c = alertConfig({ TELEGRAM_ALERT_CHAT: '@owner' })
-    expect(c.idle).toBeUndefined()
-    expect(c.warnings[0]).toContain('TELEGRAM_ALERT_CHAT')
+    expect(c.owner).toBeUndefined()
+    expect(c.warnings).toEqual([`telegram channel: TELEGRAM_ALERT_CHAT=@owner is not a chat id; ${NO_OWNER}\n`])
+    expect(NO_OWNER).toContain('permission hook allowed')
   })
 })
 

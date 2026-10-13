@@ -6,7 +6,7 @@ import { join } from 'path'
 import fixture from './fixtures/channel-argv.json'
 import { AGENT_TICK_MS, appendAgentEvent, agentEventFile } from './agents.ts'
 import { appendPermit, permitDetail, permitFile, permitText, type PermitEvent } from './permit.ts'
-import { idleText, RECOVERED_TEXT, stuckText } from './alerts.ts'
+import { idleText, NO_OWNER, RECOVERED_TEXT, stuckText } from './alerts.ts'
 import { REFRESH_MS } from './typing.ts'
 
 const children: ChildProcessWithoutNullStreams[] = []
@@ -96,9 +96,10 @@ afterEach(async () => {
 // Real /proc ancestry, real MCP transport, and the production server. Only
 // grammy's HTTP transport is fake; these tests never use the owner's bot.
 describe.skipIf(process.platform !== 'linux')('polling ownership in the running server', () => {
-  test('the channel server tells the allowlisted chat what the hook allowed, and See more shows the command', async () => {
-    const dir = state()
-    const channel = start(dir, fixture.argv)
+  test('the channel server tells the owner chat alone what the hook allowed, and See more shows the command', async () => {
+    // The allowlist also holds another person and another bot.
+    const dir = state({ dmPolicy: 'allowlist', allowFrom: ['5', '8606571973', '1'] })
+    const channel = start(dir, fixture.argv, { TELEGRAM_ALERT_CHAT: '1' })
     await channel.ready()
     const ev: PermitEvent = { t: Date.now(), event: 'allowed', tool_name: 'Bash', description: 'Push job archive to rental', command: 'ls -la /w', agent_type: 'general-purpose' }
     appendPermit(permitFile(dir, channel.child.pid!), ev)
@@ -107,6 +108,7 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     await Bun.sleep(1500)
     expect(notices()).toHaveLength(1)
     expect(notices()[0]!.payload.chat_id).toBe('1')
+    expect(calls(dir).filter(c => c.method === 'sendMessage' && c.payload.chat_id !== '1')).toEqual([])
     // A notice pings, unlike the silent subagent stream.
     expect(notices()[0]!.payload.disable_notification).toBeUndefined()
     expect(notices()[0]!.payload.reply_markup).toEqual({ inline_keyboard: [[{ text: 'See more', callback_data: 'permit:p1' }]] })
@@ -120,6 +122,18 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     }]))
     await until(() => calls(dir).some(c => c.method === 'editMessageText' && c.payload.text === permitDetail(ev)))
     expect(channel.notifications.some(n => n.method === 'notifications/claude/channel/permission')).toBe(false)
+    await channel.close()
+  }, 15000)
+
+  test('with no owner chat, the channel server tells no one what the hook allowed, and says so at start', async () => {
+    const dir = state({ dmPolicy: 'allowlist', allowFrom: ['1', '5'] })
+    const channel = start(dir, fixture.argv, { TELEGRAM_ALERT_CHAT: '' })
+    await channel.ready()
+    await until(() => channel.stderr().includes('polling as @test_bot'))
+    expect(channel.stderr()).toContain(`TELEGRAM_ALERT_CHAT is not set; ${NO_OWNER}`)
+    appendPermit(permitFile(dir, channel.child.pid!), { t: Date.now(), event: 'allowed', tool_name: 'Bash', description: 'Push job archive to rental' })
+    await Bun.sleep(2500)
+    expect(calls(dir).some(c => c.method === 'sendMessage')).toBe(false)
     await channel.close()
   }, 15000)
 
@@ -255,6 +269,149 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     expect(sender.child.exitCode).toBeNull()
     await sender.close()
   }, 20000)
+
+  // Another bot on the allowlist, a person who is not the owner, and the owner.
+  const BOT = { id: 8606571973, is_bot: true, first_name: 'Lana', username: 'lana_7491_bot' }
+  const PERSON = { id: 5, is_bot: false, first_name: 'Manager', username: 'manager' }
+  const OWNER = { id: 1, is_bot: false, first_name: 'Owner', username: 'owner' }
+  const PEERS = { dmPolicy: 'allowlist', allowFrom: ['1', String(BOT.id), '5'] }
+  const dm = (from: { id: number }, message_id: number, text: string) =>
+    ({ message: { message_id, date: Math.floor(Date.now() / 1000), from, chat: { id: from.id, type: 'private' }, text } })
+  const updates = (...items: object[]) => JSON.stringify(items.map((u, i) => ({ update_id: i + 1, ...u })))
+  const toBot = (c: { payload: any }) => c.payload.chat_id === String(BOT.id) || c.payload.chat_id === `@${BOT.username}`
+  // Starts one subagent and returns the chat its live message went to.
+  async function panelChat(dir: string, channel: ReturnType<typeof start>): Promise<string> {
+    const base = join(dir, 'transcripts')
+    mkdirSync(base, { recursive: true })
+    writeFileSync(join(base, 'agent-a1.meta.json'), JSON.stringify({ description: 'Routed agent' }))
+    appendAgentEvent(agentEventFile(dir, channel.child.pid!), { t: Date.now(), event: 'start', agent_id: 'a1', agent_type: 'general-purpose', agent_base: join(base, 'agent-a1') })
+    const panel = (c: { method: string; payload: any }) => c.method === 'sendMessage' && c.payload.text?.startsWith('🤖 Subagents')
+    await until(() => calls(dir).some(panel), AGENT_TICK_MS + 4000)
+    return calls(dir).find(panel)!.payload.chat_id
+  }
+
+  test('after another bot writes, the subagent message goes to the owner chat and never to the bot', async () => {
+    const dir = state(PEERS)
+    writeFileSync(join(dir, 'inbound.json'), updates(dm(BOT, 1, 'from the other bot')))
+    const channel = start(dir, fixture.argv, { TELEGRAM_ALERT_CHAT: '1' })
+    await channel.ready()
+    await until(() => channel.inbound().length === 1, 6000)
+    expect(await panelChat(dir, channel)).toBe('1')
+    expect(calls(dir).filter(c => c.method !== 'sendChatAction' && toBot(c))).toEqual([])
+    await channel.close()
+  }, 20000)
+
+  test('when a person writes after the bot, the subagent message goes to that person', async () => {
+    const dir = state(PEERS)
+    writeFileSync(join(dir, 'inbound.json'), updates(dm(BOT, 1, 'from the other bot'), dm(PERSON, 2, 'from a person')))
+    const channel = start(dir, fixture.argv, { TELEGRAM_ALERT_CHAT: '1' })
+    await channel.ready()
+    await until(() => channel.inbound().length === 2, 6000)
+    expect(await panelChat(dir, channel)).toBe('5')
+    await channel.close()
+  }, 20000)
+
+  test('after another bot edits a message, the subagent message goes to the owner chat', async () => {
+    const dir = state(PEERS)
+    const now = Math.floor(Date.now() / 1000)
+    writeFileSync(join(dir, 'inbound.json'), updates({
+      edited_message: { message_id: 7, date: now, edit_date: now + 5, from: BOT, chat: { id: BOT.id, type: 'private' }, text: 'edited by the other bot' },
+    }))
+    const channel = start(dir, fixture.argv, { TELEGRAM_ALERT_CHAT: '1' })
+    await channel.ready()
+    await until(() => channel.inbound().length === 1, 6000)
+    expect(await panelChat(dir, channel)).toBe('1')
+    await channel.close()
+  }, 20000)
+
+  test('a turn the owner and the bot both started gets one stuck notice and one back to normal, in the owner chat', async () => {
+    const dir = state(PEERS)
+    writeFileSync(join(dir, 'inbound.json'), updates(dm(OWNER, 1, 'from the owner'), dm(BOT, 2, 'from the other bot')))
+    const channel = start(dir, fixture.argv, { TELEGRAM_ALERT_CHAT: '1', TELEGRAM_STUCK_MINUTES: '0.01' })
+    await channel.ready()
+    const notices = () => calls(dir).filter(c => c.method === 'sendMessage' && c.payload.chat_id === '1')
+    await until(() => notices().length > 0, 2 * REFRESH_MS + 4000)
+    mkdirSync(join(dir, 'turns'), { recursive: true })
+    writeFileSync(join(dir, 'turns', `pid-${channel.child.pid}`), String(Date.now()))
+    await until(() => notices().some(c => c.payload.text === RECOVERED_TEXT), 2 * REFRESH_MS + 4000)
+    await Bun.sleep(REFRESH_MS + 500)
+    expect(notices().map(c => c.payload.text)).toEqual([stuckText(600), RECOVERED_TEXT])
+    expect(calls(dir).filter(c => c.method === 'sendMessage' && c.payload.chat_id !== '1')).toEqual([])
+    await channel.close()
+  }, 25000)
+
+  test('the reply tool sends to a bot by its @username, text and files alike, and to everyone else by id', async () => {
+    const dir = state({ ...PEERS, allowFrom: [...PEERS.allowFrom, '7777', '6', '9'], groups: { '-100': { requireMention: true, allowFrom: [] } } })
+    mkdirSync(join(dir, 'inbox'))
+    writeFileSync(join(dir, 'inbox', 'chart.png'), 'png')
+    writeFileSync(join(dir, 'inbox', 'notes.txt'), 'notes')
+    writeFileSync(join(dir, 'inbound.json'), updates(dm(BOT, 1, 'from the other bot'), dm(PERSON, 2, 'from a person')))
+    const channel = start(dir, fixture.argv, {
+      TELEGRAM_ALERT_CHAT: '1',
+      // An allowlisted bot and a person who have not written since the start,
+      // and a chat Telegram will not describe.
+      TELEGRAM_TEST_USERS: JSON.stringify({
+        7777: { id: 7777, is_bot: true, first_name: 'Quiet', username: 'quiet_bot' },
+        6: { id: 6, is_bot: false, first_name: 'Someone', username: 'someone' },
+        9: null,
+      }),
+    })
+    await channel.ready()
+    await until(() => channel.inbound().length === 2, 6000)
+    const reply = async (chat_id: string, text: string, files?: string[]) =>
+      (await channel.request('tools/call', { name: 'reply', arguments: { chat_id, text, ...(files ? { files } : {}) } })).result
+    const sendsOf = (text: string) => calls(dir).filter(c => c.payload.text === text || c.payload.caption === text)
+    const sent = (text: string) => calls(dir).filter(c => c.method === 'sendMessage' && c.payload.text === text).map(c => c.payload.chat_id)
+
+    expect((await reply(String(BOT.id), 'to the bot')).isError).not.toBe(true)
+    expect(sent('to the bot')).toEqual(['@lana_7491_bot'])
+    const before = calls(dir).length
+    expect((await reply(String(BOT.id), 'with files', [join(dir, 'inbox', 'chart.png'), join(dir, 'inbox', 'notes.txt')])).isError).not.toBe(true)
+    expect(calls(dir).slice(before).filter(c => c.method.startsWith('send')).map(c => [c.method, c.payload.chat_id])).toEqual([
+      ['sendMessage', '@lana_7491_bot'], ['sendPhoto', '@lana_7491_bot'], ['sendDocument', '@lana_7491_bot'],
+    ])
+    await reply('5', 'to the person')
+    expect(sent('to the person')).toEqual(['5'])
+    await reply('7777', 'to the quiet bot')
+    await reply('7777', 'to the quiet bot again')
+    expect([...sent('to the quiet bot'), ...sent('to the quiet bot again')]).toEqual(['@quiet_bot', '@quiet_bot'])
+    await reply('6', 'to someone')
+    expect(sent('to someone')).toEqual(['6'])
+    await reply('-100', 'to the group')
+    expect(sent('to the group')).toEqual(['-100'])
+
+    // The outbound gate reads the id Claude passed, so a username gets past nothing.
+    const byName = await reply('@lana_7491_bot', 'by name')
+    expect(byName.isError).toBe(true)
+    expect(byName.content[0].text).toContain('not allowlisted')
+    // When Telegram will not say whether the chat is a bot's, nothing goes out.
+    const unknown = await reply('9', 'to an undescribed chat')
+    expect(unknown.isError).toBe(true)
+    expect(unknown.content[0].text).toContain('could not tell whether chat 9 is a bot')
+    expect(sendsOf('by name')).toEqual([])
+    expect(sendsOf('to an undescribed chat')).toEqual([])
+
+    // Telegram is asked only about the chats no message came from.
+    expect(calls(dir).filter(c => c.method === 'getChatMember').map(c => [c.payload.chat_id, c.payload.user_id])).toEqual([
+      ['7777', 7777], ['6', 6], ['9', 9],
+    ])
+    await channel.close()
+  }, 20000)
+
+  test('a session that does not poll sends a rich reply to an allowlisted bot that has not written by its @username', async () => {
+    const dir = state(PEERS)
+    const sender = start(dir, ['claude', '-p', 'hello'], {
+      TELEGRAM_RICH_MESSAGES: 'true',
+      TELEGRAM_TEST_USERS: JSON.stringify({ [BOT.id]: BOT }),
+    })
+    await sender.ready()
+    const sent = await sender.request('tools/call', { name: 'reply', arguments: { chat_id: String(BOT.id), text: '**rich** to the bot' } })
+    expect(sent.result.isError).not.toBe(true)
+    expect(calls(dir).map(c => [c.method, c.payload.chat_id])).toEqual([
+      ['getChatMember', String(BOT.id)], ['sendRichMessage', '@lana_7491_bot'],
+    ])
+    await sender.close()
+  }, 15000)
 
   test('an edit of a text, a photo caption and a document caption reaches Claude as its own event', async () => {
     const dir = state()
@@ -398,7 +555,8 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     expect(sent.result.isError).not.toBe(true)
     const send = calls(dir).slice(sentBefore).find(call => call.method === 'sendMessage')!
     expect(send).toBeDefined()
-    expect(calls(dir).filter(call => call.pid === send.pid).map(call => call.method)).toEqual(['sendMessage'])
+    // Whether chat 1 is a bot's, then the message; nothing that polls.
+    expect(calls(dir).filter(call => call.pid === send.pid).map(call => call.method)).toEqual(['getChatMember', 'sendMessage'])
     await sender.close()
     expect(readFileSync(join(dir, 'bot.pid'), 'utf8')).toBe(holder)
     expect(statSync(join(dir, 'bot.pid')).mtimeMs).toBe(before)

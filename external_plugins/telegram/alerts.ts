@@ -4,16 +4,16 @@
 // plugin's hooks record them (see typing.ts).
 //
 // - The stuck notice: a turn that types into a chat and shows no activity for
-//   TELEGRAM_STUCK_MINUTES (10 unless set). It goes to that chat.
+//   TELEGRAM_STUCK_MINUTES (10 unless set). It goes to that chat, or to the
+//   owner chat when that chat is another bot's (see bots.ts).
 // - The idle backstop: no activity at all for TELEGRAM_ALERT_IDLE_MINUTES (45
 //   unless set), whether or not a turn types. It catches a session that hangs
 //   with no message waiting, so it suits a session that runs a turn on a
-//   schedule, such as a heartbeat every 30 minutes. It runs only with
-//   TELEGRAM_ALERT_CHAT set, only in the server that polls, and goes to that
-//   chat.
+//   schedule, such as a heartbeat every 30 minutes. It runs only with an owner
+//   chat, only in the server that polls, and goes to the owner chat.
 //
-// Activity after either notice sends one "back to normal" message to each
-// chat that got one.
+// TELEGRAM_ALERT_CHAT names the owner chat. Activity after either notice
+// sends one "back to normal" message to each chat that got one.
 //
 // This file carries no dependencies beyond Node's, like typing.ts.
 
@@ -22,9 +22,15 @@ import { CAP_MS, PROMPT_GRACE_MS } from './typing.ts'
 export const STUCK_MINUTES = CAP_MS / 60_000
 export const IDLE_MINUTES = 45
 
+// What goes missing without an owner chat.
+export const NO_OWNER = 'the idle alert is off, and the notices of what the permission hook allowed and of a bot\'s turn go nowhere'
+
 export type AlertConfig = {
   capMs: number
-  idle?: { chat: string; ms: number }
+  // The owner's chat, from TELEGRAM_ALERT_CHAT: the idle alert, the notices
+  // of what the permission hook allowed (see permit.ts), and a bot's notices.
+  owner?: string
+  idleMs: number
   warnings: string[]
 }
 
@@ -40,12 +46,12 @@ export function alertConfig(env: NodeJS.ProcessEnv = process.env): AlertConfig {
   }
   const capMs = minutes('TELEGRAM_STUCK_MINUTES', STUCK_MINUTES) * 60_000
   const chat = env.TELEGRAM_ALERT_CHAT?.trim()
-  if (!chat) return { capMs, warnings }
+  if (!chat) return { capMs, idleMs: IDLE_MINUTES * 60_000, warnings }
   if (!/^-?\d+$/.test(chat)) {
-    warnings.push(`telegram channel: TELEGRAM_ALERT_CHAT=${chat} is not a chat id; the idle alert is off\n`)
-    return { capMs, warnings }
+    warnings.push(`telegram channel: TELEGRAM_ALERT_CHAT=${chat} is not a chat id; ${NO_OWNER}\n`)
+    return { capMs, idleMs: IDLE_MINUTES * 60_000, warnings }
   }
-  return { capMs, idle: { chat, ms: minutes('TELEGRAM_ALERT_IDLE_MINUTES', IDLE_MINUTES) * 60_000 }, warnings }
+  return { capMs, owner: chat, idleMs: minutes('TELEGRAM_ALERT_IDLE_MINUTES', IDLE_MINUTES) * 60_000, warnings }
 }
 
 export function duration(ms: number): string {
