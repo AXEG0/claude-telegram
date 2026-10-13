@@ -4,7 +4,8 @@
 // plugin's PermissionRequest hook (hooks/permission.ts) answers a Bash ask
 // itself: it appends what it allowed to a file named for the Claude Code pid,
 // then allows the call. The polling server reads its ancestors' files and
-// tells the allowlisted chats what ran, with the command one tap away:
+// tells the owner chat, TELEGRAM_ALERT_CHAT, what ran, with the command one
+// tap away:
 //
 //   🔓 Allowed · Bash · general-purpose agent
 //   Push job archive to rental and check environment

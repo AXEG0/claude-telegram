@@ -32,7 +32,8 @@ import { heartbeatTransformer } from './heartbeat.ts'
 import { batchGap, createBatcher } from './batch.ts'
 import { createTextMemory, editEvent } from './edit.ts'
 import { channelMode } from './polling.ts'
-import { alertConfig, createIdleAlarm, idleText, RECOVERED_TEXT, stuckText } from './alerts.ts'
+import { alertConfig, createIdleAlarm, idleText, NO_OWNER, RECOVERED_TEXT, stuckText } from './alerts.ts'
+import { createPeers, noticeChat } from './bots.ts'
 import { createPermitReader, permitDetail, permitFile, permitText, type PermitEvent } from './permit.ts'
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR
@@ -127,12 +128,24 @@ let lastChat: string | undefined
 // The stuck notice, the idle backstop and their recovery. See alerts.ts.
 const ALERTS = alertConfig()
 for (const warning of ALERTS.warnings) process.stderr.write(warning)
+// The owner's chat, TELEGRAM_ALERT_CHAT.
+const OWNER = ALERTS.owner
+if (POLLING && !OWNER && !process.env.TELEGRAM_ALERT_CHAT?.trim()) {
+  process.stderr.write(`telegram channel: TELEGRAM_ALERT_CHAT is not set; ${NO_OWNER}\n`)
+}
+// Other bots on the allowlist, from Telegram's own is_bot. See bots.ts.
+const peers = createPeers(async id => (await bot.api.getChatMember(id, Number(id))).user)
+// A notice of the plugin's own goes to the chat, or to the owner chat when
+// the chat is another bot's.
+const notice = (chat_id: string | undefined) => noticeChat(chat_id, peers, OWNER)
 function alert(chat_id: string, text: string): void {
   void bot.api.sendMessage(chat_id, text).catch(err => {
     process.stderr.write(`telegram channel: alert to ${chat_id} not sent: ${err}\n`)
   })
 }
-// Chats to tell Claude is back, once each, after this tick's checks.
+// Chats to tell Claude may be stuck, and that it is back, once each, after
+// this tick's checks: two chats can share the owner chat.
+const stuck = new Set<string>()
 const recovered = new Set<string>()
 const typing = createTyping({
   send: chat_id => void bot.api.sendChatAction(chat_id, 'typing').catch(() => {}),
@@ -141,29 +154,31 @@ const typing = createTyping({
   chat: () => lastChat,
   subagentAt: () => readBusyAt(subagentMarkers),
   capMs: ALERTS.capMs,
-  onCap: chat_id => alert(chat_id, stuckText(ALERTS.capMs)),
-  onRecover: chat_id => recovered.add(chat_id),
+  onCap: chat_id => { const to = notice(chat_id); if (to) stuck.add(to) },
+  onRecover: chat_id => { const to = notice(chat_id); if (to) recovered.add(to) },
 })
 // Only the server that polls watches for a session gone idle: any other
 // instance belongs to a probe or a session that is not the channel.
-const IDLE = ALERTS.idle
-const idle = POLLING && IDLE ? createIdleAlarm({
+const idle = POLLING && OWNER ? createIdleAlarm({
   activityAt: () => Math.max(readBusyAt(busyMarkers), readBusyAt(subagentMarkers), readTurnEnd(turnEndFiles)),
-  idleMs: IDLE.ms,
-  onIdle: () => alert(IDLE.chat, idleText(IDLE.ms)),
-  onRecover: () => recovered.add(IDLE.chat),
+  idleMs: ALERTS.idleMs,
+  onIdle: () => alert(OWNER, idleText(ALERTS.idleMs)),
+  onRecover: () => recovered.add(OWNER),
 }) : undefined
 setInterval(() => {
   typing.tick()
   idle?.tick()
+  for (const chat_id of stuck) alert(chat_id, stuckText(ALERTS.capMs))
+  stuck.clear()
   for (const chat_id of recovered) alert(chat_id, RECOVERED_TEXT)
   recovered.clear()
 }, REFRESH_MS).unref()
 
-// Subagents share one live message in the private chat of the last inbound message. See agents.ts.
+// Subagents share one live message in the private chat of the last inbound
+// message, or in the owner chat when that chat is another bot's. See agents.ts.
 const agentStream = createAgentStream({
   readEvents: createEventReader(ancestors.map(pid => agentEventFile(STATE_DIR, pid)), false),
-  chat: () => lastChat,
+  chat: () => notice(lastChat),
   send: async (chat_id, text) =>
     (await bot.api.sendMessage(chat_id, text, { disable_notification: true })).message_id,
   edit: async (chat_id, message_id, text) => {
@@ -172,26 +187,23 @@ const agentStream = createAgentStream({
 })
 setInterval(() => agentStream.tick(), AGENT_TICK_MS).unref()
 
-// A Bash ask the plugin's hook answered in bypass mode: a notice to the chats
-// the ask would have reached, with the command behind See more. Only the
-// channel session's server sends, as only it would have relayed the ask.
-// See permit.ts.
+// A Bash ask the plugin's hook answered in bypass mode: a notice to the owner
+// chat, with the command behind See more. Only the channel session's server
+// sends, as only it would have relayed the ask. See permit.ts.
 const PERMIT_TICK_MS = 1000
 const PERMITS_KEPT = 200
 const permits = new Map<string, PermitEvent>()
 let permitSeq = 0
 const readPermits = createPermitReader(ancestors.map(pid => permitFile(STATE_DIR, pid)))
-if (POLLING) setInterval(() => {
+if (POLLING && OWNER) setInterval(() => {
   for (const ev of readPermits()) {
     const id = `p${++permitSeq}`
     permits.set(id, ev)
     if (permits.size > PERMITS_KEPT) permits.delete(permits.keys().next().value!)
     const keyboard = new InlineKeyboard().text('See more', `permit:${id}`)
-    for (const chat_id of loadAccess().allowFrom) {
-      void bot.api.sendMessage(chat_id, permitText(ev), { reply_markup: keyboard }).catch(err => {
-        process.stderr.write(`telegram channel: permit notice to ${chat_id} not sent: ${err}\n`)
-      })
-    }
+    void bot.api.sendMessage(OWNER, permitText(ev), { reply_markup: keyboard }).catch(err => {
+      process.stderr.write(`telegram channel: permit notice to ${OWNER} not sent: ${err}\n`)
+    })
   }
 }, PERMIT_TICK_MS).unref()
 
@@ -571,7 +583,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'reply',
       description:
-        'Reply on Telegram. Pass chat_id from the inbound message. Optionally pass reply_to (message_id) for threading, and files (absolute paths) to attach images or documents.',
+        'Reply on Telegram. Pass chat_id from the inbound message, or the numeric id of an allowlisted user or bot; a message to a bot goes to its @username. Optionally pass reply_to (message_id) for threading, and files (absolute paths) to attach images or documents.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -665,6 +677,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           }
         }
 
+        // Another bot gets a message by its @username. See bots.ts.
+        const to = await peers.target(chat_id)
+
         const access = loadAccess()
         const limit = Math.max(1, Math.min(access.textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
         const mode = access.chunkMode ?? 'length'
@@ -677,7 +692,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           if (rich) {
             await sendRich({
               raw: richApi,
-              chatId: chat_id,
+              chatId: to,
               text,
               replyTo: n => reply_to != null && replyMode !== 'off' && (replyMode === 'all' || n === 0) ? reply_to : undefined,
               plainChunks: t => chunk(t, limit, mode),
@@ -689,7 +704,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
               reply_to != null &&
               replyMode !== 'off' &&
               (replyMode === 'all' || i === 0)
-            const sent = await bot.api.sendMessage(chat_id, chunks[i], {
+            const sent = await bot.api.sendMessage(to, chunks[i], {
               ...(shouldReplyTo ? { reply_parameters: { message_id: reply_to } } : {}),
               ...(parseMode ? { parse_mode: parseMode } : {}),
             })
@@ -713,10 +728,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
             ? { reply_parameters: { message_id: reply_to } }
             : undefined
           if (PHOTO_EXTS.has(ext)) {
-            const sent = await bot.api.sendPhoto(chat_id, input, opts)
+            const sent = await bot.api.sendPhoto(to, input, opts)
             sentIds.push(sent.message_id)
           } else {
-            const sent = await bot.api.sendDocument(chat_id, input, opts)
+            const sent = await bot.api.sendDocument(to, input, opts)
             sentIds.push(sent.message_id)
           }
         }
@@ -1074,6 +1089,7 @@ bot.on('edited_message', async ctx => {
   if (!admitted(loadAccess(), ctx)) return
   const chat_id = String(msg.chat.id)
   if (!texts.changed(chat_id, msg.message_id, edit.text)) return
+  peers.learn(msg.from!)
   typing.start(chat_id)
   if (msg.chat.type === 'private') lastChat = chat_id
   // Every batch waiting in the chat goes first, so the chat keeps its order;
@@ -1117,6 +1133,7 @@ async function handleInbound(
 
   const access = result.access
   const from = ctx.from!
+  peers.learn(from)
   const chat_id = String(ctx.chat!.id)
   const msgId = ctx.message?.message_id
   const batchKey = `${chat_id}:${from.id}`

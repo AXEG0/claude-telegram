@@ -9,7 +9,8 @@ This is AXEG0's fork of Anthropic's Telegram plugin. It shows typing for the
 whole turn, tells you when Claude may be stuck and when it is back, streams concurrent
 subagents and background shells in one live message, joins a burst of messages
 into one, passes Claude what a message replies to, and passes on the new text
-of a message you edit. With rich messages on, it sends replies as Telegram rich
+of a message you edit. It lets Claude talk to another bot, and sends you the
+live message and alerts that would go to that bot. With rich messages on, it sends replies as Telegram rich
 messages, and with an OpenAI key, it transcribes voice messages. It keeps its
 state in `~/.claude/channels/telegram/`, the same directory as the official
 plugin, so a token and pairing carry over. Run one of the two at a time, as both
@@ -89,7 +90,7 @@ The server reads `.env` in its state directory when it starts, so a change takes
 | `TELEGRAM_STT_MODEL` | The transcription model, `gpt-transcribe` unless set. |
 | `TELEGRAM_STT_LANGUAGES` | Languages to pin, comma-separated, such as `en,zh`. |
 | `TELEGRAM_STUCK_MINUTES` | Minutes a turn goes without activity before the [stuck notice](#stuck-alerts), `10` unless set. |
-| `TELEGRAM_ALERT_CHAT` | A chat ID, which turns on the [idle alert](#stuck-alerts) and receives it. |
+| `TELEGRAM_ALERT_CHAT` | The owner's chat ID. It turns on the [idle alert](#stuck-alerts) and receives it, the notices of what the [permission hook](#permission-prompts) allowed, and the notices that would go to [another bot](#other-bots). |
 | `TELEGRAM_ALERT_IDLE_MINUTES` | Minutes the session goes without activity before the idle alert, `45` unless set. |
 | `TELEGRAM_ACCESS_MODE` | `static` pins access to `access.json` as it was at start; see [ACCESS.md](./ACCESS.md). |
 | `TELEGRAM_STATE_DIR` | The state directory, set in the shell environment. A directory per instance runs several bots on one machine, each with its own token and allowlist. |
@@ -100,11 +101,37 @@ See **[ACCESS.md](./ACCESS.md)** for DM policies, groups, mention detection, del
 
 Quick reference: IDs are **numeric user IDs** (get yours from [@userinfobot](https://t.me/userinfobot)). The default policy is `pairing`. `ackReaction` accepts Telegram's fixed set of reaction emoji.
 
+## Other bots
+
+Another bot reaches Claude through this one, and Claude writes back to it, when
+both bots have bot-to-bot communication on in BotFather and each is on the
+other's allowlist. Its messages arrive like anyone's, with its username in
+`user`.
+
+Telegram delivers a message from one bot to another when it names the receiving
+bot by `@username`. Sent to the bot's numeric ID before a message by username
+has passed between the two, it is accepted and never arrives. So `reply` takes
+a numeric `chat_id` as for anyone, and sends to a bot by its username, files
+included: Claude passes back the `chat_id` of the bot's message, or the numeric
+ID of an allowlisted bot that has not written. The server knows a chat is a
+bot's from Telegram's `is_bot` on a message from it since the server started.
+For any other private chat, it asks Telegram once with `getChatMember`, and a
+reply fails when Telegram gives no answer. `react` and `edit_message` keep the
+numeric ID.
+
+When the private chat that last wrote is a bot's, the [subagent
+message](#subagents-and-shells), the [stuck notice](#stuck-alerts) and "Back to
+normal" go to `TELEGRAM_ALERT_CHAT` instead, and nowhere when it is unset. The
+notices of what the [permission hook](#permission-prompts) allowed go only to
+`TELEGRAM_ALERT_CHAT` in any case. A permission prompt still goes to every
+allowlisted DM, a bot's included, and the typing indicator still goes to the
+bot's chat.
+
 ## Tools exposed to Claude
 
 | Tool | Purpose |
 | --- | --- |
-| `reply` | Sends to a chat. Takes `chat_id` and `text`, with `reply_to` (a message ID) for native threading and `files` (absolute paths) for attachments. Images (`.jpg`/`.jpeg`/`.png`/`.gif`/`.webp`) go as photos with an inline preview, other files as documents, up to 50MB each, after the text. `format` picks `text` or `markdownv2`, and with rich messages on also `rich`, which is then the default. Long text goes out in several messages. Returns the sent message IDs. |
+| `reply` | Sends to a chat, and to [another bot](#other-bots) by its `@username`. Takes `chat_id` and `text`, with `reply_to` (a message ID) for native threading and `files` (absolute paths) for attachments. Images (`.jpg`/`.jpeg`/`.png`/`.gif`/`.webp`) go as photos with an inline preview, other files as documents, up to 50MB each, after the text. `format` picks `text` or `markdownv2`, and with rich messages on also `rich`, which is then the default. Long text goes out in several messages. Returns the sent message IDs. |
 | `react` | Adds an emoji reaction to a message by ID, from Telegram's fixed set of reaction emoji (👍 👎 ❤ 🔥 👀 and others). |
 | `download_attachment` | Downloads an attachment by the `attachment_file_id` on its message to the inbox and returns the local path. Telegram serves bot downloads up to 20MB. |
 | `edit_message` | Edits a message the bot sent, for progress updates such as "working…" turning into the result. Takes the same `format` as `reply`. An edit stays one message, so longer text goes in a new reply, and an edit sends no notification, so a finished task gets a new reply too. |
@@ -228,7 +255,8 @@ turn ends.
   activity for 10 minutes (`TELEGRAM_STUCK_MINUTES`): "⚠️ No turn end seen in 10
   minutes: Claude may be stuck, or was interrupted. Typing has stopped." A
   foreground tool call that runs longer than that, such as a long command, gets
-  it too.
+  it too. A typing chat that is [another bot's](#other-bots) has its notice go
+  to `TELEGRAM_ALERT_CHAT` instead.
 - **The idle alert** goes to `TELEGRAM_ALERT_CHAT`, when the session shows no
   activity at all for 45 minutes (`TELEGRAM_ALERT_IDLE_MINUTES`), whether or not
   a turn is typing: "⚠️ No activity in this Claude Code session for 45 minutes:
@@ -239,7 +267,7 @@ turn ends.
   each time it does. The time counts from the server's start, so a new session
   waits the full time, and leaves out the time a permission prompt waits.
 
-Each alert goes once per silence, with Telegram's notification. The first
+Each alert goes once per silence and once per chat, with Telegram's notification. The first
 activity after it sends "✅ Back to normal: Claude is active again." once to each
 chat that got an alert. When the session ends, the server ends with it and sends
 nothing, so a session that dies needs a check outside the machine.
@@ -255,7 +283,7 @@ A session in bypass mode has already told Claude Code to ask nothing, yet
 Claude Code still asks before a Bash command it cannot check, such as a
 `bash -c` script it cannot read for removals. In the channel session in that
 mode, the plugin's `PermissionRequest` hook answers such an ask itself, and the
-bot tells every allowlisted DM what ran instead of asking:
+bot tells `TELEGRAM_ALERT_CHAT`, the owner's chat, what ran instead of asking:
 
 ```
 🔓 Allowed · Bash · general-purpose agent
@@ -263,7 +291,9 @@ Push job archive to rental and check environment
 ```
 
 **See more** adds the command. The hook cannot tell Claude Code's checks apart,
-so a removal of a home or working folder also runs with only this notice. Any
+so a removal of a home or working folder also runs with only this notice.
+Without `TELEGRAM_ALERT_CHAT`, the hook still allows the ask and no one gets
+the notice; the server says so in its log when it starts. Any
 other mode, a session that is not the channel, any other tool, and a hook that
 fails all leave the ask as above.
 
@@ -306,7 +336,8 @@ Code runs no hook when a shell ends; it appends `[exited with code N]` or
 that line. A successful `TaskStop` of a shell also ends its row.
 
 The message goes, without a notification, to the private chat that last wrote
-to the bot since the server started. Agents stay in the chat where they first
+to the bot since the server started, or to `TELEGRAM_ALERT_CHAT` when that chat
+is [another bot's](#other-bots). Agents stay in the chat where they first
 appeared. The stream checks every three seconds and sends at most one update
 per chat in that interval. The clocks move while nothing else changes, and a
 rate limit holds the chat for as long as Telegram asks. Long rows shorten to
