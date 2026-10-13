@@ -7,6 +7,10 @@
 // @username, and a notice of the plugin's own that would go to a bot's chat
 // goes to the owner chat instead.
 //
+// The receiving plugin hands Claude a message's text, caption or media. A
+// rich message carries none of them, so a reply or an edit to a bot goes
+// plain, with the text as Claude wrote it, whatever format Claude asked for.
+//
 // Whether a chat is a bot's comes from Telegram's own is_bot: on the sender of
 // a message the access check let through, or, for a private chat not heard
 // from since the server started, on the user getChatMember returns for it.
@@ -23,6 +27,9 @@ export type Peers = {
   isBot(chatId: string): boolean
   // Where a message to the chat goes: a bot's @username, or else the chat id.
   target(chatId: string): Promise<string>
+  // Whether the chat is a bot's, asking Telegram about a private chat not
+  // heard from.
+  botChat(chatId: string): Promise<boolean>
 }
 
 // lookup asks Telegram about a private chat's user, such as with
@@ -31,6 +38,22 @@ export function createPeers(lookup: (userId: string) => Promise<Peer>): Peers {
   const known = new Map<string, Peer>()
   const peer = (user: { is_bot: boolean; username?: string }): Peer =>
     ({ is_bot: user.is_bot === true, ...(user.username ? { username: user.username } : {}) })
+  // The private chat's user, or undefined for a group.
+  async function peerOf(chatId: string): Promise<Peer | undefined> {
+    // A user's private chat has the user's id, a positive number; a group's
+    // id is negative.
+    if (!/^\d+$/.test(chatId)) return undefined
+    let p = known.get(chatId)
+    if (!p) {
+      try {
+        p = peer(await lookup(chatId))
+      } catch (err) {
+        throw new Error(`could not tell whether chat ${chatId} is a bot: ${err instanceof Error ? err.message : err}`)
+      }
+      known.set(chatId, p)
+    }
+    return p
+  }
   return {
     learn(user) {
       known.set(String(user.id), peer(user))
@@ -39,23 +62,23 @@ export function createPeers(lookup: (userId: string) => Promise<Peer>): Peers {
       return known.get(chatId)?.is_bot === true
     },
     async target(chatId) {
-      // A user's private chat has the user's id, a positive number; a group's
-      // id is negative.
-      if (!/^\d+$/.test(chatId)) return chatId
-      let p = known.get(chatId)
-      if (!p) {
-        try {
-          p = peer(await lookup(chatId))
-        } catch (err) {
-          throw new Error(`could not tell whether chat ${chatId} is a bot: ${err instanceof Error ? err.message : err}`)
-        }
-        known.set(chatId, p)
-      }
-      if (!p.is_bot) return chatId
+      const p = await peerOf(chatId)
+      if (!p?.is_bot) return chatId
       if (!p.username) throw new Error(`bot ${chatId} has no username to send to`)
       return `@${p.username}`
     },
+    async botChat(chatId) {
+      return (await peerOf(chatId))?.is_bot === true
+    },
   }
+}
+
+// How a reply or an edit in the format Claude asked for goes to a chat: as
+// asked to a person or a group, and as plain text, unparsed, to a bot.
+export type Style = 'rich' | 'markdownv2' | 'text'
+export function sendStyle(format: string, toBot: boolean): Style {
+  if (toBot) return 'text'
+  return format === 'rich' || format === 'markdownv2' ? format : 'text'
 }
 
 // The chat a notice of the plugin's own goes to: the chat itself, or the owner

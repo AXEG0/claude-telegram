@@ -7,6 +7,7 @@ import fixture from './fixtures/channel-argv.json'
 import { AGENT_TICK_MS, appendAgentEvent, agentEventFile } from './agents.ts'
 import { appendPermit, permitDetail, permitFile, permitText, type PermitEvent } from './permit.ts'
 import { idleText, NO_OWNER, RECOVERED_TEXT, stuckText } from './alerts.ts'
+import { NO_ASKS } from './asks.ts'
 import { REFRESH_MS } from './typing.ts'
 
 const children: ChildProcessWithoutNullStreams[] = []
@@ -74,6 +75,10 @@ function start(dir: string, argv: string[], env: Record<string, string> = {}) {
   }
   return {
     child, request, stderr: () => stderr,
+    // A notification from Claude Code, such as a permission prompt.
+    notify(method: string, params: object) {
+      child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method, params }) + '\n')
+    },
     notifications,
     inbound: () => notifications.filter(n => n.method === 'notifications/claude/channel').map(n => n.params),
     async ready() {
@@ -398,7 +403,7 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     await channel.close()
   }, 20000)
 
-  test('a session that does not poll sends a rich reply to an allowlisted bot that has not written by its @username', async () => {
+  test('a session that does not poll sends a reply to an allowlisted bot that has not written by its @username, as plain text', async () => {
     const dir = state(PEERS)
     const sender = start(dir, ['claude', '-p', 'hello'], {
       TELEGRAM_RICH_MESSAGES: 'true',
@@ -408,10 +413,143 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     const sent = await sender.request('tools/call', { name: 'reply', arguments: { chat_id: String(BOT.id), text: '**rich** to the bot' } })
     expect(sent.result.isError).not.toBe(true)
     expect(calls(dir).map(c => [c.method, c.payload.chat_id])).toEqual([
-      ['getChatMember', String(BOT.id)], ['sendRichMessage', '@lana_7491_bot'],
+      ['getChatMember', String(BOT.id)], ['sendMessage', '@lana_7491_bot'],
     ])
+    expect(calls(dir)[1]!.payload).toEqual({ chat_id: '@lana_7491_bot', text: '**rich** to the bot' })
     await sender.close()
   }, 15000)
+
+  // The receiving plugin hands Claude a message's text, caption or media, and
+  // a rich message carries none of them.
+  test('with rich messages on, a reply or an edit to a bot goes as plain text, as written, whatever the format, and a person keeps rich', async () => {
+    const dir = state(PEERS)
+    const sender = start(dir, ['claude', '-p', 'hello'], {
+      TELEGRAM_RICH_MESSAGES: 'true',
+      TELEGRAM_TEST_USERS: JSON.stringify({ [BOT.id]: BOT, [PERSON.id]: PERSON }),
+    })
+    await sender.ready()
+    const call = async (name: string, args: object) => {
+      const r = (await sender.request('tools/call', { name, arguments: args })).result
+      expect(r.isError).not.toBe(true)
+    }
+    const text = '**bold**, a_b. | x |'
+    for (const format of [undefined, 'rich', 'markdownv2', 'text']) {
+      await call('reply', { chat_id: String(BOT.id), text, ...(format ? { format } : {}) })
+      await call('edit_message', { chat_id: String(BOT.id), message_id: '42', text, ...(format ? { format } : {}) })
+    }
+    const botCalls = calls(dir).filter(toBot)
+    expect(botCalls.map(c => c.method)).toEqual([
+      'getChatMember', ...Array(4).fill(['sendMessage', 'editMessageText']).flat(),
+    ])
+    for (const c of botCalls.slice(1)) {
+      expect(c.payload.text).toBe(text)
+      expect(c.payload.parse_mode).toBeUndefined()
+      expect(c.payload.rich_message).toBeUndefined()
+    }
+    expect(botCalls.filter(c => c.method === 'sendMessage').map(c => c.payload.chat_id)).toEqual(Array(4).fill('@lana_7491_bot'))
+
+    // A person's chat keeps the format asked for.
+    await call('reply', { chat_id: '5', text })
+    await call('edit_message', { chat_id: '5', message_id: '42', text })
+    await call('reply', { chat_id: '5', text: '*bold*', format: 'markdownv2' })
+    const toPerson = calls(dir).filter(c => c.payload.chat_id === '5' && c.method !== 'getChatMember')
+    expect(toPerson.map(c => c.method)).toEqual(['sendRichMessage', 'editMessageText', 'sendMessage'])
+    expect(toPerson[0]!.payload.rich_message).toBeDefined()
+    expect(toPerson[1]!.payload.rich_message).toBeDefined()
+    expect(toPerson[1]!.payload.text).toBeUndefined()
+    expect(toPerson[2]!.payload.parse_mode).toBe('MarkdownV2')
+    expect(calls(dir).filter(c => c.method === 'getChatMember').map(c => c.payload.chat_id)).toEqual([String(BOT.id), '5'])
+    await sender.close()
+  }, 15000)
+
+  // A permission prompt from Claude Code, and a tap on one of its buttons.
+  const ASK = { request_id: 'abcde', tool_name: 'Write', description: 'Write a file', input_preview: '{"file_path":"/w/a.txt"}' }
+  const ASK_TEXT = '🔐 Permission: Write'
+  const tap = (id: string, from: { id: number }, data: string) => ({
+    callback_query: {
+      id, chat_instance: 'c', data, from,
+      message: { message_id: 42, date: Math.floor(Date.now() / 1000), chat: { id: from.id, type: 'private' }, text: ASK_TEXT },
+    },
+  })
+  const answers = (channel: ReturnType<typeof start>) =>
+    channel.notifications.filter(n => n.method === 'notifications/claude/channel/permission').map(n => n.params)
+  const callbackAnswers = (dir: string) =>
+    Object.fromEntries(calls(dir).filter(c => c.method === 'answerCallbackQuery').map(c => [c.payload.callback_query_id, c.payload.text ?? null]))
+
+  test('a permission prompt goes to the owner chat alone, and only the owner’s tap or reply settles it', async () => {
+    // The owner is last on the allowlist, after a person and another bot.
+    const dir = state({ dmPolicy: 'allowlist', allowFrom: ['5', String(BOT.id), '1'] })
+    const channel = start(dir, fixture.argv, { TELEGRAM_ALERT_CHAT: '1' })
+    await channel.ready()
+    await until(() => channel.stderr().includes('polling as @test_bot'))
+    channel.notify('notifications/claude/channel/permission_request', ASK)
+    const asks = () => calls(dir).filter(c => c.method === 'sendMessage' && c.payload.text === ASK_TEXT)
+    await until(() => asks().length > 0)
+    await Bun.sleep(500)
+    expect(asks().map(c => c.payload.chat_id)).toEqual(['1'])
+    expect(asks()[0]!.payload.reply_markup).toEqual({ inline_keyboard: [[
+      { text: 'See more', callback_data: 'perm:more:abcde' },
+      { text: '✅ Allow', callback_data: 'perm:allow:abcde' },
+      { text: '❌ Deny', callback_data: 'perm:deny:abcde' },
+    ]] })
+
+    // The person and the bot try every button and the reply; then the owner.
+    writeFileSync(join(dir, 'inbound.json'), updates(
+      tap('cb1', PERSON, 'perm:allow:abcde'),
+      tap('cb2', BOT, 'perm:allow:abcde'),
+      tap('cb3', PERSON, 'perm:more:abcde'),
+      dm(PERSON, 11, 'yes abcde'),
+      dm(BOT, 12, 'y abcde'),
+      tap('cb4', OWNER, 'perm:more:abcde'),
+      tap('cb5', OWNER, 'perm:deny:abcde'),
+      dm(OWNER, 13, 'yes fghij'),
+      dm(OWNER, 14, 'sentinel'),
+    ))
+    // Updates go in order, and a reply that answers is taken before batching,
+    // so every answer is in by the time the last message reaches Claude.
+    await until(() => channel.inbound().some(n => n.content === 'sentinel'), 6000)
+    expect(answers(channel)).toEqual([{ request_id: 'abcde', behavior: 'deny' }, { request_id: 'fghij', behavior: 'allow' }])
+    await until(() => channel.inbound().length === 3)
+    expect(callbackAnswers(dir)).toEqual({ cb1: 'Not authorized.', cb2: 'Not authorized.', cb3: 'Not authorized.', cb4: null, cb5: '❌ Denied' })
+    // See more and the outcome show in the owner chat alone.
+    expect(calls(dir).filter(c => c.method === 'editMessageText').map(c => [String(c.payload.chat_id), c.payload.text])).toEqual([
+      ['1', `${ASK_TEXT}\n\ntool_name: Write\ndescription: Write a file\ninput_preview:\n{\n  "file_path": "/w/a.txt"\n}`],
+      ['1', `${ASK_TEXT}\n\n❌ Denied`],
+    ])
+    expect(calls(dir).filter(c => c.method === 'setMessageReaction').map(c => [String(c.payload.chat_id), c.payload.message_id])).toEqual([['1', 13]])
+    // The others' replies reach Claude as ordinary messages.
+    expect(channel.inbound().map(n => [n.meta.user_id, n.content]).sort()).toEqual([
+      ['1', 'sentinel'], ['5', 'yes abcde'], [String(BOT.id), 'y abcde'],
+    ])
+    expect(calls(dir).filter(c => c.method === 'sendMessage' && c.payload.chat_id !== '1')).toEqual([])
+    await channel.close()
+  }, 20000)
+
+  test.each([
+    ['not set', '', `TELEGRAM_ALERT_CHAT is not set; ${NO_OWNER}`],
+    ['a group', '-1001234', `TELEGRAM_ALERT_CHAT=-1001234 is a group, not the owner's private chat; ${NO_ASKS}`],
+  ])('with the owner chat %s, a permission prompt reaches no one on Telegram, no tap or reply settles it, and the server says so at start', async (_, chat, warning) => {
+    const dir = state({ dmPolicy: 'allowlist', allowFrom: ['1', '5'] })
+    const channel = start(dir, fixture.argv, { TELEGRAM_ALERT_CHAT: chat })
+    await channel.ready()
+    await until(() => channel.stderr().includes('polling as @test_bot'))
+    expect(channel.stderr()).toContain(warning)
+    channel.notify('notifications/claude/channel/permission_request', ASK)
+    await Bun.sleep(500)
+    writeFileSync(join(dir, 'inbound.json'), updates(
+      tap('cb1', OWNER, 'perm:allow:abcde'),
+      tap('cb2', PERSON, 'perm:more:abcde'),
+      dm(OWNER, 11, 'yes abcde'),
+      dm(PERSON, 12, 'sentinel'),
+    ))
+    await until(() => channel.inbound().some(n => n.content === 'sentinel'), 6000)
+    expect(answers(channel)).toEqual([])
+    await until(() => channel.inbound().length === 2)
+    expect(callbackAnswers(dir)).toEqual({ cb1: 'Not authorized.', cb2: 'Not authorized.' })
+    expect(calls(dir).filter(c => ['sendMessage', 'editMessageText', 'setMessageReaction'].includes(c.method))).toEqual([])
+    expect(channel.inbound().map(n => [n.meta.user_id, n.content]).sort()).toEqual([['1', 'yes abcde'], ['5', 'sentinel']])
+    await channel.close()
+  }, 20000)
 
   test('an edit of a text, a photo caption and a document caption reaches Claude as its own event', async () => {
     const dir = state()

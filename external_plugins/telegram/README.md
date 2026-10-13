@@ -90,7 +90,7 @@ The server reads `.env` in its state directory when it starts, so a change takes
 | `TELEGRAM_STT_MODEL` | The transcription model, `gpt-transcribe` unless set. |
 | `TELEGRAM_STT_LANGUAGES` | Languages to pin, comma-separated, such as `en,zh`. |
 | `TELEGRAM_STUCK_MINUTES` | Minutes a turn goes without activity before the [stuck notice](#stuck-alerts), `10` unless set. |
-| `TELEGRAM_ALERT_CHAT` | The owner's chat ID. It turns on the [idle alert](#stuck-alerts) and receives it, the notices of what the [permission hook](#permission-prompts) allowed, and the notices that would go to [another bot](#other-bots). |
+| `TELEGRAM_ALERT_CHAT` | The owner's chat ID, the owner's own user ID. It turns on the [idle alert](#stuck-alerts) and receives it, the [permission prompts](#permission-prompts), which only the owner answers, the notices of what the permission hook allowed, and the notices that would go to [another bot](#other-bots). |
 | `TELEGRAM_ALERT_IDLE_MINUTES` | Minutes the session goes without activity before the idle alert, `45` unless set. |
 | `TELEGRAM_ACCESS_MODE` | `static` pins access to `access.json` as it was at start; see [ACCESS.md](./ACCESS.md). |
 | `TELEGRAM_STATE_DIR` | The state directory, set in the shell environment. A directory per instance runs several bots on one machine, each with its own token and allowlist. |
@@ -116,22 +116,26 @@ included: Claude passes back the `chat_id` of the bot's message, or the numeric
 ID of an allowlisted bot that has not written. The server knows a chat is a
 bot's from Telegram's `is_bot` on a message from it since the server started.
 For any other private chat, it asks Telegram once with `getChatMember`, and a
-reply fails when Telegram gives no answer. `react` and `edit_message` keep the
+reply or an edit fails when Telegram gives no answer. `react` and `edit_message` keep the
 numeric ID.
+
+A reply or an edit to a bot goes as plain text, exactly as Claude wrote it,
+whatever `format` Claude passes. The receiving plugin hands its session a
+message's text, caption or media, and a [rich message](#rich-messages) or
+its edit carries none of them. A person's chat keeps the format Claude passes.
 
 When the private chat that last wrote is a bot's, the [subagent
 message](#subagents-and-shells), the [stuck notice](#stuck-alerts) and "Back to
 normal" go to `TELEGRAM_ALERT_CHAT` instead, and nowhere when it is unset. The
-notices of what the [permission hook](#permission-prompts) allowed go only to
-`TELEGRAM_ALERT_CHAT` in any case. A permission prompt still goes to every
-allowlisted DM, a bot's included, and the typing indicator still goes to the
-bot's chat.
+[permission prompts](#permission-prompts) and the notices of what the
+permission hook allowed go only to `TELEGRAM_ALERT_CHAT` in any case, and a bot
+can answer no prompt. The typing indicator still goes to the bot's chat.
 
 ## Tools exposed to Claude
 
 | Tool | Purpose |
 | --- | --- |
-| `reply` | Sends to a chat, and to [another bot](#other-bots) by its `@username`. Takes `chat_id` and `text`, with `reply_to` (a message ID) for native threading and `files` (absolute paths) for attachments. Images (`.jpg`/`.jpeg`/`.png`/`.gif`/`.webp`) go as photos with an inline preview, other files as documents, up to 50MB each, after the text. `format` picks `text` or `markdownv2`, and with rich messages on also `rich`, which is then the default. Long text goes out in several messages. Returns the sent message IDs. |
+| `reply` | Sends to a chat, and to [another bot](#other-bots) by its `@username`, as plain text. Takes `chat_id` and `text`, with `reply_to` (a message ID) for native threading and `files` (absolute paths) for attachments. Images (`.jpg`/`.jpeg`/`.png`/`.gif`/`.webp`) go as photos with an inline preview, other files as documents, up to 50MB each, after the text. `format` picks `text` or `markdownv2`, and with rich messages on also `rich`, which is then the default. Long text goes out in several messages. Returns the sent message IDs. |
 | `react` | Adds an emoji reaction to a message by ID, from Telegram's fixed set of reaction emoji (👍 👎 ❤ 🔥 👀 and others). |
 | `download_attachment` | Downloads an attachment by the `attachment_file_id` on its message to the inbox and returns the local path. Telegram serves bot downloads up to 20MB. |
 | `edit_message` | Edits a message the bot sent, for progress updates such as "working…" turning into the result. Takes the same `format` as `reply`. An edit stays one message, so longer text goes in a new reply, and an edit sends no notification, so a finished task gets a new reply too. |
@@ -275,9 +279,17 @@ nothing, so a session that dies needs a check outside the machine.
 ### Permission prompts
 
 When Claude Code asks permission for a tool call, the bot sends the request to
-every allowlisted DM with **See more** for the tool's input and **✅ Allow** /
-**❌ Deny** buttons. An answer in Telegram goes to Claude Code, and the message
-you tapped keeps the outcome.
+`TELEGRAM_ALERT_CHAT`, the owner's chat, with **See more** for the tool's input
+and **✅ Allow** / **❌ Deny** buttons. Only the owner answers it, with a button
+or a `yes <code>` / `no <code>` reply. An answer goes to Claude Code, and the
+message tapped keeps the outcome. Anyone else on the allowlist, a person or
+[another bot](#other-bots), gets no prompt: a tap of theirs is refused, and
+their `yes <code>` reaches Claude as an ordinary message.
+
+The owner chat is the owner's private chat, so its ID is the owner's user ID.
+Without `TELEGRAM_ALERT_CHAT`, or with a group's ID there, a prompt reaches no
+one on Telegram and waits for an answer in the terminal; the server says so in
+its log when it starts.
 
 A session in bypass mode has already told Claude Code to ask nothing, yet
 Claude Code still asks before a Bash command it cannot check, such as a
@@ -370,7 +382,8 @@ block that big, and any part Telegram refuses as invalid, goes out plain as
 written, in ordinary messages. The parsing runs in a worker, so the bot keeps
 polling meanwhile, and text the worker has not split within a few seconds goes
 out plain. `format: 'text'` or `'markdownv2'` on a call picks those modes
-instead. Rich messages are off by default, as some Telegram clients show them as
+instead. A reply or an edit to [another bot](#other-bots) goes as plain text in
+any mode. Rich messages are off by default, as some Telegram clients show them as
 unsupported.
 
 ## Polling ownership
