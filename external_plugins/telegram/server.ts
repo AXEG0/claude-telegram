@@ -33,6 +33,7 @@ import { batchGap, createBatcher } from './batch.ts'
 import { createTextMemory, editEvent } from './edit.ts'
 import { channelMode } from './polling.ts'
 import { alertConfig, createIdleAlarm, idleText, RECOVERED_TEXT, stuckText } from './alerts.ts'
+import { createPermitReader, permitDetail, permitFile, permitText, type PermitEvent } from './permit.ts'
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR
   ?? join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'channels', 'telegram')
@@ -170,6 +171,29 @@ const agentStream = createAgentStream({
   },
 })
 setInterval(() => agentStream.tick(), AGENT_TICK_MS).unref()
+
+// A Bash ask the plugin's hook answered in bypass mode: a notice to the chats
+// the ask would have reached, with the command behind See more. Only the
+// channel session's server sends, as only it would have relayed the ask.
+// See permit.ts.
+const PERMIT_TICK_MS = 1000
+const PERMITS_KEPT = 200
+const permits = new Map<string, PermitEvent>()
+let permitSeq = 0
+const readPermits = createPermitReader(ancestors.map(pid => permitFile(STATE_DIR, pid)))
+if (POLLING) setInterval(() => {
+  for (const ev of readPermits()) {
+    const id = `p${++permitSeq}`
+    permits.set(id, ev)
+    if (permits.size > PERMITS_KEPT) permits.delete(permits.keys().next().value!)
+    const keyboard = new InlineKeyboard().text('See more', `permit:${id}`)
+    for (const chat_id of loadAccess().allowFrom) {
+      void bot.api.sendMessage(chat_id, permitText(ev), { reply_markup: keyboard }).catch(err => {
+        process.stderr.write(`telegram channel: permit notice to ${chat_id} not sent: ${err}\n`)
+      })
+    }
+  }
+}, PERMIT_TICK_MS).unref()
 
 // Speech to text for voice and audio, when a key is set. See stt.ts.
 const STT = sttConfig()
@@ -863,10 +887,26 @@ bot.command('status', async ctx => {
 })
 
 // Inline-button handler for permission requests. Callback data is
-// `perm:allow:<id>`, `perm:deny:<id>`, or `perm:more:<id>`.
+// `perm:allow:<id>`, `perm:deny:<id>`, or `perm:more:<id>`, and
+// `permit:<id>` for a notice's See more.
 // Security mirrors the text-reply path: allowFrom must contain the sender.
 bot.on('callback_query:data', async ctx => {
   const data = ctx.callbackQuery.data
+  const permit = /^permit:(p\d+)$/.exec(data)
+  if (permit) {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    const ev = permits.get(permit[1]!)
+    if (!ev) {
+      await ctx.answerCallbackQuery({ text: 'Details no longer available.' }).catch(() => {})
+      return
+    }
+    await ctx.editMessageText(permitDetail(ev)).catch(() => {})
+    await ctx.answerCallbackQuery().catch(() => {})
+    return
+  }
   const m = /^perm:(allow|deny|more):([a-km-z]{5})$/.exec(data)
   if (!m) {
     await ctx.answerCallbackQuery().catch(() => {})

@@ -5,6 +5,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import fixture from './fixtures/channel-argv.json'
 import { AGENT_TICK_MS, appendAgentEvent, agentEventFile } from './agents.ts'
+import { appendPermit, permitDetail, permitFile, permitText, type PermitEvent } from './permit.ts'
 import { idleText, RECOVERED_TEXT, stuckText } from './alerts.ts'
 import { REFRESH_MS } from './typing.ts'
 
@@ -95,6 +96,43 @@ afterEach(async () => {
 // Real /proc ancestry, real MCP transport, and the production server. Only
 // grammy's HTTP transport is fake; these tests never use the owner's bot.
 describe.skipIf(process.platform !== 'linux')('polling ownership in the running server', () => {
+  test('the channel server tells the allowlisted chat what the hook allowed, and See more shows the command', async () => {
+    const dir = state()
+    const channel = start(dir, fixture.argv)
+    await channel.ready()
+    const ev: PermitEvent = { t: Date.now(), event: 'allowed', tool_name: 'Bash', description: 'Push job archive to rental', command: 'ls -la /w', agent_type: 'general-purpose' }
+    appendPermit(permitFile(dir, channel.child.pid!), ev)
+    const notices = () => calls(dir).filter(c => c.method === 'sendMessage' && c.payload.text === permitText(ev))
+    await until(() => notices().length > 0)
+    await Bun.sleep(1500)
+    expect(notices()).toHaveLength(1)
+    expect(notices()[0]!.payload.chat_id).toBe('1')
+    // A notice pings, unlike the silent subagent stream.
+    expect(notices()[0]!.payload.disable_notification).toBeUndefined()
+    expect(notices()[0]!.payload.reply_markup).toEqual({ inline_keyboard: [[{ text: 'See more', callback_data: 'permit:p1' }]] })
+    writeFileSync(join(dir, 'inbound.json'), JSON.stringify([{
+      update_id: 1,
+      callback_query: {
+        id: 'cb1', chat_instance: 'c', data: 'permit:p1',
+        from: { id: 1, is_bot: false, first_name: 'Owner' },
+        message: { message_id: 42, date: Math.floor(Date.now() / 1000), chat: { id: 1, type: 'private' }, text: permitText(ev) },
+      },
+    }]))
+    await until(() => calls(dir).some(c => c.method === 'editMessageText' && c.payload.text === permitDetail(ev)))
+    expect(channel.notifications.some(n => n.method === 'notifications/claude/channel/permission')).toBe(false)
+    await channel.close()
+  }, 15000)
+
+  test('a server that does not poll sends no notice for what the hook allowed', async () => {
+    const dir = state()
+    const sender = start(dir, ['claude', '-p', 'hello'])
+    await sender.ready()
+    appendPermit(permitFile(dir, sender.child.pid!), { t: Date.now(), event: 'allowed', tool_name: 'Bash', description: 'Push job archive to rental' })
+    await Bun.sleep(2500)
+    expect(calls(dir).some(c => c.method === 'sendMessage')).toBe(false)
+    await sender.close()
+  }, 15000)
+
   test('the channel server shows four agents and their endings in one shared message', async () => {
     const dir = state()
     writeFileSync(join(dir, 'inbound.json'), JSON.stringify([{

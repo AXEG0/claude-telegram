@@ -251,6 +251,22 @@ every allowlisted DM with **See more** for the tool's input and **✅ Allow** /
 **❌ Deny** buttons. An answer in Telegram goes to Claude Code, and the message
 you tapped keeps the outcome.
 
+A session in bypass mode has already told Claude Code to ask nothing, yet
+Claude Code still asks before a Bash command it cannot check, such as a
+`bash -c` script it cannot read for removals. In the channel session in that
+mode, the plugin's `PermissionRequest` hook answers such an ask itself, and the
+bot tells every allowlisted DM what ran instead of asking:
+
+```
+🔓 Allowed · Bash · general-purpose agent
+Push job archive to rental and check environment
+```
+
+**See more** adds the command. The hook cannot tell Claude Code's checks apart,
+so a removal of a home or working folder also runs with only this notice. Any
+other mode, a session that is not the channel, any other tool, and a hook that
+fails all leave the ask as above.
+
 ### Subagents and shells
 
 Subagents and background shells running together share one live message, with
