@@ -33,7 +33,8 @@ import { batchGap, createBatcher } from './batch.ts'
 import { createTextMemory, editEvent } from './edit.ts'
 import { channelMode } from './polling.ts'
 import { alertConfig, createIdleAlarm, idleText, NO_OWNER, RECOVERED_TEXT, stuckText } from './alerts.ts'
-import { createPeers, noticeChat } from './bots.ts'
+import { createPeers, noticeChat, sendStyle } from './bots.ts'
+import { askOwner, NO_ASKS, ownerAnswers } from './asks.ts'
 import { createPermitReader, permitDetail, permitFile, permitText, type PermitEvent } from './permit.ts'
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR
@@ -132,6 +133,11 @@ for (const warning of ALERTS.warnings) process.stderr.write(warning)
 const OWNER = ALERTS.owner
 if (POLLING && !OWNER && !process.env.TELEGRAM_ALERT_CHAT?.trim()) {
   process.stderr.write(`telegram channel: TELEGRAM_ALERT_CHAT is not set; ${NO_OWNER}\n`)
+}
+// The owner, who alone gets and answers permission prompts. See asks.ts.
+const ASKER = askOwner(OWNER)
+if (POLLING && OWNER && !ASKER) {
+  process.stderr.write(`telegram channel: TELEGRAM_ALERT_CHAT=${OWNER} is a group, not the owner's private chat; ${NO_ASKS}\n`)
 }
 // Other bots on the allowlist, from Telegram's own is_bot. See bots.ts.
 const peers = createPeers(async id => (await bot.api.getChatMember(id, Number(id))).user)
@@ -519,9 +525,10 @@ const mcp = new Server(
         'claude/channel': {},
         // Permission-relay opt-in (anthropics/claude-cli-internal#23061).
         // Declaring this asserts we authenticate the replier — which we do:
-        // gate()/access.allowFrom already drops non-allowlisted senders before
-        // handleInbound runs. A server that can't authenticate the replier
-        // should NOT declare this.
+        // only the owner, by Telegram user id, settles a prompt, and without
+        // an owner chat no prompt is relayed and no reply settles one (see
+        // asks.ts). A server that can't authenticate the replier should NOT
+        // declare this.
         'claude/channel/permission': {},
       },
     },
@@ -545,10 +552,10 @@ const mcp = new Server(
 // Stores full permission details for "See more" expansion keyed by request_id.
 const pendingPermissions = new Map<string, { tool_name: string; description: string; input_preview: string }>()
 
-// Receive permission_request from CC → format → send to all allowlisted DMs.
-// Groups are intentionally excluded — the security thread resolution was
-// "single-user mode for official plugins." Anyone in access.allowFrom
-// already passed explicit pairing; group members haven't.
+// Receive permission_request from CC → format → send to the owner chat alone.
+// Anyone else on the allowlist, a person or another bot, gets nothing, and
+// without the owner's private chat the prompt waits in the terminal alone.
+// See asks.ts.
 mcp.setNotificationHandler(
   z.object({
     method: z.literal('notifications/claude/channel/permission_request'),
@@ -561,20 +568,19 @@ mcp.setNotificationHandler(
   }),
   async ({ params }) => {
     const { request_id, tool_name, description, input_preview } = params
-    pendingPermissions.set(request_id, { tool_name, description, input_preview })
+    // The prompt waits in the terminal too, with or without an owner chat.
     typing.pause()
     idle?.pause()
-    const access = loadAccess()
+    if (!ASKER) return
+    pendingPermissions.set(request_id, { tool_name, description, input_preview })
     const text = `🔐 Permission: ${tool_name}`
     const keyboard = new InlineKeyboard()
       .text('See more', `perm:more:${request_id}`)
       .text('✅ Allow', `perm:allow:${request_id}`)
       .text('❌ Deny', `perm:deny:${request_id}`)
-    for (const chat_id of access.allowFrom) {
-      void bot.api.sendMessage(chat_id, text, { reply_markup: keyboard }).catch(e => {
-        process.stderr.write(`permission_request send to ${chat_id} failed: ${e}\n`)
-      })
-    }
+    void bot.api.sendMessage(ASKER, text, { reply_markup: keyboard }).catch(e => {
+      process.stderr.write(`permission_request send to ${ASKER} failed: ${e}\n`)
+    })
   },
 )
 
@@ -583,7 +589,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'reply',
       description:
-        'Reply on Telegram. Pass chat_id from the inbound message, or the numeric id of an allowlisted user or bot; a message to a bot goes to its @username. Optionally pass reply_to (message_id) for threading, and files (absolute paths) to attach images or documents.',
+        'Reply on Telegram. Pass chat_id from the inbound message, or the numeric id of an allowlisted user or bot; a message to a bot goes to its @username as plain text, whatever the format. Optionally pass reply_to (message_id) for threading, and files (absolute paths) to attach images or documents.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -665,7 +671,6 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const reply_to = args.reply_to != null ? Number(args.reply_to) : undefined
         const files = (args.files as string[] | undefined) ?? []
         const format = (args.format as string | undefined) ?? (RICH ? 'rich' : 'text')
-        const parseMode = format === 'markdownv2' ? 'MarkdownV2' as const : undefined
 
         assertAllowedChat(chat_id)
 
@@ -677,8 +682,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           }
         }
 
-        // Another bot gets a message by its @username. See bots.ts.
+        // Another bot gets a message by its @username, as plain text, the
+        // format Claude asked for aside. See bots.ts.
         const to = await peers.target(chat_id)
+        const style = sendStyle(format, await peers.botChat(chat_id))
+        const parseMode = style === 'markdownv2' ? 'MarkdownV2' as const : undefined
 
         const access = loadAccess()
         const limit = Math.max(1, Math.min(access.textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
@@ -686,7 +694,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const replyMode = access.replyToMode ?? 'first'
         const chunks = chunk(text, limit, mode)
         const sentIds: number[] = []
-        const rich = RICH && format === 'rich' ? { ids: sentIds, done: 0, total: 0 } : undefined
+        const rich = RICH && style === 'rich' ? { ids: sentIds, done: 0, total: 0 } : undefined
 
         try {
           if (rich) {
@@ -769,7 +777,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       }
       case 'edit_message': {
         assertAllowedChat(args.chat_id as string)
-        const editFormat = (args.format as string | undefined) ?? (RICH ? 'rich' : 'text')
+        // An edit in a bot's chat goes plain, like a reply. See bots.ts.
+        const editFormat = sendStyle(
+          (args.format as string | undefined) ?? (RICH ? 'rich' : 'text'),
+          await peers.botChat(args.chat_id as string),
+        )
         if (RICH && editFormat === 'rich') {
           await editRich({ raw: richApi, chatId: args.chat_id as string, messageId: Number(args.message_id), text: args.text as string })
           return { content: [{ type: 'text', text: `edited (id: ${args.message_id})` }] }
@@ -904,7 +916,9 @@ bot.command('status', async ctx => {
 // Inline-button handler for permission requests. Callback data is
 // `perm:allow:<id>`, `perm:deny:<id>`, or `perm:more:<id>`, and
 // `permit:<id>` for a notice's See more.
-// Security mirrors the text-reply path: allowFrom must contain the sender.
+// Security mirrors the text-reply path: a permission button answers only the
+// owner, who must also be on allowFrom (see asks.ts); a notice's See more
+// answers anyone on allowFrom.
 bot.on('callback_query:data', async ctx => {
   const data = ctx.callbackQuery.data
   const permit = /^permit:(p\d+)$/.exec(data)
@@ -929,7 +943,7 @@ bot.on('callback_query:data', async ctx => {
   }
   const access = loadAccess()
   const senderId = String(ctx.from.id)
-  if (!access.allowFrom.includes(senderId)) {
+  if (!access.allowFrom.includes(senderId) || !ownerAnswers(OWNER, ctx.from)) {
     await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
     return
   }
@@ -1141,9 +1155,10 @@ async function handleInbound(
 
   // Permission-reply intercept: if this looks like "yes xxxxx" for a
   // pending permission request, emit the structured event instead of
-  // relaying as chat. The sender is already gate()-approved at this point
-  // (non-allowlisted senders were dropped above), so we trust the reply.
-  const permMatch = PERMISSION_REPLY_RE.exec(text)
+  // relaying as chat. Only the owner's reply does; the sender is also
+  // gate()-approved at this point. Anyone else's goes on as an ordinary
+  // message. See asks.ts.
+  const permMatch = ownerAnswers(OWNER, from) ? PERMISSION_REPLY_RE.exec(text) : null
   if (permMatch) {
     // Text sent before the answer reaches Claude before it.
     batcher.flushChat(chat_id)

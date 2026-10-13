@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { createPeers, noticeChat, type Peer } from './bots.ts'
+import { createPeers, noticeChat, sendStyle, type Peer } from './bots.ts'
 
 function peers(users: Record<string, Peer | Error> = {}) {
   const lookups: string[] = []
@@ -87,5 +87,38 @@ describe('where a notice goes', () => {
     const { p } = peers()
     expect(p.isBot('5')).toBe(false)
     expect(noticeChat('5', p, '1')).toBe('5')
+  })
+})
+
+describe('whether a chat is a bot’s', () => {
+  test('from what the server heard, else from Telegram once; a group asks nothing', async () => {
+    const { p, lookups } = peers({ '7777': { is_bot: true, username: 'quiet_bot' } })
+    p.learn({ id: 8606571973, is_bot: true, username: 'lana_7491_bot' })
+    p.learn({ id: 5, is_bot: false })
+    expect(await p.botChat('8606571973')).toBe(true)
+    expect(await p.botChat('5')).toBe(false)
+    expect(await p.botChat('7777')).toBe(true)
+    expect(await p.target('7777')).toBe('@quiet_bot')
+    expect(await p.botChat('6')).toBe(false)
+    expect(await p.botChat('-100')).toBe(false)
+    expect(lookups).toEqual(['7777', '6'])
+  })
+
+  test('a failed lookup fails, as a send to the chat would', async () => {
+    const { p } = peers({ '9': new Error('Bad Request: member not found') })
+    await expect(p.botChat('9')).rejects.toThrow('could not tell whether chat 9 is a bot')
+  })
+})
+
+describe('how a reply or an edit goes', () => {
+  test('to a bot, plain whatever the format', () => {
+    for (const format of ['rich', 'markdownv2', 'text', 'other']) expect(sendStyle(format, true)).toBe('text')
+  })
+
+  test('to a person or a group, as asked', () => {
+    expect(sendStyle('rich', false)).toBe('rich')
+    expect(sendStyle('markdownv2', false)).toBe('markdownv2')
+    expect(sendStyle('text', false)).toBe('text')
+    expect(sendStyle('other', false)).toBe('text')
   })
 })

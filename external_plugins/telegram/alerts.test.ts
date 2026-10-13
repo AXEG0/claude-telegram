@@ -41,6 +41,7 @@ describe('alertConfig', () => {
     expect(c.owner).toBeUndefined()
     expect(c.warnings).toEqual([`telegram channel: TELEGRAM_ALERT_CHAT=@owner is not a chat id; ${NO_OWNER}\n`])
     expect(NO_OWNER).toContain('permission hook allowed')
+    expect(NO_OWNER).toContain('permission prompts are answered only in the terminal')
   })
 })
 

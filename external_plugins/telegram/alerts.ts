@@ -17,18 +17,20 @@
 //
 // This file carries no dependencies beyond Node's, like typing.ts.
 
+import { NO_ASKS } from './asks.ts'
 import { CAP_MS, PROMPT_GRACE_MS } from './typing.ts'
 
 export const STUCK_MINUTES = CAP_MS / 60_000
 export const IDLE_MINUTES = 45
 
 // What goes missing without an owner chat.
-export const NO_OWNER = 'the idle alert is off, and the notices of what the permission hook allowed and of a bot\'s turn go nowhere'
+export const NO_OWNER = `the idle alert is off, ${NO_ASKS}, and the notices of what the permission hook allowed and of a bot's turn go nowhere`
 
 export type AlertConfig = {
   capMs: number
-  // The owner's chat, from TELEGRAM_ALERT_CHAT: the idle alert, the notices
-  // of what the permission hook allowed (see permit.ts), and a bot's notices.
+  // The owner's chat, from TELEGRAM_ALERT_CHAT: the idle alert, permission
+  // prompts (see asks.ts), the notices of what the permission hook allowed
+  // (see permit.ts), and a bot's notices.
   owner?: string
   idleMs: number
   warnings: string[]
