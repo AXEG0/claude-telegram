@@ -543,3 +543,59 @@ describe('after a message to a bot went elsewhere', () => {
     expect(p.isBot('7')).toBe(true)
   })
 })
+
+describe('a lookup that started before a forget', () => {
+  const tick = () => Bun.sleep(5)
+  function peers() {
+    const lookups: ReturnType<typeof deferred<Peer>>[] = []
+    const confirms: { username: string; done: ReturnType<typeof deferred<void>> }[] = []
+    const p = createPeers(
+      () => { const d = deferred<Peer>(); lookups.push(d); return d.promise },
+      (_chatId, username) => { const done = deferred<void>(); confirms.push({ username, done }); return done.promise },
+    )
+    return { p, lookups, confirms }
+  }
+
+  test('never replaces the entry a later confirm vouched for', async () => {
+    const { p, lookups, confirms } = peers()
+    const x = p.target('7')
+    const z = p.target('7')
+    await tick()
+    lookups[1]!.resolve({ is_bot: true, username: 'went_elsewhere_bot' })
+    expect(await z).toBe('@went_elsewhere_bot')
+    p.forget('7')
+    const y = p.target('7')
+    await tick()
+    lookups[2]!.resolve({ is_bot: true, username: 'confirmed_bot' })
+    await tick()
+    confirms[0]!.done.resolve()
+    expect(await y).toBe('@confirmed_bot')
+    lookups[0]!.resolve({ is_bot: true, username: 'went_elsewhere_bot' })
+    expect(await x).toBe('@confirmed_bot')
+    expect(confirms).toHaveLength(1)
+    expect(await p.target('7')).toBe('@confirmed_bot')
+  })
+
+  test('whose confirm overlapped a second forget leaves the entry a later confirm vouched for', async () => {
+    const { p, lookups, confirms } = peers()
+    const a = p.target('7')
+    const c = p.target('7')
+    await tick()
+    lookups[1]!.resolve({ is_bot: true, username: 'c_seven_bot' })
+    expect(await c).toBe('@c_seven_bot')
+    p.forget('7')
+    lookups[0]!.resolve({ is_bot: true, username: 'a_seven_bot' })
+    await tick()
+    expect(confirms.map(x => x.username)).toEqual(['a_seven_bot'])
+    p.forget('7')
+    const b = p.target('7')
+    await tick()
+    lookups[2]!.resolve({ is_bot: true, username: 'b_seven_bot' })
+    await tick()
+    confirms[1]!.done.resolve()
+    expect(await b).toBe('@b_seven_bot')
+    confirms[0]!.done.resolve()
+    expect(await a).toBe('@b_seven_bot')
+    expect(await p.target('7')).toBe('@b_seven_bot')
+  })
+})

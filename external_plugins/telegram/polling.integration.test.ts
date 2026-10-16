@@ -918,7 +918,7 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     // An edit goes by numeric id, plain, with no lookup.
     const before = calls(dir).length
     expect((await toolCall(channel, 'edit_message', { chat_id: '7010', message_id: '42', text: '*x*', format: 'markdownv2' })).isError).not.toBe(true)
-    expect(calls(dir).slice(before).filter(c => c.method !== 'sendChatAction').map(c => [c.method, c.payload])).toEqual([
+    expect(calls(dir).slice(before).filter(c => c.method !== 'sendChatAction' && c.method !== 'getUpdates').map(c => [c.method, c.payload])).toEqual([
       ['editMessageText', { chat_id: '7010', message_id: 42, text: '*x*' }],
     ])
 
@@ -926,7 +926,7 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     const again = calls(dir).length
     const next = failure(await toolCall(channel, 'reply', { chat_id: '7010', text: 'again' }))
     expect(next).toBe('reply failed: the username Telegram gives for 7010 is chat 9999, not 7010')
-    expect(calls(dir).slice(again).filter(c => c.method !== 'sendChatAction').map(c => [c.method, c.payload.chat_id])).toEqual([
+    expect(calls(dir).slice(again).filter(c => c.method !== 'sendChatAction' && c.method !== 'getUpdates').map(c => [c.method, c.payload.chat_id])).toEqual([
       ['getChatMember', '7010'], ['getChat', at(PEER10.username)],
     ])
 

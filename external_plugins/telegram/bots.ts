@@ -190,9 +190,10 @@ export function createPeers(lookup: (userId: string) => Promise<Peer>, confirm?:
       if (!forgotten.has(chatId)) {
         // A message from the chat since the lookup started vouches for its
         // own entry, which the answer never replaces; so does a confirm that
-        // passed for another lookup since the chat was forgotten.
+        // passed for another lookup since the chat was forgotten, whether this
+        // lookup started before that forget or after it.
         const entry = known.get(chatId)
-        if (entry && (startedForgotten || (learnedAt.get(chatId) ?? 0) > started)) return entry
+        if (entry && (startedForgotten || (learnedAt.get(chatId) ?? 0) > started || (forgotAt.get(chatId) ?? 0) > started)) return entry
         known.set(chatId, answer)
         return answer
       }

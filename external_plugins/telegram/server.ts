@@ -621,7 +621,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'reply',
       description:
-        'Reply on Telegram. Pass chat_id from the inbound message, or the numeric id of an allowlisted chat; chat ids are numeric, and only the owner adds another bot, in the terminal, with /telegram:access bot <id> @username. A message to a bot goes to its @username as plain text, whatever the format, and the reply stops at a message Telegram says went to another chat. Optionally pass reply_to (message_id) for threading, and files (absolute paths) to attach images or documents.',
+        'Reply on Telegram. Pass chat_id from the inbound message, or the numeric id of an allowlisted chat that has written to this bot, or of a bot the owner added with its username; chat ids are numeric, and only the owner adds another bot, in the terminal, with /telegram:access bot <id> @username. A message to a bot goes to its @username as plain text, whatever the format, and the reply stops at a message Telegram says went to another chat. Optionally pass reply_to (message_id) for threading, and files (absolute paths) to attach images or documents.',
       inputSchema: {
         type: 'object',
         properties: {
