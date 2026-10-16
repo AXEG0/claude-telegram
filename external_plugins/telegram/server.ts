@@ -33,7 +33,7 @@ import { batchGap, createBatcher } from './batch.ts'
 import { createTextMemory, editEvent } from './edit.ts'
 import { channelMode } from './polling.ts'
 import { alertConfig, createIdleAlarm, idleText, NO_OWNER, RECOVERED_TEXT, stuckText } from './alerts.ts'
-import { createPeers, noticeChat, sendStyle } from './bots.ts'
+import { CHAT_ID, createBotLookup, createConfirm, createPeers, listed, noticeChat, plainObject, sendStyle } from './bots.ts'
 import { askOwner, NO_ASKS, ownerAnswers } from './asks.ts'
 import { createPermitReader, permitDetail, permitFile, permitText, type PermitEvent } from './permit.ts'
 
@@ -139,8 +139,21 @@ const ASKER = askOwner(OWNER)
 if (POLLING && OWNER && !ASKER) {
   process.stderr.write(`telegram channel: TELEGRAM_ALERT_CHAT=${OWNER} is a group, not the owner's private chat; ${NO_ASKS}\n`)
 }
-// Other bots on the allowlist, from Telegram's own is_bot. See bots.ts.
-const peers = createPeers(async id => (await bot.api.getChatMember(id, Number(id))).user)
+// Other bots on the allowlist, from Telegram's own is_bot, and a bot that has
+// never written opened by the username the owner stored for it. access.json
+// is read at each lookup: as a value here it would be read before BOOT_ACCESS
+// is set, and frozen until a restart. See bots.ts.
+const getChat = async (chat_id: string) => await bot.api.getChat(chat_id)
+const confirmUsername = createConfirm(getChat)
+const peers = createPeers(createBotLookup({
+  getChatMember: async id => (await bot.api.getChatMember(id, Number(id))).user,
+  getChat,
+  access: () => {
+    const { allowFrom, botUsernames } = loadAccess()
+    return { allowFrom, botUsernames }
+  },
+  log: line => process.stderr.write(`telegram channel: ${line}\n`),
+}), confirmUsername)
 // A notice of the plugin's own goes to the chat, or to the owner chat when
 // the chat is another bot's.
 const notice = (chat_id: string | undefined) => noticeChat(chat_id, peers, OWNER)
@@ -248,6 +261,10 @@ type Access = {
   textChunkLimit?: number
   /** Split on paragraph boundaries instead of hard char count. */
   chunkMode?: 'length' | 'newline'
+  /** A bot's username by its id, written only by /telegram:access bot. Kept as
+   *  read, whatever its shape; the bot lookup uses only the entries that pass
+   *  its checks (see bots.ts). */
+  botUsernames?: unknown
 }
 
 function defaultAccess(): Access {
@@ -292,6 +309,9 @@ function readAccessFile(): Access {
       replyToMode: parsed.replyToMode,
       textChunkLimit: parsed.textChunkLimit,
       chunkMode: parsed.chunkMode,
+      // As read, so a write puts back what the owner wrote, and reading it
+      // cannot fail.
+      botUsernames: parsed.botUsernames,
     }
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return defaultAccess()
@@ -326,11 +346,16 @@ function loadAccess(): Access {
 
 // Outbound gate — reply/react/edit can only target chats the inbound gate
 // would deliver from. Telegram DM chat_id == user_id, so allowFrom covers DMs.
+// A chat id is numeric, so a username gets past nothing; groups count only as
+// an object's own keys.
 function assertAllowedChat(chat_id: string): void {
+  if (!CHAT_ID.test(String(chat_id))) {
+    throw new Error(`chat ${chat_id} is not allowlisted: chat ids are numeric, and only the owner adds another bot, in the terminal, with /telegram:access bot <id> @username`)
+  }
   const access = loadAccess()
-  if (access.allowFrom.includes(chat_id)) return
-  if (chat_id in access.groups) return
-  throw new Error(`chat ${chat_id} is not allowlisted — add via /telegram:access`)
+  if (listed(access.allowFrom, chat_id)) return
+  if (plainObject(access.groups) && Object.hasOwn(access.groups, chat_id)) return
+  throw new Error(`chat ${chat_id} is not allowlisted: only the owner allowlists a chat, in the terminal, with /telegram:access`)
 }
 
 function saveAccess(a: Access): void {
@@ -367,15 +392,18 @@ function admitted(access: Access, ctx: Context): boolean {
   const senderId = String(from.id)
   const chatType = ctx.chat?.type
 
-  if (chatType === 'private') return access.allowFrom.includes(senderId)
+  if (chatType === 'private') return listed(access.allowFrom, senderId)
 
   if (chatType === 'group' || chatType === 'supergroup') {
     const groupId = String(ctx.chat!.id)
     const policy = access.groups[groupId]
     if (!policy) return false
-    const groupAllowFrom = policy.allowFrom ?? []
+    const groupAllowFrom: unknown = policy.allowFrom
     const requireMention = policy.requireMention ?? true
-    if (groupAllowFrom.length > 0 && !groupAllowFrom.includes(senderId)) return false
+    // No list, or an empty one, admits every member; a list in any other
+    // shape admits nobody.
+    const anyMember = groupAllowFrom == null || (Array.isArray(groupAllowFrom) && groupAllowFrom.length === 0)
+    if (!anyMember && !listed(groupAllowFrom, senderId)) return false
     if (requireMention && !isMentioned(ctx, access.mentionPatterns)) return false
     return true
   }
@@ -429,7 +457,7 @@ function dmCommandGate(ctx: Context): { access: Access; senderId: string } | nul
   const pruned = pruneExpired(access)
   if (pruned) saveAccess(access)
   if (access.dmPolicy === 'disabled') return null
-  if (access.dmPolicy === 'allowlist' && !access.allowFrom.includes(senderId)) return null
+  if (access.dmPolicy === 'allowlist' && !listed(access.allowFrom, senderId)) return null
   return { access, senderId }
 }
 
@@ -516,6 +544,10 @@ function chunk(text: string, limit: number, mode: 'length' | 'newline'): string[
 // everything else goes as documents (raw file, no compression).
 const PHOTO_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp'])
 
+// A message of a reply to a bot that Telegram says went to another chat. Its
+// text is final: the chunk loop passes it on as it is.
+class WentElsewhere extends Error {}
+
 const mcp = new Server(
   { name: 'telegram', version: '1.0.0' },
   {
@@ -589,7 +621,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'reply',
       description:
-        'Reply on Telegram. Pass chat_id from the inbound message, or the numeric id of an allowlisted user or bot; a message to a bot goes to its @username as plain text, whatever the format. Optionally pass reply_to (message_id) for threading, and files (absolute paths) to attach images or documents.',
+        'Reply on Telegram. Pass chat_id from the inbound message, or the numeric id of an allowlisted chat that has written to this bot, or of a bot the owner added with its username; chat ids are numeric, and only the owner adds another bot, in the terminal, with /telegram:access bot <id> @username. A message to a bot goes to its @username as plain text, whatever the format, and the reply stops at a message Telegram says went to another chat. Optionally pass reply_to (message_id) for threading, and files (absolute paths) to attach images or documents.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -685,7 +717,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         // Another bot gets a message by its @username, as plain text, the
         // format Claude asked for aside. See bots.ts.
         const to = await peers.target(chat_id)
-        const style = sendStyle(format, await peers.botChat(chat_id))
+        const toBot = await peers.botChat(chat_id)
+        const style = sendStyle(format, toBot)
         const parseMode = style === 'markdownv2' ? 'MarkdownV2' as const : undefined
 
         const access = loadAccess()
@@ -695,6 +728,20 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const chunks = chunk(text, limit, mode)
         const sentIds: number[] = []
         const rich = RICH && style === 'rich' ? { ids: sentIds, done: 0, total: 0 } : undefined
+        // Each message to a bot takes the bot's @username from the cache right
+        // before it goes, and Telegram's answer must name the bot's chat: else
+        // nothing more goes, and the next message to the bot waits for its
+        // username to be checked again. See bots.ts.
+        const dest = async () => toBot ? await peers.target(chat_id) : to
+        const total = chunks.length + files.length
+        const sentTo = (sent: { message_id: number; chat: { id: number } }) => {
+          sentIds.push(sent.message_id)
+          if (!toBot || String(sent.chat.id) === chat_id) return
+          peers.forget(chat_id)
+          const line = `reply failed after ${sentIds.length} of ${total} message(s) sent: message ${sent.message_id} went to chat ${sent.chat.id}, not ${chat_id}`
+          process.stderr.write(`telegram channel: ${line}\n`)
+          throw new WentElsewhere(line)
+        }
 
         try {
           if (rich) {
@@ -712,13 +759,14 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
               reply_to != null &&
               replyMode !== 'off' &&
               (replyMode === 'all' || i === 0)
-            const sent = await bot.api.sendMessage(to, chunks[i], {
+            const sent = await bot.api.sendMessage(await dest(), chunks[i], {
               ...(shouldReplyTo ? { reply_parameters: { message_id: reply_to } } : {}),
               ...(parseMode ? { parse_mode: parseMode } : {}),
             })
-            sentIds.push(sent.message_id)
+            sentTo(sent)
           }
         } catch (err) {
+          if (err instanceof WentElsewhere) throw err
           const msg = err instanceof Error ? err.message : String(err)
           throw new Error(
             rich
@@ -736,11 +784,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
             ? { reply_parameters: { message_id: reply_to } }
             : undefined
           if (PHOTO_EXTS.has(ext)) {
-            const sent = await bot.api.sendPhoto(to, input, opts)
-            sentIds.push(sent.message_id)
+            sentTo(await bot.api.sendPhoto(await dest(), input, opts))
           } else {
-            const sent = await bot.api.sendDocument(to, input, opts)
-            sentIds.push(sent.message_id)
+            sentTo(await bot.api.sendDocument(await dest(), input, opts))
           }
         }
 
@@ -895,7 +941,7 @@ bot.command('status', async ctx => {
   if (!gated) return
   const { access, senderId } = gated
 
-  if (access.allowFrom.includes(senderId)) {
+  if (listed(access.allowFrom, senderId)) {
     const name = ctx.from!.username ? `@${ctx.from!.username}` : senderId
     await ctx.reply(`Paired as ${name}.`)
     return
@@ -923,7 +969,7 @@ bot.on('callback_query:data', async ctx => {
   const data = ctx.callbackQuery.data
   const permit = /^permit:(p\d+)$/.exec(data)
   if (permit) {
-    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+    if (!listed(loadAccess().allowFrom, String(ctx.from.id))) {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
       return
     }
@@ -943,7 +989,7 @@ bot.on('callback_query:data', async ctx => {
   }
   const access = loadAccess()
   const senderId = String(ctx.from.id)
-  if (!access.allowFrom.includes(senderId) || !ownerAnswers(OWNER, ctx.from)) {
+  if (!listed(access.allowFrom, senderId) || !ownerAnswers(OWNER, ctx.from)) {
     await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
     return
   }

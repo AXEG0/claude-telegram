@@ -20,14 +20,117 @@ async function payloadOf(options?: RequestInit): Promise<Record<string, unknown>
   return out
 }
 
+// The text Telegram would return in a chat's or a user's own fields (first
+// name, bio, description), so a test can search every error for it.
+const MARKER = 'text-telegram-returned'
+
+type User = { id: number; is_bot: boolean; first_name?: string; username?: string }
+
 // TELEGRAM_TEST_USERS maps a user id to the user getChatMember returns for
 // that private chat, or to null for a lookup Telegram refuses; any other id is
 // a person with no username.
-function member(userId: number): { ok: boolean; result?: unknown; error_code?: number; description?: string } {
-  const users = JSON.parse(process.env.TELEGRAM_TEST_USERS || '{}') as Record<string, unknown>
-  if (users[userId] === null) return { ok: false, error_code: 400, description: 'Bad Request: member not found' }
-  return { ok: true, result: { status: 'member', user: users[userId] ?? { id: userId, is_bot: false, first_name: 'Person' } } }
+const users = JSON.parse(process.env.TELEGRAM_TEST_USERS || '{}') as Record<string, User | null>
+
+// TELEGRAM_TEST_CHATS shapes what Telegram answers about chats, by user id or
+// username:
+// - unopened: users whose getChatMember answers "chat not found" until a
+//   getChat by a username they hold.
+// - closed: users whose getChatMember answers "chat not found" even after that.
+// - flood: users whose getChatMember answers 429, with retry_after in seconds.
+// - second: a user's second username, which getChat and the sends resolve to
+//   the user, while getChatMember gives the first.
+// - refuse: usernames getChat refuses as "chat not found".
+// - redirect: a username that answers another chat, in the sends and in
+//   getChat, from its `from`-th send onward (1 or unset: from the start);
+//   messages sent to it get their own ids from `ids` on.
+// - hold: the answer to the `send`-th send of the process waits `ms`.
+type Chats = {
+  unopened?: number[]
+  closed?: number[]
+  flood?: Record<string, number>
+  second?: Record<string, string>
+  refuse?: string[]
+  redirect?: { username: string; to: number; from?: number; ids?: number }
+  hold?: { send: number; ms: number }
 }
+const chats = JSON.parse(process.env.TELEGRAM_TEST_CHATS || '{}') as Chats
+
+// The senders of every update delivered from TELEGRAM_TEST_INBOUND.
+const senders = new Map<number, User>()
+// Unopened users a getChat by their username has opened.
+const opened = new Set<number>()
+let sends = 0
+let redirectSends = 0
+let redirectIds = 0
+
+const lower = (s: string) => s.toLowerCase()
+const redirect = chats.redirect && { ...chats.redirect, username: lower(chats.redirect.username) }
+// Whether the redirected username answers the other chat by now.
+const redirected = () => redirect !== undefined && redirectSends >= Math.max(1, redirect.from ?? 1)
+
+// The user holding a username, in any case, among the test's users and the
+// senders delivered so far.
+function holder(username: string): User | undefined {
+  const name = lower(username)
+  for (const user of [...Object.values(users), ...senders.values()]) {
+    if (!user) continue
+    if (user.username && lower(user.username) === name) return user
+    if (lower(chats.second?.[String(user.id)] ?? '') === name) return user
+  }
+  return undefined
+}
+
+const notFound = { ok: false, error_code: 400, description: 'Bad Request: chat not found' }
+
+function member(userId: number): object {
+  const flood = chats.flood?.[String(userId)]
+  if (flood !== undefined) {
+    return { ok: false, error_code: 429, description: `Too Many Requests: retry after ${flood}`, parameters: { retry_after: flood } }
+  }
+  if (chats.closed?.includes(userId)) return notFound
+  if (chats.unopened?.includes(userId) && !opened.has(userId)) return notFound
+  if (users[userId] === null) return { ok: false, error_code: 400, description: 'Bad Request: member not found' }
+  const user = users[userId] ?? senders.get(userId) ?? { id: userId, is_bot: false }
+  return { ok: true, result: { status: 'member', user: { ...user, first_name: MARKER } } }
+}
+
+function chat(chatId: unknown): object {
+  const name = String(chatId)
+  if (!name.startsWith('@')) return notFound
+  const username = name.slice(1)
+  if (chats.refuse?.some(r => lower(r) === lower(username))) return notFound
+  const elsewhere = redirect && lower(username) === redirect.username && ((redirect.from ?? 1) <= 1 || redirected())
+  const id = elsewhere ? redirect!.to : holder(username)?.id
+  if (id === undefined) return notFound
+  opened.add(id)
+  return { ok: true, result: { id, type: 'private', username, first_name: MARKER, bio: MARKER, description: MARKER } }
+}
+
+// The chat a send went to: a numeric chat_id as that number, a username as
+// its holder's id.
+function recipient(chatId: unknown): { id: number; message_id: number } | undefined {
+  const to = String(chatId)
+  if (!to.startsWith('@')) return { id: Number(to), message_id: 42 }
+  if (redirect && lower(to.slice(1)) === redirect.username) {
+    redirectSends++
+    const message_id = redirect.ids === undefined ? 42 : redirect.ids + redirectIds++
+    if (redirected()) return { id: redirect.to, message_id }
+    const user = holder(to.slice(1))
+    return user && { id: user.id, message_id }
+  }
+  const user = holder(to.slice(1))
+  return user && { id: user.id, message_id: 42 }
+}
+
+function remember(updates: unknown[]): void {
+  for (const u of updates as Record<string, { from?: User } | undefined>[]) {
+    for (const item of [u.message, u.edited_message, u.callback_query]) {
+      if (item?.from) senders.set(item.from.id, item.from)
+    }
+  }
+}
+
+const json = (body: object) => new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } })
 
 const fakeFetch = (async (url: string | URL | Request, options?: RequestInit) => {
   const method = String(url).split('/').pop()!
@@ -36,21 +139,25 @@ const fakeFetch = (async (url: string | URL | Request, options?: RequestInit) =>
   let result: unknown = true
   if (method === 'getMe') result = { id: 123, is_bot: true, first_name: 'Test', username: 'test_bot' }
   if (['sendMessage', 'sendPhoto', 'sendDocument', 'sendRichMessage'].includes(method)) {
-    result = { message_id: 42, date: 0, chat: { id: 1, type: 'private' } }
+    const n = ++sends
+    const to = recipient(payload.chat_id)
+    if (chats.hold?.send === n) await Bun.sleep(chats.hold.ms)
+    if (!to) return json(notFound)
+    result = { message_id: to.message_id, date: 0, chat: { id: to.id, type: to.id < 0 ? 'supergroup' : 'private' } }
   }
-  if (method === 'getChatMember') {
-    return new Response(JSON.stringify(member(Number(payload.user_id))), { headers: { 'content-type': 'application/json' } })
-  }
+  if (method === 'getChatMember') return json(member(Number(payload.user_id)))
+  if (method === 'getChat') return json(chat(payload.chat_id))
   if (method === 'getUpdates') {
     await Bun.sleep(25)
     result = []
     const inbound = process.env.TELEGRAM_TEST_INBOUND
     if (inbound && !deliveredInbound && existsSync(inbound)) {
       result = JSON.parse(readFileSync(inbound, 'utf8'))
+      remember(result as unknown[])
       deliveredInbound = true
     }
   }
-  return new Response(JSON.stringify({ ok: true, result }), { headers: { 'content-type': 'application/json' } })
+  return json({ ok: true, result })
 }) as unknown as typeof fetch
 
 const RealBot = grammy.Bot

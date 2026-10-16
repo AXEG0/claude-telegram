@@ -104,20 +104,54 @@ Quick reference: IDs are **numeric user IDs** (get yours from [@userinfobot](htt
 ## Other bots
 
 Another bot reaches Claude through this one, and Claude writes back to it, when
-both bots have bot-to-bot communication on in BotFather and each is on the
-other's allowlist. Its messages arrive like anyone's, with its username in
-`user`.
+both bots have bot-to-bot communication on in BotFather and the other bot is on
+this one's allowlist. Whom the other bot answers is up to it: another copy of
+this plugin answers the bots on its own allowlist, and a bridge that pairs by
+code answers a new sender with a pairing code. Its messages arrive like
+anyone's, with its username in `user`.
+
+Only the owner adds another bot, in the terminal, with its numeric ID and its
+username:
+
+```
+/telegram:access bot <id> @username
+```
+
+The ID goes on the allowlist, and the username into `botUsernames` in
+`access.json` (see [ACCESS.md](./ACCESS.md#other-bots)). Chat IDs are numeric:
+the tools refuse a `chat_id` that is not, a username included, and Claude
+cannot add a bot itself.
 
 Telegram delivers a message from one bot to another when it names the receiving
 bot by `@username`. Sent to the bot's numeric ID before a message by username
 has passed between the two, it is accepted and never arrives. So `reply` takes
 a numeric `chat_id` as for anyone, and sends to a bot by its username, files
 included: Claude passes back the `chat_id` of the bot's message, or the numeric
-ID of an allowlisted bot that has not written. The server knows a chat is a
-bot's from Telegram's `is_bot` on a message from it since the server started.
-For any other private chat, it asks Telegram once with `getChatMember`, and a
-reply or an edit fails when Telegram gives no answer. `react` and `edit_message` keep the
-numeric ID.
+ID of an allowlisted bot. The server knows a chat is a bot's, with its
+username, from Telegram's `is_bot` on a message from it since the server
+started. For any other private chat, it asks Telegram with `getChatMember` and
+keeps the answer; a lookup that fails is asked again at the next reply or edit.
+
+For a bot that has never written to this one, Telegram answers `getChatMember`
+with "chat not found". The server then opens the chat by the username stored
+with `bot`, and the username serves only that: the reply goes out only when
+Telegram returns the allowlisted ID for that username, then describes the chat
+as a bot, and returns the same ID for the username it gives the bot, which the
+reply goes to. The log shows `opened chat <id> by @<username>`. A check that
+fails sends nothing, and the reply fails with an error that names the IDs
+involved and no text Telegram returned. Without a stored username, such a bot
+is reached once it has written. With `TELEGRAM_ACCESS_MODE=static`, a bot added
+while the server runs is reached after a restart.
+
+After each message of a reply to a bot, text or file, the server compares the
+chat Telegram says the message went to with the bot's ID. When the two differ,
+nothing more of the reply goes, and the reply fails with the count of messages
+sent and the message that went elsewhere. The chat stays a bot's for the
+notices below, and the next message to it goes only after Telegram returns the
+bot's ID for the username it gives, or a new message from the bot. The server
+keeps this in its memory, so a restarted server, or the server of another
+session on the same bot, stops at its own first message that goes elsewhere.
+`react` and `edit_message` keep the numeric ID.
 
 A reply or an edit to a bot goes as plain text, exactly as Claude wrote it,
 whatever `format` Claude passes. The receiving plugin hands its session a
@@ -135,7 +169,7 @@ can answer no prompt. The typing indicator still goes to the bot's chat.
 
 | Tool | Purpose |
 | --- | --- |
-| `reply` | Sends to a chat, and to [another bot](#other-bots) by its `@username`, as plain text. Takes `chat_id` and `text`, with `reply_to` (a message ID) for native threading and `files` (absolute paths) for attachments. Images (`.jpg`/`.jpeg`/`.png`/`.gif`/`.webp`) go as photos with an inline preview, other files as documents, up to 50MB each, after the text. `format` picks `text` or `markdownv2`, and with rich messages on also `rich`, which is then the default. Long text goes out in several messages. Returns the sent message IDs. |
+| `reply` | Sends to a chat, and to [another bot](#other-bots) by its `@username`, as plain text. Takes a numeric `chat_id` and `text`, with `reply_to` (a message ID) for native threading and `files` (absolute paths) for attachments. Images (`.jpg`/`.jpeg`/`.png`/`.gif`/`.webp`) go as photos with an inline preview, other files as documents, up to 50MB each, after the text. `format` picks `text` or `markdownv2`, and with rich messages on also `rich`, which is then the default. Long text goes out in several messages. Returns the sent message IDs. |
 | `react` | Adds an emoji reaction to a message by ID, from Telegram's fixed set of reaction emoji (👍 👎 ❤ 🔥 👀 and others). |
 | `download_attachment` | Downloads an attachment by the `attachment_file_id` on its message to the inbox and returns the local path. Telegram serves bot downloads up to 20MB. |
 | `edit_message` | Edits a message the bot sent, for progress updates such as "working…" turning into the result. Takes the same `format` as `reply`. An edit stays one message, so longer text goes in a new reply, and an edit sends no notification, so a finished task gets a new reply too. |
