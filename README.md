@@ -26,7 +26,7 @@ through it.
 | 📦 **Bursts as one message** | Quick texts, a long paste Telegram split, and a photo with its question arrive together, so Claude answers once. |
 | ↩️ **Reply context** | Claude sees the message you replied to and the part you quoted. |
 | ✏️ **Edits** | Edit a message you sent, and Claude gets its new text as an edit of that message. |
-| 🤝 **Other bots** | Claude talks to another bot that has bot-to-bot communication on, and the live subagent message and stuck alerts that would go to the bot go to you. |
+| 🤝 **Other bots** | Claude talks to another bot that has bot-to-bot communication on, and the live subagent message and stuck alerts that would go to the bot go to you. Chat IDs are numeric: only you add another bot, in the terminal, with `/telegram:access bot <id> @username`, and Claude then reaches it before it has written. |
 | 🔐 **Permissions for you alone** | Permission prompts go only to you, and only your tap or `yes <code>` reply answers them. In bypass mode, a Bash ask is allowed with a notice to you instead of a prompt. |
 
 Plus everything from the official plugin: pairing and allowlists, photos and

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process'
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import fixture from './fixtures/channel-argv.json'
@@ -756,4 +756,389 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     unrelated.kill('SIGTERM')
     await until(() => unrelated.signalCode === 'SIGTERM')
   })
+
+  // Bots the owner added with /telegram:access bot <id> @username, made up
+  // for these tests. Telegram's own text fields carry the fixture's marker.
+  const MARK = 'text-telegram-returned'
+  const at = (username: string) => `@${username}`
+  const peerBot = (id: number, username: string) => ({ id, is_bot: true, first_name: 'Peer', username })
+  const toolCall = async (proc: ReturnType<typeof start>, name: string, args: object) =>
+    (await proc.request('tools/call', { name, arguments: args })).result
+  // The text of a failed tool call, which never carries a field Telegram returned.
+  const failure = (result: any): string => {
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).not.toContain(MARK)
+    return result.content[0].text
+  }
+  const SENDS = ['sendMessage', 'sendPhoto', 'sendDocument', 'sendRichMessage']
+  const sends = (dir: string) => calls(dir).filter(c => SENDS.includes(c.method))
+  const command = (from: { id: number }, message_id: number, name: string) => ({ message: {
+    message_id, date: Math.floor(Date.now() / 1000), from, chat: { id: from.id, type: 'private' }, text: `/${name}`,
+    entities: [{ type: 'bot_command', offset: 0, length: name.length + 1 }],
+  } })
+
+  test('the first reply to an allowlisted bot that never wrote opens its chat by the stored username, and goes plain to the username Telegram gives', async () => {
+    const FRESH = peerBot(7002, 'Fresh_PeerBot')
+    const EDITED = peerBot(7003, 'edited_peer_bot')
+    const dir = state({ dmPolicy: 'allowlist', allowFrom: ['1', '7002', '7003'], botUsernames: { '7002': 'Fresh_PeerBot', '7003': 'edited_peer_bot' } })
+    const sender = start(dir, ['claude', '-p', 'hello'], {
+      TELEGRAM_RICH_MESSAGES: 'true',
+      TELEGRAM_TEST_USERS: JSON.stringify({ 7002: FRESH, 7003: EDITED }),
+      TELEGRAM_TEST_CHATS: JSON.stringify({ unopened: [7002, 7003] }),
+    })
+    await sender.ready()
+    expect((await toolCall(sender, 'reply', { chat_id: '7002', text: '**first** contact' })).isError).not.toBe(true)
+    // getChatMember by id fails, the stored username opens the chat, and
+    // getChatMember then describes the bot.
+    expect(calls(dir).map(c => [c.method, c.payload.chat_id])).toEqual([
+      ['getChatMember', '7002'], ['getChat', at(FRESH.username)], ['getChatMember', '7002'], ['sendMessage', at(FRESH.username)],
+    ])
+    expect(calls(dir)[3]!.payload).toEqual({ chat_id: at(FRESH.username), text: '**first** contact' })
+    await until(() => sender.stderr().includes(`opened chat 7002 by ${at('Fresh_PeerBot')}`))
+    // Kept: the next reply makes no call but its own.
+    const before = calls(dir).length
+    expect((await toolCall(sender, 'reply', { chat_id: '7002', text: 'again' })).isError).not.toBe(true)
+    expect(calls(dir).slice(before).map(c => [c.method, c.payload.chat_id])).toEqual([['sendMessage', at(FRESH.username)]])
+
+    // edit_message's bot check takes the same way, and edits by numeric id, plain.
+    const edit = calls(dir).length
+    expect((await toolCall(sender, 'edit_message', { chat_id: '7003', message_id: '42', text: '**done**' })).isError).not.toBe(true)
+    expect(calls(dir).slice(edit).map(c => [c.method, c.payload.chat_id])).toEqual([
+      ['getChatMember', '7003'], ['getChat', at(EDITED.username)], ['getChatMember', '7003'], ['editMessageText', '7003'],
+    ])
+    expect(calls(dir).at(-1)!.payload).toEqual({ chat_id: '7003', message_id: 42, text: '**done**' })
+    await sender.close()
+  }, 15000)
+
+  test('a stored username that does not lead to the allowlisted bot, or an entry the server ignores, sends nothing, and each error names ids, not what Telegram returned', async () => {
+    const users = {
+      7031: peerBot(7031, 'thirty_one_bot'),
+      // Holds the username stored for 7031.
+      7039: peerBot(7039, 'taken_name_bot'),
+      7032: peerBot(7032, 'thirty_two_bot'),
+      7033: peerBot(7033, 'thirty_three_bot'),
+      7034: { id: 7034, is_bot: false, first_name: 'Person', username: 'thirty_four_bot' },
+      7035: peerBot(7035, 'thirty_five_bot'),
+      7036: peerBot(7036, 'thirty_six_bot'),
+      7037: peerBot(7037, 'thirty_seven_bot'),
+      7038: peerBot(7038, 'thirty_eight_bot'),
+      7041: peerBot(7041, 'forty_one_bot'),
+    }
+    const dir = state({
+      dmPolicy: 'allowlist',
+      allowFrom: ['1', '7031', '7032', '7033', '7034', '7035', '7036', '7037', '7041'],
+      // 7038 is only a groups key: the fallback runs only for allowFrom.
+      groups: { '7038': { requireMention: true, allowFrom: [] } },
+      botUsernames: {
+        '7031': 'taken_name_bot', '7032': 'nobody_holds_bot', '7033': 'thirty_three_bot', '7034': 'thirty_four_bot',
+        '7035': 'thirty_five_bat', '7036': { name: 'thirty_six_bot' }, '7037': 'thirty_seven_bot', '7038': 'thirty_eight_bot',
+      },
+    })
+    const sender = start(dir, ['claude', '-p', 'hello'], {
+      TELEGRAM_TEST_USERS: JSON.stringify(users),
+      TELEGRAM_TEST_CHATS: JSON.stringify({ unopened: [7031, 7032, 7034, 7035, 7036, 7038, 7041], closed: [7033], flood: { 7037: 7 } }),
+    })
+    await sender.ready()
+    const errors: Record<string, string> = {}
+    for (const id of ['7031', '7032', '7033', '7034', '7035', '7036', '7037', '7038', '7041']) {
+      errors[id] = failure(await toolCall(sender, 'reply', { chat_id: id, text: `to ${id}` }))
+    }
+    expect(errors).toEqual({
+      7031: `reply failed: ${at('taken_name_bot')} is chat 7039, not 7031`,
+      7032: `reply failed: could not open chat 7032 by ${at('nobody_holds_bot')}: getChat failed (400: Bad Request: chat not found)`,
+      7033: `reply failed: chat 7033 opened by ${at('thirty_three_bot')}, but getChatMember failed (400: Bad Request: chat not found)`,
+      7034: `reply failed: chat 7034 is not a bot, so nothing goes to ${at('thirty_four_bot')}`,
+      7035: 'reply failed: botUsernames entry for 7035 is not a bot username',
+      7036: 'reply failed: botUsernames entry for 7036 is not a bot username',
+      7037: "reply failed: could not tell whether chat 7037 is a bot: Call to 'getChatMember' failed! (429: Too Many Requests: retry after 7)",
+      7038: "reply failed: could not tell whether chat 7038 is a bot: Call to 'getChatMember' failed! (400: Bad Request: chat not found)",
+      7041: "reply failed: could not tell whether chat 7041 is a bot: Call to 'getChatMember' failed! (400: Bad Request: chat not found)",
+    })
+    expect(sends(dir)).toEqual([])
+    // getChat only for the entries that pass the filter, after a refusal that was no flood control.
+    expect(calls(dir).filter(c => c.method === 'getChat').map(c => c.payload.chat_id)).toEqual(
+      ['taken_name_bot', 'nobody_holds_bot', 'thirty_three_bot', 'thirty_four_bot'].map(at),
+    )
+    // The chat counts as opened only once getChat returned the allowlisted id.
+    const opened = sender.stderr().split('\n').filter(line => line.includes('opened chat')).map(line => line.replace(/^.*opened chat /, ''))
+    expect(opened).toEqual([`7033 by ${at('thirty_three_bot')}`, `7034 by ${at('thirty_four_bot')}`])
+    await sender.close()
+  }, 15000)
+
+  test.each([
+    ['returns the bot', {}, undefined],
+    ['returns another id', { redirect: { username: 'given_four_bot', to: 9997 } }, 'the username Telegram gives for 7004 is chat 9997, not 7004'],
+    ['is refused', { refuse: ['given_four_bot'] }, 'could not check the username Telegram gives for 7004: getChat failed (400: Bad Request: chat not found)'],
+  ])('when getChatMember gives a username other than the stored one and getChat by it %s, the reply goes to it only once that id is the bot’s', async (_, chats, error) => {
+    const dir = state({ dmPolicy: 'allowlist', allowFrom: ['1', '7004'], botUsernames: { '7004': 'stored_four_bot' } })
+    const sender = start(dir, ['claude', '-p', 'hello'], {
+      TELEGRAM_TEST_USERS: JSON.stringify({ 7004: peerBot(7004, 'given_four_bot') }),
+      TELEGRAM_TEST_CHATS: JSON.stringify({ unopened: [7004], second: { 7004: 'stored_four_bot' }, ...chats }),
+    })
+    await sender.ready()
+    const result = await toolCall(sender, 'reply', { chat_id: '7004', text: 'hello other name' })
+    const checks = [['getChatMember', '7004'], ['getChat', at('stored_four_bot')], ['getChatMember', '7004'], ['getChat', at('given_four_bot')]]
+    if (error === undefined) {
+      expect(result.isError).not.toBe(true)
+      expect(calls(dir).map(c => [c.method, c.payload.chat_id])).toEqual([...checks, ['sendMessage', at('given_four_bot')]])
+    } else {
+      const text = failure(result)
+      expect(text).toBe(`reply failed: ${error}`)
+      expect(text.toLowerCase()).not.toContain('given_four_bot')
+      expect(calls(dir).map(c => [c.method, c.payload.chat_id])).toEqual(checks)
+    }
+    await sender.close()
+  }, 15000)
+
+  test.each([
+    ['the first chunk', 1, 'reply failed after 1 of 4 message(s) sent: message 500 went to chat 9999, not 7010'],
+    ['a later chunk', 2, 'reply failed after 2 of 4 message(s) sent: message 501 went to chat 9999, not 7010'],
+    ['the file', 4, 'reply failed after 4 of 4 message(s) sent: message 503 went to chat 9999, not 7010'],
+  ])('when %s of a reply to a bot went to another chat, nothing more goes, the bot keeps its notices away from its chat, and its username is checked before the next reply', async (_, from, line) => {
+    const PEER10 = peerBot(7010, 'peer_ten_bot')
+    const dir = state({ dmPolicy: 'allowlist', allowFrom: ['1', '7010'], textChunkLimit: 10 })
+    mkdirSync(join(dir, 'inbox'))
+    writeFileSync(join(dir, 'inbox', 'chart.png'), 'png')
+    writeFileSync(join(dir, 'inbound.json'), updates(dm(PEER10, 1, 'from the peer bot')))
+    const channel = start(dir, fixture.argv, {
+      TELEGRAM_ALERT_CHAT: '1',
+      // Long enough that the stuck notice comes after the reply below.
+      TELEGRAM_STUCK_MINUTES: '0.1',
+      TELEGRAM_TEST_CHATS: JSON.stringify({ redirect: { username: PEER10.username, to: 9999, from, ids: 500 } }),
+    })
+    await channel.ready()
+    await until(() => channel.inbound().length === 1, 6000)
+    const toPeer = () => sends(dir).filter(c => String(c.payload.chat_id).toLowerCase() === at(PEER10.username))
+
+    const result = await toolCall(channel, 'reply', { chat_id: '7010', text: 'a'.repeat(10) + 'b'.repeat(10) + 'c'.repeat(10), files: [join(dir, 'inbox', 'chart.png')] })
+    expect(failure(result)).toBe(`reply failed: ${line}`)
+    expect(channel.stderr()).toContain(line)
+    expect(toPeer().map(c => c.method)).toEqual(['sendMessage', 'sendMessage', 'sendMessage', 'sendPhoto'].slice(0, from))
+
+    // An edit goes by numeric id, plain, with no lookup.
+    const before = calls(dir).length
+    expect((await toolCall(channel, 'edit_message', { chat_id: '7010', message_id: '42', text: '*x*', format: 'markdownv2' })).isError).not.toBe(true)
+    expect(calls(dir).slice(before).filter(c => c.method !== 'sendChatAction').map(c => [c.method, c.payload])).toEqual([
+      ['editMessageText', { chat_id: '7010', message_id: 42, text: '*x*' }],
+    ])
+
+    // The next reply asks Telegram again, and the username still answers another chat.
+    const again = calls(dir).length
+    const next = failure(await toolCall(channel, 'reply', { chat_id: '7010', text: 'again' }))
+    expect(next).toBe('reply failed: the username Telegram gives for 7010 is chat 9999, not 7010')
+    expect(calls(dir).slice(again).filter(c => c.method !== 'sendChatAction').map(c => [c.method, c.payload.chat_id])).toEqual([
+      ['getChatMember', '7010'], ['getChat', at(PEER10.username)],
+    ])
+
+    // Still a bot's chat: the subagent message and the stuck notice go to the owner chat.
+    expect(await panelChat(dir, channel)).toBe('1')
+    const stuck = (c: { method: string; payload: any }) => c.method === 'sendMessage' && c.payload.text === stuckText(6000)
+    await until(() => calls(dir).some(stuck), 2 * REFRESH_MS + 4000)
+    expect(calls(dir).filter(stuck).map(c => c.payload.chat_id)).toEqual(['1'])
+    expect(calls(dir).findIndex(stuck)).toBeGreaterThan(calls(dir).findLastIndex(c => SENDS.includes(c.method) && c.payload.chat_id === at(PEER10.username)))
+    expect(toPeer()).toHaveLength(from)
+    expect(sends(dir).filter(c => c.payload.chat_id === '7010')).toEqual([])
+    await channel.close()
+  }, 25000)
+
+  test('a reply whose next message starts after another reply’s message went elsewhere checks the username first, and sends nothing while it answers another chat', async () => {
+    const PEER20 = peerBot(7020, 'peer_twenty_bot')
+    const dir = state({ dmPolicy: 'allowlist', allowFrom: ['1', '7020'], textChunkLimit: 10 })
+    const sender = start(dir, ['claude', '-p', 'hello'], {
+      TELEGRAM_TEST_USERS: JSON.stringify({ 7020: PEER20 }),
+      // The first send waits, so the second reply's send answers first.
+      TELEGRAM_TEST_CHATS: JSON.stringify({ redirect: { username: PEER20.username, to: 9998, from: 2, ids: 600 }, hold: { send: 1, ms: 1500 } }),
+    })
+    await sender.ready()
+    const first = toolCall(sender, 'reply', { chat_id: '7020', text: 'a'.repeat(10) + 'b'.repeat(10) })
+    await until(() => sends(dir).length === 1)
+    const second = failure(await toolCall(sender, 'reply', { chat_id: '7020', text: 'second' }))
+    expect(second).toBe('reply failed: reply failed after 1 of 1 message(s) sent: message 601 went to chat 9998, not 7020')
+    expect(failure(await first)).toBe('reply failed: reply failed after 1 of 2 chunk(s) sent: the username Telegram gives for 7020 is chat 9998, not 7020')
+    expect(calls(dir).map(c => [c.method, c.payload.chat_id ?? c.payload.text])).toEqual([
+      ['getChatMember', '7020'], ['sendMessage', at(PEER20.username)], ['sendMessage', at(PEER20.username)],
+      ['getChatMember', '7020'], ['getChat', at(PEER20.username)],
+    ])
+    expect(sends(dir).map(c => c.payload.text)).toEqual(['a'.repeat(10), 'second'])
+    await sender.close()
+  }, 15000)
+
+  test('people, groups and bots that already wrote make no getChat call', async () => {
+    const PEER70 = peerBot(7070, 'seventy_peer_bot')
+    const dir = state({
+      dmPolicy: 'allowlist', allowFrom: ['1', '7070', '5', '6'], groups: { '-100': { requireMention: true, allowFrom: [] } },
+      botUsernames: { '7070': 'seventy_peer_bot', '5': 'five_peer_bot', '6': 'six_peer_bot' },
+    })
+    mkdirSync(join(dir, 'inbox'))
+    writeFileSync(join(dir, 'inbox', 'notes.txt'), 'notes')
+    writeFileSync(join(dir, 'inbound.json'), updates(dm(PEER70, 1, 'from the peer bot'), dm(PERSON, 2, 'from a person')))
+    const channel = start(dir, fixture.argv, { TELEGRAM_ALERT_CHAT: '1' })
+    await channel.ready()
+    await until(() => channel.inbound().length === 2, 6000)
+    for (const [chat_id, files] of [['7070', [join(dir, 'inbox', 'notes.txt')]], ['7070', []], ['5', []], ['6', []], ['-100', []], ['1', []]] as [string, string[]][]) {
+      expect((await toolCall(channel, 'reply', { chat_id, text: `to ${chat_id}`, files })).isError).not.toBe(true)
+    }
+    expect(sends(dir).map(c => [c.method, c.payload.chat_id])).toEqual([
+      ['sendMessage', at(PEER70.username)], ['sendDocument', at(PEER70.username)], ['sendMessage', at(PEER70.username)],
+      ['sendMessage', '5'], ['sendMessage', '6'], ['sendMessage', '-100'], ['sendMessage', '1'],
+    ])
+    expect(calls(dir).filter(c => c.method === 'getChat')).toEqual([])
+    expect(calls(dir).filter(c => c.method === 'getChatMember').map(c => c.payload.chat_id)).toEqual(['6', '1'])
+    await channel.close()
+  }, 15000)
+
+  test('a chat id that is not numeric is refused before any call, constructor included, and a numeric one not allowlisted says only the owner allowlists it', async () => {
+    const dir = state({ dmPolicy: 'allowlist', allowFrom: ['1'], groups: { '-100': { requireMention: true, allowFrom: [] } }, botUsernames: { '7050': 'fifty_peer_bot' } })
+    const sender = start(dir, ['claude', '-p', 'hello'], { TELEGRAM_TEST_USERS: JSON.stringify({ 7050: peerBot(7050, 'fifty_peer_bot') }) })
+    await sender.ready()
+    const args = (chat_id: string) => ({ reply: { chat_id, text: 'x' }, react: { chat_id, message_id: '42', emoji: '👍' }, edit_message: { chat_id, message_id: '42', text: 'x' } })
+    for (const id of [at('fifty_peer_bot'), 'fifty_peer_bot', 'constructor', 'toString', '__proto__', 'hasOwnProperty', '0', '01', '-0100', '1.0', '']) {
+      for (const [name, a] of Object.entries(args(id))) {
+        expect(failure(await toolCall(sender, name, a))).toBe(
+          `${name} failed: chat ${id} is not allowlisted: chat ids are numeric, and only the owner adds another bot, in the terminal, with /telegram:access bot <id> @username`)
+      }
+    }
+    for (const [name, a] of Object.entries(args('7050'))) {
+      expect(failure(await toolCall(sender, name, a))).toBe(`${name} failed: chat 7050 is not allowlisted: only the owner allowlists a chat, in the terminal, with /telegram:access`)
+    }
+    expect(calls(dir)).toEqual([])
+    await sender.close()
+  }, 15000)
+
+  test('a groups array allowlists no chat, so a reply makes no call and sends nothing', async () => {
+    const dir = state({ dmPolicy: 'allowlist', allowFrom: ['5'], groups: [{ requireMention: true }, { requireMention: true }], botUsernames: { '1': 'one_peer_bot' } })
+    const sender = start(dir, ['claude', '-p', 'hello'], {
+      TELEGRAM_TEST_USERS: JSON.stringify({ 1: peerBot(1, 'one_peer_bot') }),
+      TELEGRAM_TEST_CHATS: JSON.stringify({ unopened: [1] }),
+    })
+    await sender.ready()
+    expect(failure(await toolCall(sender, 'reply', { chat_id: '1', text: 'x' }))).toBe(
+      'reply failed: chat 1 is not allowlisted: only the owner allowlists a chat, in the terminal, with /telegram:access')
+    expect(calls(dir)).toEqual([])
+    await sender.close()
+  }, 15000)
+
+  test('an allowFrom that is a string admits no id it contains: not outbound, not the bot lookup, not the inbound gate or /start, and no button tap', async () => {
+    const SUB = { id: 23, is_bot: false, first_name: 'Sub', username: 'sub' }
+    const dir = state({
+      dmPolicy: 'allowlist', allowFrom: '1234',
+      // 23 passes the outbound check only as a groups key, so the bot lookup's own check shows.
+      groups: { '23': { requireMention: true, allowFrom: [] } },
+      botUsernames: { '23': 'twenty_three_bot', '34': 'thirty_four_bot' },
+    })
+    const channel = start(dir, fixture.argv, {
+      TELEGRAM_ALERT_CHAT: '23',
+      TELEGRAM_TEST_USERS: JSON.stringify({ 23: peerBot(23, 'twenty_three_bot') }),
+      TELEGRAM_TEST_CHATS: JSON.stringify({ unopened: [23] }),
+    })
+    await channel.ready()
+    await until(() => channel.stderr().includes('polling as'))
+    expect(failure(await toolCall(channel, 'react', { chat_id: '34', message_id: '42', emoji: '👍' }))).toBe(
+      'react failed: chat 34 is not allowlisted: only the owner allowlists a chat, in the terminal, with /telegram:access')
+    expect(failure(await toolCall(channel, 'reply', { chat_id: '234', text: 'x' }))).toContain('chat 234 is not allowlisted')
+    expect(failure(await toolCall(channel, 'reply', { chat_id: '23', text: 'x' }))).toBe(
+      "reply failed: could not tell whether chat 23 is a bot: Call to 'getChatMember' failed! (400: Bad Request: chat not found)")
+    writeFileSync(join(dir, 'inbound.json'), updates(
+      dm(SUB, 11, 'let me in'),
+      dm({ ...SUB, id: 34 }, 12, 'me too'),
+      command({ ...SUB, id: 34 }, 13, 'start'),
+      tap('cb1', SUB, 'perm:allow:abcde'),
+      tap('cb2', SUB, 'permit:p1'),
+    ))
+    await until(() => calls(dir).filter(c => c.method === 'answerCallbackQuery').length === 2, 6000)
+    await Bun.sleep(500)
+    expect(callbackAnswers(dir)).toEqual({ cb1: 'Not authorized.', cb2: 'Not authorized.' })
+    expect(channel.inbound()).toEqual([])
+    expect(answers(channel)).toEqual([])
+    expect(calls(dir).filter(c => c.method === 'getChat' || SENDS.includes(c.method) || c.method === 'editMessageText')).toEqual([])
+    await channel.close()
+  }, 20000)
+
+  test('with an allowFrom that is a string, /status answers no one as paired', async () => {
+    const dir = state({ dmPolicy: 'pairing', allowFrom: '1234', groups: {}, pending: {} })
+    writeFileSync(join(dir, 'inbound.json'), updates(command({ id: 23 }, 1, 'status'), command({ id: 1234 }, 2, 'status')))
+    const channel = start(dir, fixture.argv, { TELEGRAM_ACCESS_MODE: '' })
+    await channel.ready()
+    await until(() => sends(dir).length === 2, 6000)
+    expect(sends(dir).map(c => [c.payload.chat_id, c.payload.text])).toEqual([
+      [23, 'Not paired. Send me a message to get a pairing code.'],
+      [1234, 'Not paired. Send me a message to get a pairing code.'],
+    ])
+    await channel.close()
+  }, 15000)
+
+  test('a group’s own allowFrom of any shape but a list admits no member, and no list or an empty one admits every member, as before', async () => {
+    const open = { requireMention: false }
+    const dir = state({ dmPolicy: 'allowlist', allowFrom: ['1'], groups: {
+      '-100': { ...open, allowFrom: {} }, '-200': { ...open, allowFrom: '5' }, '-300': open, '-400': { ...open, allowFrom: [] },
+      '-500': { ...open, allowFrom: ['5'] }, '-600': { ...open, allowFrom: null }, '-700': { ...open, allowFrom: 5 }, '-800': { ...open, allowFrom: ['6'] },
+    } })
+    const member = { id: 5, is_bot: false, first_name: 'Member', username: 'member' }
+    const post = (chat: number, message_id: number) =>
+      ({ message: { message_id, date: Math.floor(Date.now() / 1000), from: member, chat: { id: chat, type: 'supergroup', title: 'g' }, text: `in ${chat}` } })
+    writeFileSync(join(dir, 'inbound.json'), updates(...[-100, -200, -300, -400, -500, -600, -700, -800].map((chat, i) => post(chat, i + 1)), dm(OWNER, 20, 'sentinel')))
+    const channel = start(dir, fixture.argv)
+    await channel.ready()
+    await until(() => channel.inbound().length === 5, 6000)
+    await Bun.sleep(500)
+    expect(channel.inbound().map(n => n.meta.chat_id).sort()).toEqual(['-300', '-400', '-500', '-600', '1'])
+    await channel.close()
+  }, 15000)
+
+  // A map the owner wrote, odd entries included, which no server write may change.
+  const MAP = { '7002': 'Fresh_PeerBot', '7003': 'peer_bat', '0012': 'x', '7004': { nested: ['a', 1] }, '-5': 'neg_peer_bot' }
+  const expired = { old111: { senderId: '3', chatId: '3', createdAt: 0, expiresAt: 1, replies: 1 } }
+  const read = (dir: string) => JSON.parse(readFileSync(join(dir, 'access.json'), 'utf8'))
+
+  test.each([
+    ['an expired pending code pruned by a message', { dmPolicy: 'allowlist', allowFrom: ['1'], groups: {}, pending: expired }, () => dm(OWNER, 1, 'hello'),
+      (a: any) => Object.keys(a.pending).length === 0],
+    ['an expired pending code pruned by /status', { dmPolicy: 'allowlist', allowFrom: ['1'], groups: {}, pending: expired }, () => command(OWNER, 1, 'status'),
+      (a: any) => Object.keys(a.pending).length === 0],
+    ['a new pairing code', { dmPolicy: 'pairing', allowFrom: ['1'], groups: {}, pending: {} }, () => dm({ id: 2 }, 1, 'hi'),
+      (a: any) => Object.values(a.pending).some((p: any) => p.senderId === '2')],
+    ['a pairing resend', { dmPolicy: 'pairing', allowFrom: ['1'], groups: {}, pending: { abc123: { senderId: '2', chatId: '2', createdAt: Date.now(), expiresAt: Date.now() + 3_600_000, replies: 1 } } },
+      () => dm({ id: 2 }, 1, 'hi again'), (a: any) => a.pending.abc123?.replies === 2],
+  ])('in live mode, %s keeps botUsernames as written', async (_, access, update, written) => {
+    const dir = state({ ...access, botUsernames: MAP })
+    writeFileSync(join(dir, 'inbound.json'), updates(update()))
+    const channel = start(dir, fixture.argv, { TELEGRAM_ACCESS_MODE: '' })
+    await channel.ready()
+    await until(() => written(read(dir)), 6000)
+    expect(read(dir).botUsernames).toEqual(MAP)
+    await channel.close()
+  }, 15000)
+
+  test.each([
+    ['a string', 'Fresh_PeerBot'],
+    ['an array', ['7002', 'Fresh_PeerBot']],
+    ['bad entries', { '7002': 5, x: null, '7003': ['a'], '7004': '@' }],
+  ])('in live mode, a botUsernames that is %s is written back unchanged, with allowFrom intact and no corrupt copy', async (_, map) => {
+    const dir = state({ dmPolicy: 'pairing', allowFrom: ['1', '7002'], groups: {}, pending: {}, botUsernames: map })
+    writeFileSync(join(dir, 'inbound.json'), updates(dm({ id: 2 }, 1, 'hi')))
+    const channel = start(dir, fixture.argv, { TELEGRAM_ACCESS_MODE: '' })
+    await channel.ready()
+    await until(() => Object.keys(read(dir).pending).length === 1, 6000)
+    expect(read(dir).botUsernames).toEqual(map)
+    expect(read(dir).allowFrom).toEqual(['1', '7002'])
+    expect(readdirSync(dir).filter(f => f.includes('.corrupt-'))).toEqual([])
+    await channel.close()
+  }, 15000)
+
+  test('in live mode, a bot added with its username while the server runs is reached without a restart', async () => {
+    const dir = state({ dmPolicy: 'allowlist', allowFrom: ['1'], groups: {}, pending: {} })
+    const sender = start(dir, ['claude', '-p', 'hello'], {
+      TELEGRAM_ACCESS_MODE: '',
+      TELEGRAM_TEST_USERS: JSON.stringify({ 7060: peerBot(7060, 'sixty_peer_bot') }),
+      TELEGRAM_TEST_CHATS: JSON.stringify({ unopened: [7060] }),
+    })
+    await sender.ready()
+    expect(failure(await toolCall(sender, 'reply', { chat_id: '7060', text: 'x' }))).toContain('chat 7060 is not allowlisted')
+    // What the access skill's bot verb writes for 7060.
+    writeFileSync(join(dir, 'access.json'), JSON.stringify({ dmPolicy: 'allowlist', allowFrom: ['1', '7060'], groups: {}, pending: {}, botUsernames: { '7060': 'sixty_peer_bot' } }))
+    expect((await toolCall(sender, 'reply', { chat_id: '7060', text: 'now' })).isError).not.toBe(true)
+    expect(sends(dir).map(c => c.payload.chat_id)).toEqual([at('sixty_peer_bot')])
+    expect(sender.stderr()).toContain(`opened chat 7060 by ${at('sixty_peer_bot')}`)
+    await sender.close()
+  }, 15000)
 })
