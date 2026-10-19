@@ -57,6 +57,9 @@ export function createTextMemory(max = TEXT_MEMORY) {
   }
   return {
     remember,
+    // The text held for the message, or undefined when the memory does not
+    // hold it.
+    get: (chat: string, id: number): string | undefined => texts.get(`${chat}:${id}`),
     // Whether text differs from what Claude last got for the message; if so,
     // it becomes what Claude last got.
     changed(chat: string, id: number, text: string): boolean {

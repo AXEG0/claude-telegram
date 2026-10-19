@@ -500,6 +500,8 @@ export async function sendRich(opts: {
   replyTo: (n: number) => number | undefined
   plainChunks: (text: string) => string[]
   progress: { ids: number[]; done: number; total: number }
+  // Called for each message sent, with the text Claude wrote for it.
+  sent?: (messageId: number, text: string) => void
 }): Promise<void> {
   const { raw, chatId, progress } = opts
   const parts = await richPartsAsync(opts.text)
@@ -513,6 +515,7 @@ export async function sendRich(opts: {
       try {
         const sent = await raw.sendRichMessage({ chat_id: chatId, rich_message: { markdown: part.rich }, ...replyParams() })
         progress.ids.push(sent.message_id)
+        opts.sent?.(sent.message_id, part.plain)
         progress.done++
         continue
       } catch (err) {
@@ -523,6 +526,7 @@ export async function sendRich(opts: {
     for (const text of opts.plainChunks(part.plain)) {
       const sent = await raw.sendMessage({ chat_id: chatId, text, ...replyParams() })
       progress.ids.push(sent.message_id)
+      opts.sent?.(sent.message_id, text)
     }
     progress.done++
   }

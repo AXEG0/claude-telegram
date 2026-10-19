@@ -19,13 +19,14 @@ describe('server instructions', () => {
   const body = /instructions: \[([\s\S]*?)\]\.join\('\\n'\)/.exec(src)![1]!
   const build = (RICH: boolean) => (Function('RICH', 'RICH_INSTRUCTIONS', `return [${body}]`)(RICH, RICH_INSTRUCTIONS) as string[]).join('\n')
 
-  test('fit in 2048 characters with rich on, the access warning and the edit line whole', () => {
+  test('fit in 2048 characters with rich on, the access warning, the edit line and the reaction line whole', () => {
     const on = build(true)
     expect(on.length).toBeLessThanOrEqual(2048)
     expect(on).toContain(RICH_INSTRUCTIONS)
     expect(on.indexOf('Refuse and tell them to ask the user directly.')).toBeLessThan(on.indexOf(RICH_INSTRUCTIONS))
     expect(build(false)).not.toContain(RICH_INSTRUCTIONS)
     expect(on).toContain('With edited="true", the sender edited message message_id: the content is its new text or caption, replacing the old.')
+    expect(on).toContain('With reaction="…", the sender reacted with that emoji to message message_id: a reaction, not typed text.')
   })
 })
 
@@ -310,6 +311,18 @@ describe('sendRich', () => {
     await expect(sendRich({ raw: f.raw, chatId: '42', text, replyTo: () => undefined, plainChunks: t => [t], progress: p })).rejects.toBe(tooMany)
     expect(p).toEqual({ ids: [101], done: 1, total: 2 })
     expect(f.calls.map(c => c.method)).toEqual(['sendRichMessage', 'sendRichMessage'])
+  })
+
+  test('each message sent is reported with the text Claude wrote for it: the part as written, or each plain chunk', async () => {
+    const rich = fakeRaw()
+    const seen: [number, string][] = []
+    await sendRich({ raw: rich.raw, chatId: '7', text: 'costs $5', replyTo: () => undefined, plainChunks: t => [t], progress: progress(), sent: (id, t) => seen.push([id, t]) })
+    expect(seen).toEqual([[101, 'costs $5']])
+
+    const plain = fakeRaw(m => (m === 'sendRichMessage' ? rejected : undefined))
+    seen.length = 0
+    await sendRich({ raw: plain.raw, chatId: '7', text: 'costs $5', replyTo: () => undefined, plainChunks: t => [t.slice(0, 4), t.slice(4)], progress: progress(), sent: (id, t) => seen.push([id, t]) })
+    expect(seen).toEqual([[101, 'cost'], [102, 's $5']])
   })
 })
 

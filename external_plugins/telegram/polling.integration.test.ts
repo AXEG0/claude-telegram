@@ -9,6 +9,7 @@ import { appendPermit, permitDetail, permitFile, permitText, type PermitEvent } 
 import { idleText, NO_OWNER, RECOVERED_TEXT, stuckText } from './alerts.ts'
 import { NO_ASKS } from './asks.ts'
 import { REFRESH_MS } from './typing.ts'
+import { API_CONSTANTS } from 'grammy'
 
 const children: ChildProcessWithoutNullStreams[] = []
 const dirs: string[] = []
@@ -670,6 +671,191 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     await channel.ready()
     await until(() => channel.inbound().length === 2, 6000)
     expect(channel.inbound().map(n => [n.meta.user_id, n.content])).toEqual([['6', 'first'], ['5', 'second, edited']])
+    await channel.close()
+  }, 15000)
+
+  // A sender's reaction on a message, from what it was to what it is now: a
+  // string is a standard emoji, anything else a reaction of another type.
+  const REACTED_AT = Math.floor(Date.now() / 1000)
+  const DM = { id: 1, type: 'private' }
+  const react = (from: { id: number }, chat: object, message_id: number, before: (string | object)[], after: (string | object)[]) => {
+    const types = (list: (string | object)[]) => list.map(r => typeof r === 'string' ? { type: 'emoji', emoji: r } : r)
+    return { message_reaction: { chat, message_id, user: from, date: REACTED_AT, old_reaction: types(before), new_reaction: types(after) } }
+  }
+  const reactedMeta = (message_id: number, reaction: string) =>
+    ({ chat_id: '1', message_id: String(message_id), reaction, user: 'owner', user_id: '1', ts: new Date(REACTED_AT * 1000).toISOString() })
+  // Starts the channel server, has Claude send text to the owner with the
+  // reply tool, and returns the server and the id Telegram gave the message.
+  async function botSent(dir: string, text: string, env: Record<string, string> = {}) {
+    const channel = start(dir, fixture.argv, env)
+    await channel.ready()
+    const result = (await channel.request('tools/call', { name: 'reply', arguments: { chat_id: '1', text } })).result
+    expect(result.isError).not.toBe(true)
+    return { channel, id: Number(/^sent \(id: (\d+)\)$/.exec(result.content[0].text)![1]) }
+  }
+  // Waits for the first event, then long enough for any other to show.
+  async function settled(channel: ReturnType<typeof start>) {
+    await until(() => channel.inbound().length > 0, 6000)
+    await Bun.sleep(500)
+    return channel.inbound()
+  }
+
+  test('the channel server asks Telegram for reactions beside every update type it got before', async () => {
+    const dir = state()
+    const channel = start(dir, fixture.argv)
+    await channel.ready()
+    await until(() => calls(dir).some(c => c.method === 'getUpdates'))
+    const asked = calls(dir).find(c => c.method === 'getUpdates')!.payload.allowed_updates
+    expect(asked).toEqual([...API_CONSTANTS.DEFAULT_UPDATE_TYPES, 'message_reaction'])
+    expect(asked).toEqual(expect.arrayContaining(['message', 'edited_message', 'callback_query']))
+    await channel.close()
+  }, 15000)
+
+  test('an allowed sender’s emoji on a message the bot sent reaches Claude at once as one reaction event, with the message’s opening words', async () => {
+    const dir = state()
+    const { channel, id } = await botSent(dir, 'Deploy finished.\n\nAll checks pass on the branch. Merge?')
+    writeFileSync(join(dir, 'inbound.json'), updates(react(OWNER, DM, id, [], ['👍'])))
+    expect(await settled(channel)).toEqual([
+      { content: `👍 on message ${id}: "Deploy finished. All checks pass on the branch. Merge?"`, meta: reactedMeta(id, '👍') },
+    ])
+    // The reply is the only message sent: a reaction gets no answer of its own.
+    expect(calls(dir).filter(c => c.method === 'sendMessage')).toHaveLength(1)
+    await channel.close()
+  }, 15000)
+
+  test('a stranger’s reaction reaches nothing, and pairs, answers and writes nothing', async () => {
+    // Pairing mode, read live, with an expired pending code: a pairing reply,
+    // or the prune a new message runs, would show.
+    const dir = state({
+      dmPolicy: 'pairing', allowFrom: ['1'], groups: {},
+      pending: { abc123: { senderId: '3', chatId: '3', createdAt: 0, expiresAt: 1, replies: 1 } },
+    })
+    const before = readFileSync(join(dir, 'access.json'), 'utf8')
+    const mtime = statSync(join(dir, 'access.json')).mtimeMs
+    const { channel, id } = await botSent(dir, 'Merge now?', { TELEGRAM_ACCESS_MODE: '' })
+    writeFileSync(join(dir, 'inbound.json'), updates(
+      react({ id: 2, is_bot: false, first_name: 'Stranger' }, { id: 2, type: 'private' }, id, [], ['👍']),
+      // The owner's reaction comes after the stranger's.
+      react(OWNER, DM, id, [], ['🔥']),
+    ))
+    expect((await settled(channel)).map(n => [n.meta.user_id, n.meta.reaction])).toEqual([['1', '🔥']])
+    expect(calls(dir).filter(c => c.method === 'sendMessage').map(c => c.payload.chat_id)).toEqual(['1'])
+    expect(readFileSync(join(dir, 'access.json'), 'utf8')).toBe(before)
+    expect(statSync(join(dir, 'access.json')).mtimeMs).toBe(mtime)
+    await channel.close()
+  }, 15000)
+
+  test('a reaction on a message the sender sent reaches nothing', async () => {
+    const dir = state()
+    const channel = start(dir, fixture.argv)
+    await channel.ready()
+    writeFileSync(join(dir, 'inbound.json'), updates(
+      dm(OWNER, 10, 'ship it'),
+      react(OWNER, DM, 10, [], ['👍']),
+      react(OWNER, DM, 11, [], ['🔥']),
+    ))
+    await until(() => channel.inbound().length === 2, 6000)
+    await Bun.sleep(500)
+    expect(channel.inbound().map(n => [n.meta.message_id, n.meta.reaction ?? n.content])).toEqual([['10', 'ship it'], ['11', '🔥']])
+    await channel.close()
+  }, 15000)
+
+  test('a switch from one emoji to another delivers the new one', async () => {
+    const dir = state()
+    const { channel, id } = await botSent(dir, 'Merge now?')
+    writeFileSync(join(dir, 'inbound.json'), updates(react(OWNER, DM, id, ['👍'], ['👎'])))
+    expect(await settled(channel)).toEqual([{ content: `👎 on message ${id}: "Merge now?"`, meta: reactedMeta(id, '👎') }])
+    await channel.close()
+  }, 15000)
+
+  test('a second emoji beside the first delivers the second alone', async () => {
+    const dir = state()
+    const { channel, id } = await botSent(dir, 'Merge now?')
+    writeFileSync(join(dir, 'inbound.json'), updates(react(OWNER, DM, id, ['👍'], ['👍', '❤'])))
+    expect(await settled(channel)).toEqual([{ content: `❤ on message ${id}: "Merge now?"`, meta: reactedMeta(id, '❤') }])
+    await channel.close()
+  }, 15000)
+
+  test('a bare removal delivers nothing', async () => {
+    const dir = state()
+    const { channel, id } = await botSent(dir, 'Merge now?')
+    writeFileSync(join(dir, 'inbound.json'), updates(
+      react(OWNER, DM, id, ['👍'], []),
+      react(OWNER, DM, id, [], ['🔥']),
+    ))
+    expect((await settled(channel)).map(n => n.meta.reaction)).toEqual(['🔥'])
+    await channel.close()
+  }, 15000)
+
+  test('custom-emoji and paid reactions deliver nothing', async () => {
+    const dir = state()
+    const { channel, id } = await botSent(dir, 'Merge now?')
+    const custom = { type: 'custom_emoji', custom_emoji_id: 'custom-1' }
+    writeFileSync(join(dir, 'inbound.json'), updates(
+      react(OWNER, DM, id, [], [custom]),
+      react(OWNER, DM, id, [custom], [{ type: 'paid' }]),
+      react(OWNER, DM, id, ['👍'], ['👍', custom]),
+      react(OWNER, DM, id, [], ['🔥']),
+    ))
+    expect((await settled(channel)).map(n => n.meta.reaction)).toEqual(['🔥'])
+    await channel.close()
+  }, 15000)
+
+  test('a reaction on a message neither memory holds, such as one sent before the server started, goes by its number alone', async () => {
+    const dir = state()
+    const channel = start(dir, fixture.argv)
+    await channel.ready()
+    writeFileSync(join(dir, 'inbound.json'), updates(react(OWNER, DM, 77, [], ['👍'])))
+    expect(await settled(channel)).toEqual([{ content: '👍 on message 77', meta: reactedMeta(77, '👍') }])
+    await channel.close()
+  }, 15000)
+
+  test('a reaction in a group reaches nothing, even from a member the group admits without a mention', async () => {
+    const dir = state({ dmPolicy: 'allowlist', allowFrom: ['1'], groups: { '-100': { requireMention: false, allowFrom: [] } } })
+    const channel = start(dir, fixture.argv)
+    await channel.ready()
+    writeFileSync(join(dir, 'inbound.json'), updates(
+      react(OWNER, { id: -100, type: 'supergroup', title: 'g' }, 5, [], ['👍']),
+      react(OWNER, DM, 6, [], ['🔥']),
+    ))
+    expect((await settled(channel)).map(n => [n.meta.chat_id, n.meta.reaction])).toEqual([['1', '🔥']])
+    await channel.close()
+  }, 15000)
+
+  test('after edit_message, a reaction on the message quotes its new text', async () => {
+    const dir = state()
+    const { channel, id } = await botSent(dir, 'working…')
+    const edited = (await channel.request('tools/call', { name: 'edit_message', arguments: { chat_id: '1', message_id: String(id), text: 'Done: all checks pass' } })).result
+    expect(edited.isError).not.toBe(true)
+    writeFileSync(join(dir, 'inbound.json'), updates(react(OWNER, DM, id, [], ['👍'])))
+    expect((await settled(channel)).map(n => n.content)).toEqual([`👍 on message ${id}: "Done: all checks pass"`])
+    await channel.close()
+  }, 15000)
+
+  test('with rich messages on, a reaction on a rich reply quotes what Claude wrote', async () => {
+    const dir = state()
+    const { channel, id } = await botSent(dir, '**Deploy** finished', { TELEGRAM_RICH_MESSAGES: 'true' })
+    expect(calls(dir).some(c => c.method === 'sendRichMessage')).toBe(true)
+    writeFileSync(join(dir, 'inbound.json'), updates(react(OWNER, DM, id, [], ['👍'])))
+    expect((await settled(channel)).map(n => n.content)).toEqual([`👍 on message ${id}: "**Deploy** finished"`])
+    await channel.close()
+  }, 15000)
+
+  test('a reaction on a file the bot sent names the file', async () => {
+    const dir = state()
+    mkdirSync(join(dir, 'inbox'))
+    writeFileSync(join(dir, 'inbox', 'chart.png'), 'png')
+    const channel = start(dir, fixture.argv)
+    await channel.ready()
+    const result = (await channel.request('tools/call', { name: 'reply', arguments: { chat_id: '1', text: 'the chart', files: [join(dir, 'inbox', 'chart.png')] } })).result
+    expect(result.isError).not.toBe(true)
+    const photo = calls(dir).find(c => c.method === 'sendPhoto')
+    expect(photo).toBeDefined()
+    // The offline Telegram gives every message the same id, so the photo's
+    // words replace the text's.
+    const id = Number(/^sent 2 parts \(ids: (\d+), \1\)$/.exec(result.content[0].text)![1])
+    writeFileSync(join(dir, 'inbound.json'), updates(react(OWNER, DM, id, [], ['👍'])))
+    expect((await settled(channel)).map(n => n.content)).toEqual([`👍 on message ${id}: "(photo: chart.png)"`])
     await channel.close()
   }, 15000)
 
