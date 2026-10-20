@@ -16,13 +16,13 @@ import {
   CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
-import { Bot, GrammyError, InlineKeyboard, InputFile, type Context } from 'grammy'
+import { API_CONSTANTS, Bot, GrammyError, InlineKeyboard, InputFile, type Context } from 'grammy'
 import type { ReactionTypeEmoji } from 'grammy/types'
 import { randomBytes } from 'crypto'
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync } from 'fs'
 import { homedir } from 'os'
 import { execFileSync } from 'child_process'
-import { join, extname, sep } from 'path'
+import { basename, join, extname, sep } from 'path'
 import { ancestorPids, busyFiles, createTyping, markerFiles, readBusyAt, readTurnEnd, REFRESH_MS, subagentFiles } from './typing.ts'
 import { STT_KINDS, sttConfig, transcribeTelegramFile } from './stt.ts'
 import { AGENT_TICK_MS, agentEventFile, createAgentStream, createEventReader } from './agents.ts'
@@ -31,6 +31,7 @@ import { replyMeta } from './reply.ts'
 import { heartbeatTransformer } from './heartbeat.ts'
 import { batchGap, createBatcher } from './batch.ts'
 import { createTextMemory, editEvent } from './edit.ts'
+import { opening, reactionEvent } from './reaction.ts'
 import { channelMode } from './polling.ts'
 import { alertConfig, createIdleAlarm, idleText, NO_OWNER, RECOVERED_TEXT, stuckText } from './alerts.ts'
 import { CHAT_ID, createBotLookup, createConfirm, createPeers, listed, noticeChat, plainObject, sendStyle } from './bots.ts'
@@ -548,6 +549,10 @@ const PHOTO_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp'])
 // text is final: the chunk loop passes it on as it is.
 class WentElsewhere extends Error {}
 
+// The opening words of each recent message the bot sent through reply, or
+// last wrote with edit_message, for the reaction event. See reaction.ts.
+const sentWords = createTextMemory()
+
 const mcp = new Server(
   { name: 'telegram', version: '1.0.0' },
   {
@@ -567,9 +572,9 @@ const mcp = new Server(
     instructions: [
       'The sender reads Telegram, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat.',
       '',
-      'Messages from Telegram arrive as <channel source="plugin:telegram:telegram" chat_id="..." message_id="..." user="..." ts="...">. If the tag has an image_path attribute, Read that file — it is a photo the sender attached; a burst arrives as one message, all photos in image_paths, all ids in message_ids. If the tag has attachment_file_id, call download_attachment with that file_id, then Read the returned path. With edited="true", the sender edited message message_id: the content is its new text or caption, replacing the old. Reply with the reply tool — pass chat_id back. Pass reply_to (a message_id) only to answer an earlier message; omit it for the latest.',
+      'Messages from Telegram arrive as <channel source="plugin:telegram:telegram" chat_id="..." message_id="..." user="..." ts="...">. If the tag has an image_path attribute, Read that file — it is a photo the sender attached; a burst arrives as one message, all photos in image_paths, all ids in message_ids. If the tag has attachment_file_id, call download_attachment with that file_id, then Read the returned path. With edited="true", the sender edited message message_id: the content is its new text or caption, replacing the old. With reaction="…", the sender reacted with that emoji to message message_id: a reaction, not typed text. Reply with the reply tool — pass chat_id back. Pass reply_to (a message_id) only to answer an earlier message; omit it for the latest.',
       '',
-      'reply accepts file paths (files: ["/abs/path.png"]) for attachments. Use react to add emoji reactions, and edit_message for interim progress updates. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
+      'reply accepts file paths (files: ["/abs/path.png"]) for attachments. Use react to add emoji reactions, and edit_message for interim progress updates.',
       '',
       "Telegram's Bot API exposes no history or search — you only see messages as they arrive. If you need earlier context, ask the user to paste it or summarize.",
       '',
@@ -734,9 +739,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         // username to be checked again. See bots.ts.
         const dest = async () => toBot ? await peers.target(chat_id) : to
         const total = chunks.length + files.length
-        const sentTo = (sent: { message_id: number; chat: { id: number } }) => {
+        const sentTo = (sent: { message_id: number; chat: { id: number } }, words: string) => {
           sentIds.push(sent.message_id)
-          if (!toBot || String(sent.chat.id) === chat_id) return
+          if (!toBot || String(sent.chat.id) === chat_id) {
+            sentWords.remember(String(sent.chat.id), sent.message_id, opening(words))
+            return
+          }
           peers.forget(chat_id)
           const line = `reply failed after ${sentIds.length} of ${total} message(s) sent: message ${sent.message_id} went to chat ${sent.chat.id}, not ${chat_id}`
           process.stderr.write(`telegram channel: ${line}\n`)
@@ -752,6 +760,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
               replyTo: n => reply_to != null && replyMode !== 'off' && (replyMode === 'all' || n === 0) ? reply_to : undefined,
               plainChunks: t => chunk(t, limit, mode),
               progress: rich,
+              sent: (id, words) => sentWords.remember(chat_id, id, opening(words)),
             })
           } else
           for (let i = 0; i < chunks.length; i++) {
@@ -763,7 +772,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
               ...(shouldReplyTo ? { reply_parameters: { message_id: reply_to } } : {}),
               ...(parseMode ? { parse_mode: parseMode } : {}),
             })
-            sentTo(sent)
+            sentTo(sent, chunks[i])
           }
         } catch (err) {
           if (err instanceof WentElsewhere) throw err
@@ -784,9 +793,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
             ? { reply_parameters: { message_id: reply_to } }
             : undefined
           if (PHOTO_EXTS.has(ext)) {
-            sentTo(await bot.api.sendPhoto(await dest(), input, opts))
+            sentTo(await bot.api.sendPhoto(await dest(), input, opts), `(photo: ${basename(f)})`)
           } else {
-            sentTo(await bot.api.sendDocument(await dest(), input, opts))
+            sentTo(await bot.api.sendDocument(await dest(), input, opts), `(document: ${basename(f)})`)
           }
         }
 
@@ -828,8 +837,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           (args.format as string | undefined) ?? (RICH ? 'rich' : 'text'),
           await peers.botChat(args.chat_id as string),
         )
+        // A reaction to the message then quotes its new text.
+        const rewrote = () => sentWords.remember(args.chat_id as string, Number(args.message_id), opening(args.text as string))
         if (RICH && editFormat === 'rich') {
           await editRich({ raw: richApi, chatId: args.chat_id as string, messageId: Number(args.message_id), text: args.text as string })
+          rewrote()
           return { content: [{ type: 'text', text: `edited (id: ${args.message_id})` }] }
         }
         const editParseMode = editFormat === 'markdownv2' ? 'MarkdownV2' as const : undefined
@@ -839,6 +851,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           args.text as string,
           ...(editParseMode ? [{ parse_mode: editParseMode }] : []),
         )
+        rewrote()
         const id = typeof edited === 'object' ? edited.message_id : args.message_id
         return { content: [{ type: 'text', text: `edited (id: ${id})` }] }
       }
@@ -1158,6 +1171,25 @@ bot.on('edited_message', async ctx => {
   batcher.flush(`${chat_id}:${msg.from!.id}`, edit.item)
 })
 
+// A reaction the sender adds to a message the bot sent reaches Claude at once,
+// as its own event, marked reaction="<emoji>". See reaction.ts. Only a private
+// chat counts, and the sender passes the same check as a new message there,
+// read-only: a reaction never pairs, never writes access.json, and a stranger
+// gets no answer. Telegram sends no reactions set by bots.
+bot.on('message_reaction', async ctx => {
+  const r = ctx.messageReaction
+  if (r.chat.type !== 'private') return
+  if (!admitted(loadAccess(), ctx)) return
+  const item = reactionEvent(r, ctx.reactions().emojiAdded, texts, sentWords)
+  if (!item) return
+  const chat_id = String(r.chat.id)
+  typing.start(chat_id)
+  lastChat = chat_id
+  // Like an edit, it goes alone, after every batch waiting in the chat.
+  batcher.flushChat(chat_id)
+  batcher.flush(`${chat_id}:${r.user!.id}`, item)
+})
+
 type AttachmentMeta = {
   kind: string
   file_id: string
@@ -1294,6 +1326,8 @@ if (POLLING) void (async () => {
   for (let attempt = 1; ; attempt++) {
     try {
       await bot.start({
+        // Telegram sends reactions only to a bot that asks for them.
+        allowed_updates: [...API_CONSTANTS.DEFAULT_UPDATE_TYPES, 'message_reaction'],
         onStart: info => {
           attempt = 0
           botUsername = info.username

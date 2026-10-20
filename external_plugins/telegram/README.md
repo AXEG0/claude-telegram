@@ -9,8 +9,9 @@ This is AXEG0's fork of Anthropic's Telegram plugin. It shows typing for the
 whole turn, tells you when Claude may be stuck and when it is back, streams concurrent
 subagents and background shells in one live message, joins a burst of messages
 into one, passes Claude what a message replies to, and passes on the new text
-of a message you edit. It lets Claude talk to another bot, and sends you the
-live message and alerts that would go to that bot. With rich messages on, it sends replies as Telegram rich
+of a message you edit and your reactions to the bot's messages. It lets Claude
+talk to another bot, and sends you the live message and alerts that would go to
+that bot. With rich messages on, it sends replies as Telegram rich
 messages, and with an OpenAI key, it transcribes voice messages. It keeps its
 state in `~/.claude/channels/telegram/`, the same directory as the official
 plugin, so a token and pairing carry over. Run one of the two at a time, as both
@@ -255,6 +256,31 @@ formatting change, so an edit without text or a caption sends nothing, and so
 does one whose text is what Claude last got for that message. The server
 remembers that text for the last 1000 messages since it started; an edit of a
 message outside that memory always goes through.
+
+### Reactions
+
+When you add a reaction to a message the bot sent, it reaches Claude at once as
+an event of its own, never as text you typed. The tag carries the emoji as
+`reaction` and the reacted message's `message_id`, its `ts` is the time of the
+reaction, and the content names the message and quotes its opening words:
+
+```
+<channel source="plugin:telegram:telegram" chat_id="1" message_id="10" reaction="👍" user="owner" user_id="1" ts="2026-10-11T12:06:00.000Z">
+👍 on message 10: "Deploy finished. Merge?"
+</channel>
+```
+
+Only standard emoji you add count: switching 👍 to 👎 sends 👎, adding ❤ beside
+👍 sends ❤, and taking a reaction away sends nothing. Custom-emoji and paid
+reactions send nothing. Reactions count in private chats only, from senders on
+the allowlist, read-only: anyone else's reaction is dropped with no answer and
+no pairing code, and Telegram sends no reactions set by bots.
+
+A reaction on one of your own messages sends nothing, for the last 1000 that
+reached Claude since the server started. The server also remembers the opening
+words of the last 1000 messages it sent with `reply`, as `edit_message` last
+left them; a reaction on a message neither memory holds, such as one sent
+before a restart, names it by its number alone.
 
 ## What the chat shows
 
