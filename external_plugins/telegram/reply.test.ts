@@ -3,19 +3,19 @@ import type { Message } from 'grammy/types'
 import { replyMeta } from './reply.ts'
 
 const user = (id: number, username?: string) => ({ id, is_bot: false, first_name: 'x', ...(username ? { username } : {}) })
-const bot = { id: 7, is_bot: true, first_name: 'Argylle', username: 'argylle_bot' }
+const bot = { id: 7, is_bot: true, first_name: 'Helper', username: 'helper_bot' }
 const chat = { id: 1, type: 'private' as const, first_name: 'x' }
 const msg = (extra: Record<string, unknown>) => ({ message_id: 50, date: 0, chat, from: user(1, 'owner'), text: 'what about this?', ...extra }) as unknown as Message
 
 describe('replyMeta', () => {
   test('nothing for a message that replies to nothing', () => {
-    expect(replyMeta(msg({}), 'argylle_bot')).toEqual({})
+    expect(replyMeta(msg({}), 'helper_bot')).toEqual({})
     expect(replyMeta(undefined)).toEqual({})
   })
 
   test('a reply to the bot: id, sender, text', () => {
     const m = msg({ reply_to_message: { message_id: 40, date: 0, chat, from: bot, text: 'Deploy is done.\nAll green.' } })
-    expect(replyMeta(m, 'argylle_bot')).toEqual({ reply_to_message_id: '40', reply_to_user: 'this bot', reply_to_text: 'Deploy is done. All green.' })
+    expect(replyMeta(m, 'helper_bot')).toEqual({ reply_to_message_id: '40', reply_to_user: 'this bot', reply_to_text: 'Deploy is done. All green.' })
   })
 
   test('the part quoted, as well as the whole', () => {
@@ -35,7 +35,7 @@ describe('replyMeta', () => {
       { type: 'details', summary: 'More', blocks: [{ type: 'pre', text: 'echo hi' }] },
     ] }
     const m = msg({ reply_to_message: { message_id: 40, date: 0, chat, from: bot, rich_message: rich } })
-    expect(replyMeta(m, 'argylle_bot').reply_to_text).toBe('Status path $HOME ok a b item More echo hi')
+    expect(replyMeta(m, 'helper_bot').reply_to_text).toBe('Status path $HOME ok a b item More echo hi')
   })
 
   test('a reply to media without a caption names its kind', () => {

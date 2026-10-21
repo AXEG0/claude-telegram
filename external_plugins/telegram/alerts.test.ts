@@ -12,8 +12,8 @@ describe('alertConfig', () => {
 
   test('the alert chat is the owner chat, with the idle alert at 45 minutes', () => {
     expect(IDLE_MINUTES).toBe(45)
-    expect(alertConfig({ TELEGRAM_ALERT_CHAT: ' 64024129 ' })).toEqual({
-      capMs: 10 * MIN, owner: '64024129', idleMs: 45 * MIN, warnings: [],
+    expect(alertConfig({ TELEGRAM_ALERT_CHAT: ' 3141592 ' })).toEqual({
+      capMs: 10 * MIN, owner: '3141592', idleMs: 45 * MIN, warnings: [],
     })
     expect(alertConfig({ TELEGRAM_ALERT_CHAT: '-1001234' }).owner).toBe('-1001234')
   })

@@ -1,9 +1,9 @@
 {
   "background_bash": {
-    "session_id": "58c1df05-c28f-4da8-b0f5-0f583989ab2d",
-    "transcript_path": "/home/ec2-user/.claude/projects/-var-tmp-argylle-shell-probe-890-work/58c1df05-c28f-4da8-b0f5-0f583989ab2d.jsonl",
-    "cwd": "/var/tmp/argylle/shell-probe-890/work",
-    "prompt_id": "0af12f3d-780d-4229-81da-3f1f6848ee19",
+    "session_id": "sess0001-test-4000-8000-000000000a01",
+    "transcript_path": "/Users/someone/.claude/projects/-srv-probe-shell-probe-890-work/sess0001-test-4000-8000-000000000a01.jsonl",
+    "cwd": "/srv/probe/shell-probe-890/work",
+    "prompt_id": "prom0001-test-4000-8000-000000000b01",
     "permission_mode": "dontAsk",
     "effort": {
       "level": "medium"
@@ -27,10 +27,10 @@
     "duration_ms": 218
   },
   "foreground_bash": {
-    "session_id": "58c1df05-c28f-4da8-b0f5-0f583989ab2d",
-    "transcript_path": "/home/ec2-user/.claude/projects/-var-tmp-argylle-shell-probe-890-work/58c1df05-c28f-4da8-b0f5-0f583989ab2d.jsonl",
-    "cwd": "/var/tmp/argylle/shell-probe-890/work",
-    "prompt_id": "0af12f3d-780d-4229-81da-3f1f6848ee19",
+    "session_id": "sess0001-test-4000-8000-000000000a01",
+    "transcript_path": "/Users/someone/.claude/projects/-srv-probe-shell-probe-890-work/sess0001-test-4000-8000-000000000a01.jsonl",
+    "cwd": "/srv/probe/shell-probe-890/work",
+    "prompt_id": "prom0001-test-4000-8000-000000000b01",
     "permission_mode": "dontAsk",
     "effort": {
       "level": "medium"
@@ -52,10 +52,10 @@
     "duration_ms": 8013
   },
   "task_stop_shell": {
-    "session_id": "58c1df05-c28f-4da8-b0f5-0f583989ab2d",
-    "transcript_path": "/home/ec2-user/.claude/projects/-var-tmp-argylle-shell-probe-890-work/58c1df05-c28f-4da8-b0f5-0f583989ab2d.jsonl",
-    "cwd": "/var/tmp/argylle/shell-probe-890/work",
-    "prompt_id": "0af12f3d-780d-4229-81da-3f1f6848ee19",
+    "session_id": "sess0001-test-4000-8000-000000000a01",
+    "transcript_path": "/Users/someone/.claude/projects/-srv-probe-shell-probe-890-work/sess0001-test-4000-8000-000000000a01.jsonl",
+    "cwd": "/srv/probe/shell-probe-890/work",
+    "prompt_id": "prom0001-test-4000-8000-000000000b01",
     "permission_mode": "dontAsk",
     "effort": {
       "level": "medium"
@@ -75,10 +75,10 @@
     "duration_ms": 3
   },
   "subagent_background_bash": {
-    "session_id": "bb751a00-55a2-4350-a485-34400fefbaa4",
-    "transcript_path": "/home/ec2-user/.claude/projects/-var-tmp-argylle-shell-probe-890-work2/bb751a00-55a2-4350-a485-34400fefbaa4.jsonl",
-    "cwd": "/var/tmp/argylle/shell-probe-890/work2",
-    "prompt_id": "8dd24e4e-2b58-4bdd-86f6-995591de0f60",
+    "session_id": "sess0002-test-4000-8000-000000000a02",
+    "transcript_path": "/Users/someone/.claude/projects/-srv-probe-shell-probe-890-work2/sess0002-test-4000-8000-000000000a02.jsonl",
+    "cwd": "/srv/probe/shell-probe-890/work2",
+    "prompt_id": "prom0002-test-4000-8000-000000000b02",
     "permission_mode": "dontAsk",
     "agent_id": "add97469c200c7229",
     "agent_type": "general-purpose",

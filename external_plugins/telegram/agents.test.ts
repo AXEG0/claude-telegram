@@ -80,7 +80,7 @@ describe('shellEventFromHook', () => {
     const asked: [string, string | undefined][] = []
     const ev = shellEventFromHook(shellHooks.background_bash, 5, (id, session) => { asked.push([id, session]); return `/t/${id}.output` })
     expect(ev).toEqual({ t: 5, event: 'shell_start', task_id: 'bqo62tie2', description: 'Probe failing shell', output: '/t/bqo62tie2.output' })
-    expect(asked).toEqual([['bqo62tie2', '58c1df05-c28f-4da8-b0f5-0f583989ab2d']])
+    expect(asked).toEqual([['bqo62tie2', 'sess0001-test-4000-8000-000000000a01']])
     expect(JSON.stringify(ev)).not.toContain('exit 3')
     expect(shellEventFromHook(shellHooks.subagent_background_bash, 5, id => `/t/${id}.output`))
       .toMatchObject({ event: 'shell_start', task_id: 'b795t6qa7', description: 'Agent shell' })
@@ -817,7 +817,7 @@ describe('hooks/subagent.ts', () => {
     const dir = mkdtempSync(join(tmpdir(), 'agents-'))
     const tmp = mkdtempSync(join(tmpdir(), 'shell-tmp-'))
     const input = shellHooks.background_bash
-    const tasks = join(tmp, `claude-${process.getuid?.() ?? 0}`, '-var-tmp-argylle-shell-probe-890-work', input.session_id, 'tasks')
+    const tasks = join(tmp, `claude-${process.getuid?.() ?? 0}`, '-srv-probe-shell-probe-890-work', input.session_id, 'tasks')
     mkdirSync(tasks, { recursive: true })
     const output = join(tasks, 'bqo62tie2.output')
     writeFileSync(output, '')

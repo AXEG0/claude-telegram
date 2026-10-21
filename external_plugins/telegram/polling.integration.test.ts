@@ -18,7 +18,7 @@ afterEach(cleanup)
 describe.skipIf(process.platform !== 'linux')('polling ownership in the running server', () => {
   test('the channel server tells the owner chat alone what the hook allowed, and See more shows the command', async () => {
     // The allowlist also holds another person and another bot.
-    const dir = state({ dmPolicy: 'allowlist', allowFrom: ['5', '8606571973', '1'] })
+    const dir = state({ dmPolicy: 'allowlist', allowFrom: ['5', '7491000', '1'] })
     const channel = start(dir, fixture.argv, { TELEGRAM_ALERT_CHAT: '1' })
     await channel.ready()
     const ev: PermitEvent = { t: Date.now(), event: 'allowed', tool_name: 'Bash', description: 'Push job archive to rental', command: 'ls -la /w', agent_type: 'general-purpose' }
@@ -192,7 +192,7 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
   }, 20000)
 
   // Another bot on the allowlist, a person who is not the owner, and the owner.
-  const BOT = { id: 8606571973, is_bot: true, first_name: 'Lana', username: 'lana_7491_bot' }
+  const BOT = { id: 7491000, is_bot: true, first_name: 'Peer', username: 'peer_7491_bot' }
   const PERSON = { id: 5, is_bot: false, first_name: 'Manager', username: 'manager' }
   const OWNER = { id: 1, is_bot: false, first_name: 'Owner', username: 'owner' }
   const PEERS = { dmPolicy: 'allowlist', allowFrom: ['1', String(BOT.id), '5'] }
@@ -285,11 +285,11 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     const sent = (text: string) => calls(dir).filter(c => c.method === 'sendMessage' && c.payload.text === text).map(c => c.payload.chat_id)
 
     expect((await reply(String(BOT.id), 'to the bot')).isError).not.toBe(true)
-    expect(sent('to the bot')).toEqual(['@lana_7491_bot'])
+    expect(sent('to the bot')).toEqual([`@${BOT.username}`])
     const before = calls(dir).length
     expect((await reply(String(BOT.id), 'with files', [join(dir, 'inbox', 'chart.png'), join(dir, 'inbox', 'notes.txt')])).isError).not.toBe(true)
     expect(calls(dir).slice(before).filter(c => c.method.startsWith('send')).map(c => [c.method, c.payload.chat_id])).toEqual([
-      ['sendMessage', '@lana_7491_bot'], ['sendPhoto', '@lana_7491_bot'], ['sendDocument', '@lana_7491_bot'],
+      ['sendMessage', `@${BOT.username}`], ['sendPhoto', `@${BOT.username}`], ['sendDocument', `@${BOT.username}`],
     ])
     await reply('5', 'to the person')
     expect(sent('to the person')).toEqual(['5'])
@@ -302,7 +302,7 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     expect(sent('to the group')).toEqual(['-100'])
 
     // The outbound gate reads the id Claude passed, so a username gets past nothing.
-    const byName = await reply('@lana_7491_bot', 'by name')
+    const byName = await reply(`@${BOT.username}`, 'by name')
     expect(byName.isError).toBe(true)
     expect(byName.content[0].text).toContain('not allowlisted')
     // When Telegram will not say whether the chat is a bot's, nothing goes out.
@@ -329,9 +329,9 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     const sent = await sender.request('tools/call', { name: 'reply', arguments: { chat_id: String(BOT.id), text: '**rich** to the bot' } })
     expect(sent.result.isError).not.toBe(true)
     expect(calls(dir).map(c => [c.method, c.payload.chat_id])).toEqual([
-      ['getChatMember', String(BOT.id)], ['sendMessage', '@lana_7491_bot'],
+      ['getChatMember', String(BOT.id)], ['sendMessage', `@${BOT.username}`],
     ])
-    expect(calls(dir)[1]!.payload).toEqual({ chat_id: '@lana_7491_bot', text: '**rich** to the bot' })
+    expect(calls(dir)[1]!.payload).toEqual({ chat_id: `@${BOT.username}`, text: '**rich** to the bot' })
     await sender.close()
   }, 15000)
 
@@ -362,7 +362,7 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
       expect(c.payload.parse_mode).toBeUndefined()
       expect(c.payload.rich_message).toBeUndefined()
     }
-    expect(botCalls.filter(c => c.method === 'sendMessage').map(c => c.payload.chat_id)).toEqual(Array(4).fill('@lana_7491_bot'))
+    expect(botCalls.filter(c => c.method === 'sendMessage').map(c => c.payload.chat_id)).toEqual(Array(4).fill(`@${BOT.username}`))
 
     // A person's chat keeps the format asked for.
     await call('reply', { chat_id: '5', text })

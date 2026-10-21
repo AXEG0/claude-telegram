@@ -3,19 +3,19 @@ import { askOwner, NO_ASKS, ownerAnswers } from './asks.ts'
 
 describe('who gets and answers a permission prompt', () => {
   test('the owner, whose private chat is the owner chat', () => {
-    expect(askOwner('64024129')).toBe('64024129')
-    expect(ownerAnswers('64024129', { id: 64024129 })).toBe(true)
+    expect(askOwner('3141592')).toBe('3141592')
+    expect(ownerAnswers('3141592', { id: 3141592 })).toBe(true)
   })
 
   test('no one else on the allowlist, a person or another bot', () => {
-    expect(ownerAnswers('64024129', { id: 5 })).toBe(false)
-    expect(ownerAnswers('64024129', { id: 8606571973 })).toBe(false)
-    expect(ownerAnswers('64024129', undefined)).toBe(false)
+    expect(ownerAnswers('3141592', { id: 5 })).toBe(false)
+    expect(ownerAnswers('3141592', { id: 7491000 })).toBe(false)
+    expect(ownerAnswers('3141592', undefined)).toBe(false)
   })
 
   test('no one without an owner chat', () => {
     expect(askOwner(undefined)).toBeUndefined()
-    expect(ownerAnswers(undefined, { id: 64024129 })).toBe(false)
+    expect(ownerAnswers(undefined, { id: 3141592 })).toBe(false)
   })
 
   test('no one when the owner chat is a group, which names no user', () => {
