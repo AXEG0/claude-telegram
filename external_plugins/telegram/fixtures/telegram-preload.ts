@@ -60,18 +60,20 @@ let nextId = chats.ids
 // TELEGRAM_TEST_RULES shapes Telegram's answers to calls: each rule matches a
 // call by method, by `has` (texts all in the call's payload as JSON), and by
 // `markup` (whether the call carries a keyboard), for its first `times`
-// matches (every match, if unset). A matched call's answer waits `holdMs`,
+// matches (every match, if unset), after letting its first `skip` matches
+// pass as usual. A matched call's answer waits `holdMs`,
 // then is `error` if set, else the usual answer. The log marks a call a rule
 // refuses with `refused`.
 type Rule = {
   method: string | string[]
   has?: string | string[]
   markup?: boolean
+  skip?: number
   times?: number
   holdMs?: number
   error?: { error_code: number; description: string; parameters?: object }
 }
-const rules = (JSON.parse(process.env.TELEGRAM_TEST_RULES || '[]') as Rule[]).map(rule => ({ rule, used: 0 }))
+const rules = (JSON.parse(process.env.TELEGRAM_TEST_RULES || '[]') as Rule[]).map(rule => ({ rule, seen: 0, used: 0 }))
 function ruleFor(method: string, payload: Record<string, unknown>): Rule | undefined {
   const text = JSON.stringify(payload)
   for (const r of rules) {
@@ -80,6 +82,7 @@ function ruleFor(method: string, payload: Record<string, unknown>): Rule | undef
     if (rule.has !== undefined && ![rule.has].flat().every(h => text.includes(h))) continue
     if (rule.markup !== undefined && (payload.reply_markup !== undefined) !== rule.markup) continue
     if (rule.times !== undefined && r.used >= rule.times) continue
+    if (r.seen++ < (rule.skip ?? 0)) continue
     r.used++
     return rule
   }

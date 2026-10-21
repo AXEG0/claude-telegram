@@ -6,6 +6,7 @@ import { calls, cleanup, deliver, start, state, until, type Call, type Server } 
 import { PASSING_LABELS, REFUSED_LABELS } from './fixtures/labels.ts'
 import { CLOSED, lock, NOT_ON_MESSAGE, PRESS_AGAIN, RECORD_MAX } from './buttons.ts'
 import { appendPermit, permitFile, permitText } from './permit.ts'
+import { AGENT_TICK_MS, agentEventFile, appendAgentEvent } from './agents.ts'
 
 afterEach(cleanup)
 
@@ -436,6 +437,82 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     await srv.close()
   }, 15000)
 
+  test('in a group, a press goes after the batch another member’s text left waiting in the chat', async () => {
+    const GROUP = { id: -100, type: 'supergroup', title: 'g' }
+    const A = { id: 5, is_bot: false, first_name: 'A' }
+    const B = { id: 6, is_bot: false, first_name: 'B' }
+    const dir = state({ dmPolicy: 'allowlist', allowFrom: ['1'], groups: { '-100': { requireMention: false, allowFrom: [] } } })
+    const srv = await channel(dir)
+    const m = Number(/buttons on message (\d+)$/.exec(ok(await tool(srv, 'reply', { chat_id: '-100', text: 'Lunch?', buttons: [['Yes', 'No']] })))![1])
+    deliver(dir, [
+      { message: { message_id: 10, date: now(), from: A, chat: GROUP, text: 'from A, still in its batch' } },
+      press(dir, m, 'Yes', { chat: GROUP, from: B }).update,
+    ])
+    await until(() => srv.inbound().length === 2)
+    expect(srv.inbound().map(n => [n.meta.user_id, n.meta.button ?? n.content])).toEqual([['5', 'from A, still in its batch'], ['6', 'Yes']])
+    await srv.close()
+  }, 15000)
+
+  test('a press starts typing in its chat, a group’s included', async () => {
+    const GROUP = { id: -100, type: 'supergroup', title: 'g' }
+    const dir = state({ dmPolicy: 'allowlist', allowFrom: ['1'], groups: { '-100': { requireMention: true, allowFrom: [] } } })
+    const srv = await channel(dir)
+    const m = Number(/buttons on message (\d+)$/.exec(ok(await tool(srv, 'reply', { chat_id: '-100', text: 'Lunch?', buttons: [['Yes', 'No']] })))![1])
+    const typing = () => calls(dir).filter(c => c.method === 'sendChatAction' && String(c.payload.chat_id) === '-100')
+    expect(typing()).toEqual([])
+    deliver(dir, [press(dir, m, 'Yes', { chat: GROUP, from: { id: 5, is_bot: false, first_name: 'Member' } }).update])
+    await until(() => pressed(srv).length === 1)
+    await until(() => typing().length > 0)
+    await srv.close()
+  }, 15000)
+
+  test('a press in a private chat makes it the last chat, so the subagent message goes there', async () => {
+    const dir = state()
+    const srv = await channel(dir)
+    const m = await ask(srv)
+    deliver(dir, [press(dir, m, 'Yes').update])
+    await until(() => pressed(srv).length === 1)
+    const base = join(dir, 'transcripts')
+    mkdirSync(base)
+    writeFileSync(join(base, 'agent-a1.meta.json'), JSON.stringify({ description: 'After the press' }))
+    appendAgentEvent(agentEventFile(dir, srv.child.pid!), { t: Date.now(), event: 'start', agent_id: 'a1', agent_type: 'general-purpose', agent_base: join(base, 'agent-a1') })
+    const panel = (c: Call) => c.method === 'sendMessage' && c.payload.text?.startsWith('🤖 Subagents')
+    await until(() => calls(dir).some(panel), AGENT_TICK_MS + 4000)
+    expect(calls(dir).find(panel)!.payload.chat_id).toBe('1')
+    await srv.close()
+  }, 15000)
+
+  test('a press that waits for the lock carries the time the server got it', async () => {
+    const dir = state()
+    const srv = await channel(dir)
+    const m = await ask(srv)
+    const release = await lock(join(dir, 'buttons.lock'))
+    deliver(dir, [press(dir, m, 'Yes').update])
+    await until(() => !existsSync(join(dir, 'inbound.json')))
+    // Telegram has handed the press over; the lock holds it for 2 seconds.
+    const handed = Date.now()
+    await Bun.sleep(2000)
+    release()
+    await until(() => pressed(srv).length === 1)
+    expect(Date.parse(pressed(srv)[0].meta.ts)).toBeLessThan(handed + 1000)
+    await srv.close()
+  }, 15000)
+
+  test('a press that came in one round behind another, whose swap Telegram holds, carries the time the server got it', async () => {
+    const dir = state()
+    const srv = await channel(dir, { rules: [{ method: 'editMessageReplyMarkup', times: 1, holdMs: 2000 }] })
+    const first = await ask(srv)
+    const second = await ask(srv, 'Deploy now?')
+    deliver(dir, [press(dir, first, 'Yes').update, press(dir, second, 'No').update])
+    await until(() => !existsSync(join(dir, 'inbound.json')))
+    // Telegram has handed both presses over; the first one's swap takes 2 seconds.
+    const handed = Date.now()
+    await until(() => pressed(srv).length === 2, 8000)
+    expect(pressed(srv).map(n => n.meta.button)).toEqual(['Yes', 'No'])
+    expect(Date.parse(pressed(srv)[1].meta.ts)).toBeLessThan(handed + 1000)
+    await srv.close()
+  }, 15000)
+
   test('a press Telegram returns without the message’s text takes the opening words from what the server sent, else names the message by its number', async () => {
     const dir = state()
     const srv = await channel(dir)
@@ -830,6 +907,14 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     await srv.close()
   }, 25000)
 
+  test('a plain text edit of a message with no buttons that Telegram answers after 11 seconds succeeds, as before', async () => {
+    const dir = state()
+    const srv = await channel(dir, { rules: [{ method: 'editMessageText', holdMs: 11_000 }] })
+    const m = Number(/^sent \(id: (\d+)\)$/.exec(ok(await tool(srv, 'reply', { chat_id: '1', text: 'working' })))![1])
+    expect(ok(await tool(srv, 'edit_message', { chat_id: '1', message_id: String(m), text: 'done' }, 15_000))).toBe(`edited (id: ${m})`)
+    await srv.close()
+  }, 25000)
+
   test('a swap refused with a 400 ends its entry, and the next press gets the closed notice', async () => {
     const dir = state()
     const srv = await channel(dir, { rules: [{ method: 'editMessageReplyMarkup', has: 'disabled', error: { error_code: 400, description: "Bad Request: message can't be edited" } }] })
@@ -896,6 +981,41 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
 
   const ASK = { request_id: 'abcde', tool_name: 'Write', description: 'Write a file', input_preview: '{"file_path":"/w/a.txt"}' }
   const permissionAnswers = (srv: Server) => srv.notifications.filter(n => n.method === 'notifications/claude/channel/permission').map(n => n.params)
+
+  test('Allow, Deny and See more from anyone but the owner, and the notice’s See more from a stranger, get "Not authorized." before the keyboard check', async () => {
+    const dir = state({ dmPolicy: 'allowlist', allowFrom: ['1', '5'] })
+    const srv = await channel(dir, { env: { TELEGRAM_ALERT_CHAT: '1' } })
+    srv.notify('notifications/claude/channel/permission_request', ASK)
+    await until(() => calls(dir).some(c => c.method === 'sendMessage' && c.payload.text === '🔐 Permission: Write'))
+    const PERSON = { id: 5, is_bot: false, first_name: 'Person' }
+    const STRANGER = { id: 6, is_bot: false, first_name: 'Stranger' }
+    // Taps with no keyboard on their message, as a rich body's buttons come.
+    const bare = (id: string, from: { id: number }, data: string) =>
+      ({ id, update: { callback_query: { id, chat_instance: 'c', data, from, message: { message_id: 7, date: now(), chat: { id: from.id, type: 'private' }, text: 'x' } } } })
+    const taps = [
+      bare('cb-allow', PERSON, 'perm:allow:abcde'), bare('cb-deny', PERSON, 'perm:deny:abcde'), bare('cb-more', PERSON, 'perm:more:abcde'),
+      bare('cb-permit', STRANGER, 'permit:p1'),
+    ]
+    deliver(dir, taps.map(t => t.update))
+    await until(() => taps.every(t => t.id in answers(dir)))
+    expect(taps.map(t => answers(dir)[t.id])).toEqual(Array(4).fill('Not authorized.'))
+    expect(permissionAnswers(srv)).toEqual([])
+    await srv.close()
+  }, 15000)
+
+  test('after a poll that completed, the conflict retries count from one again', async () => {
+    const dir = state()
+    const conflict = { error_code: 409, description: 'Conflict: terminated by other getUpdates request' }
+    const srv = start(dir, fixture.argv, envOf({ rules: [
+      { method: 'getUpdates', times: 1, error: conflict },
+      { method: 'getUpdates', skip: 3, times: 1, error: conflict },
+    ] }))
+    await srv.ready()
+    const retries = () => [...srv.stderr().matchAll(/409 Conflict.*retrying in (\d+)s/g)].map(m => m[1])
+    await until(() => retries().length === 2, 10_000)
+    expect(retries()).toEqual(['1', '1'])
+    await srv.close()
+  }, 20000)
 
   test('the owner pressing a button labelled yes abcde settles no permission prompt', async () => {
     const dir = state()

@@ -349,6 +349,16 @@ export function createButtonStore(opts: { file: string; lockFile: string; now?: 
     },
   }
   return {
+    // The record as it stands, read without the lock and changing nothing;
+    // undefined when it cannot be read.
+    peek(): ButtonRecord | undefined {
+      try {
+        const parsed = JSON.parse(readFileSync(opts.file, 'utf8')) as ButtonRecord
+        return Number.isSafeInteger(parsed?.next) && Array.isArray(parsed.entries) && parsed.entries.every(validEntry) ? parsed : undefined
+      } catch (err) {
+        return (err as NodeJS.ErrnoException).code === 'ENOENT' ? { next: now(), entries: [] } : undefined
+      }
+    },
     async withLock<T>(fn: (held: Held) => Promise<T> | T): Promise<T> {
       const release = await lock(opts.lockFile)
       try {

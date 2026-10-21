@@ -134,9 +134,16 @@ let polled = false
 // Set once the server gives up after its conflict retries: a press would then
 // reach whichever process polls.
 let pollingGaveUp = false
+// The time each update arrived, for a press: grammY handles a round's updates
+// one by one, so a press can wait behind another's swap before its handler runs.
+const arrived = new WeakMap<object, number>()
 bot.api.config.use(async (prev, method, payload, signal) => {
   const res = await prev(method, payload, signal)
-  if (method === 'getUpdates' && res.ok) polled = true
+  if (method === 'getUpdates' && res.ok) {
+    polled = true
+    const now = Date.now()
+    for (const update of res.result as object[]) arrived.set(update, now)
+  }
   return res
 })
 
@@ -826,18 +833,33 @@ async function joinKeyboard(chat_id: string, keyboard: number, message_id: numbe
   }
 }
 
+// A Telegram call with no time limit of its own.
+const unlimited = <T>(run: (signal?: AbortSignal) => Promise<T>): Promise<T> => run()
+
 // Sets the message's keyboard to rows (none when undefined or empty) through
-// call, under the lock. Before the call, the record names the new id, or
-// none, as current; the old one comes back if Telegram refuses the change.
+// call. When the call sets buttons, or the record holds the message, it runs
+// under the lock with the 10-second limit: before the call, the record names
+// the new id, or none, as current, and the old one comes back if Telegram
+// refuses the change. Any other edit goes as before, with neither.
 async function changeKeyboard(
   chat_id: string,
   message_id: number,
   rows: string[][] | undefined,
-  call: (markup: Markup | undefined) => Promise<unknown>,
+  call: (markup: Markup | undefined, limit: typeof limited) => Promise<unknown>,
 ): Promise<void> {
+  const setting = rows !== undefined && rows.length > 0
+  const peeked = buttonStore.peek()
+  if (!setting && peeked && !entryOf(peeked, chat_id, message_id)) {
+    try {
+      await call(undefined, unlimited)
+    } catch (err) {
+      // The message already holds what the call asked for.
+      if (!notModified(err)) throw err
+    }
+    return
+  }
   await buttonStore.withLock(async held => {
     const recorded = entryOf(held.read(), chat_id, message_id) !== undefined
-    const setting = rows !== undefined && rows.length > 0
     const touches = setting || recorded
     let change: { keyboard: number | null; was: Entry | undefined } = { keyboard: null, was: undefined }
     if (touches) {
@@ -862,7 +884,7 @@ async function changeKeyboard(
     // A removal that landed ends the entry.
     const landed = () => { if (keyboard === null) settle(rec => drop(rec, chat_id, message_id, null)) }
     try {
-      await call(keyboard !== null ? keyboardOf(rows!, keyboard) : undefined)
+      await call(keyboard !== null ? keyboardOf(rows!, keyboard) : undefined, limited)
     } catch (err) {
       // The message already holds what the call asked for.
       if (notModified(err)) return landed()
@@ -1069,8 +1091,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         if (rows?.length && toBot) throw new Error(BOT_BUTTONS)
         if (text === undefined) {
           // Only the keyboard changes, under a file too.
-          await changeKeyboard(chat_id, message_id, rows!, markup =>
-            limited(signal => bot.api.editMessageReplyMarkup(chat_id, message_id, markup ? { reply_markup: markup as never } : undefined, signal)))
+          await changeKeyboard(chat_id, message_id, rows!, (markup, limit) =>
+            limit(signal => bot.api.editMessageReplyMarkup(chat_id, message_id, markup ? { reply_markup: markup as never } : undefined, signal)))
           return { content: [{ type: 'text', text: `edited (id: ${args.message_id})` }] }
         }
         // An edit in a bot's chat goes plain, like a reply. See bots.ts.
@@ -1081,9 +1103,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const editParseMode = editFormat === 'markdownv2' ? 'MarkdownV2' as const : undefined
         // A text edit carries the keyboard in the same call, its plain
         // fallback included; without buttons the message loses them.
-        await changeKeyboard(chat_id, message_id, rows, markup => richEdit
-          ? editRichParsed({ raw: richApi, chatId: chat_id, messageId: message_id, text, rich: parsed, markup, limit: limited })
-          : limited(signal => bot.api.editMessageText(chat_id, message_id, text, {
+        await changeKeyboard(chat_id, message_id, rows, (markup, limit) => richEdit
+          ? editRichParsed({ raw: richApi, chatId: chat_id, messageId: message_id, text, rich: parsed, markup, limit })
+          : limit(signal => bot.api.editMessageText(chat_id, message_id, text, {
               ...(editParseMode ? { parse_mode: editParseMode } : {}),
               ...(markup ? { reply_markup: markup as never } : {}),
             }, signal)))
@@ -1235,6 +1257,9 @@ bot.command('status', async ctx => {
 // A press never pairs, writes access.json, answers a permission prompt or
 // joins a batch. See buttons.ts.
 async function press(ctx: Context): Promise<void> {
+  // The time the server got the press, before any wait behind other updates
+  // or for the lock.
+  const at = arrived.get(ctx.update) ?? Date.now()
   const q = ctx.callbackQuery!
   const data = q.data!
   let answered = false
@@ -1277,7 +1302,7 @@ async function press(ctx: Context): Promise<void> {
         label,
         from: ctx.from,
         words: words?.trim() ? opening(words) : sentWords.get(chat_id, message_id),
-        at: Date.now(),
+        at,
       })
       // Like a reaction, it goes alone, after every batch waiting in the chat.
       batcher.flushChat(chat_id)
