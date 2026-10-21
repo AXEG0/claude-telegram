@@ -1029,6 +1029,27 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
       ['s', 'editMessageText', 'ok'],
       ['s', 'editMessageReplyMarkup', 'refused'],
     ])
+    // A refusal other than message to edit not found leaves the untaken entry.
+    expect(entryOf(dir, m)).toEqual(expect.objectContaining({ rows: [['Yes', 'No']] }))
+    expect(entryOf(dir, m).taken).toBeUndefined()
+    await s.close()
+    await p.close()
+  }, 20000)
+
+  test('when Telegram answers the keyboard set again with message to edit not found, the text edit fails with that description and the entry ends', async () => {
+    const gone = { error_code: 400, description: 'Bad Request: message to edit not found' }
+    const { dir, p, s, m } = await plainPair([{ ...PLAIN, preMs: 1500 }, { method: 'editMessageReplyMarkup', error: gone }], [{ ...SET, holdMs: 3000 }])
+    const text = tool(s, 'edit_message', { chat_id: '1', message_id: String(m), text: 'PLAIN' })
+    await Bun.sleep(200)
+    const setting = tool(p, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [['Yes', 'No']] })
+    ok(await setting)
+    expect(failed(await text)).toBe(`edit_message failed: the text was edited, but the buttons another call gave message ${m} meanwhile could not be set again: Call to 'editMessageReplyMarkup' failed! (400: Bad Request: message to edit not found)`)
+    expect(editLog(dir, m).map(([who, method, , answer]) => [who, method, answer])).toEqual([
+      ['p', 'editMessageReplyMarkup', 'ok'],
+      ['s', 'editMessageText', 'ok'],
+      ['s', 'editMessageReplyMarkup', 'refused'],
+    ])
+    expect(entryOf(dir, m)).toBeUndefined()
     await s.close()
     await p.close()
   }, 20000)
@@ -1077,6 +1098,18 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     expect(editLog(dir, m)).toEqual([['s', 'editMessageText', 'none', 'ok']])
     await s.close()
     await p.close()
+  }, 30000)
+
+  test('on a state folder that never held buttons, a text edit makes exactly one call, and succeeds with its answer held past 10 seconds', async () => {
+    const dir = state()
+    const srv = await channel(dir, { rules: [{ ...PLAIN, holdMs: 11_000 }] })
+    const m = Number(/^sent \(id: (\d+)\)$/.exec(ok(await tool(srv, 'reply', { chat_id: '1', text: 'working' })))![1])
+    expect(existsSync(join(dir, 'buttons.json'))).toBe(false)
+    expect(ok(await tool(srv, 'edit_message', { chat_id: '1', message_id: String(m), text: 'PLAIN' }, 15_000))).toBe(`edited (id: ${m})`)
+    await Bun.sleep(300)
+    expect(editsOf(dir, m).map(c => [c.method, markupOf(c) ?? 'none', c.refused ?? 'ok'])).toEqual([['editMessageText', 'none', 'ok']])
+    expect(existsSync(join(dir, 'buttons.json'))).toBe(false)
+    await srv.close()
   }, 30000)
 
   test('a removal of buttons from a message the record does not hold runs under the 10-second limit', async () => {
