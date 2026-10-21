@@ -1059,7 +1059,7 @@ describe('createAgentStream', () => {
     expect(h.edits.at(-1)).toBe(final)
   })
 
-  test('with over 100 rows still in the message after its lowest-numbered rows left, the cap shows 100 of them in its order and counts only the rest', async () => {
+  test('with over 100 rows still in the message after its lowest-numbered rows left, the cap shows 100 of them in its order and counts only the rest, and a finished row it held out leaves five minutes after the edit that shows it', async () => {
     const h = harness()
     await h.tick()
     for (let i = 0; i < 110; i++) { h.events.push(shell(h, `s${i}`, `S${i}`)); h.write(`/t/s${i}.output`, '') }
@@ -1073,6 +1073,7 @@ describe('createAgentStream', () => {
     h.advance(CHAT_GAP_MS)
     for (let i = 3; i < 108; i++) h.write(`/t/s${i}.output`, '\n[exited with code 0]\n')
     await h.tick()
+    const secondEnded = h.now()
     await runTo(h, firstEnded + FIVE_MINUTES)
 
     const next = taken(h).find(e => e.at >= firstEnded + FIVE_MINUTES)!
@@ -1088,6 +1089,51 @@ describe('createAgentStream', () => {
     expect(lines.at(-3)).toBe('109. ⏳ shell · S108 · 5m 3s')
     expect(lines.at(-2)).toBe('110. ⏳ shell · S109 · 5m 3s')
     expect(taken(h).some(e => e.at < next.at && e.text.includes('\n4. ✅ Done in 1m 3s · shell · S3'))).toBe(true)
+
+    // Rows 104 to 108 ended with the rest, but the cap held them out of that
+    // edit; their five minutes start from the edit that shows them.
+    const shownAll = taken(h).find(e => e.at > secondEnded)!
+    expect(taken(h).find(e => e.at === secondEnded)!.text).not.toContain('\n104. ')
+    expect(shownAll.text).toContain('\n108. ✅ Done in 1m 3s · shell · S107')
+    await runPast(h, secondEnded)
+    expect(taken(h).find(e => e.at >= secondEnded + FIVE_MINUTES)!.text).toContain('\n104. ✅ Done in 1m 3s · shell · S103')
+    await runPast(h, shownAll.at)
+    expect(taken(h).find(e => e.at >= shownAll.at + FIVE_MINUTES)!.text).not.toContain('\n104. ')
+  })
+
+  test('an ending first carried by the first send leaves five minutes after that send', async () => {
+    const h = harness()
+    await h.tick()
+    h.events.push(shell(h, 'wait', 'Wait for deploy'), shell(h, 'quick', 'Quick check'))
+    h.write('/t/wait.output', '')
+    h.write('/t/quick.output', '\n[exited with code 0]\n')
+    await h.tick()
+    expect(h.sent).toHaveLength(1)
+    expect(h.sent[0]!.text).toContain('\n2. ✅ Done in 0s · shell · Quick check')
+    const sentAt = h.now()
+    await runPast(h, sentAt)
+    expectLeaves(h, 'Quick check', sentAt)
+  })
+
+  test('a finished row whose tokens change while the edit carrying its ending is in flight leaves five minutes after that edit', async () => {
+    const h = harness()
+    await h.tick()
+    h.events.push(shell(h, 'wait', 'Wait for deploy'), start(h, 'a1', { agent_type: 'Ending-agent' }))
+    h.write('/t/wait.output', '')
+    await h.tick()
+    h.advance(CHAT_GAP_MS)
+    h.events.push(stopOf(h, 'a1'))
+    const release = h.holdEdit()
+    await h.tick()
+    expect(h.attempts.at(-1)!.text).toContain('\n2. ✅ Done in 3s · Ending-agent')
+    h.advance(1000)
+    h.write('/s/agent-a1.jsonl', assistant([{ type: 'text', text: 'All done' }], { input_tokens: 1200 }))
+    await h.tick()
+    const answeredAt = h.now()
+    release(); await settled()
+    await runPast(h, answeredAt)
+    expect(taken(h).some(e => e.at > answeredAt && e.text.includes('Ending-agent · 1.2k tokens'))).toBe(true)
+    expectLeaves(h, 'Ending-agent', answeredAt)
   })
 })
 

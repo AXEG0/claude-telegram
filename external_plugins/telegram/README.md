@@ -389,9 +389,9 @@ never the command itself, and its running time. It changes to `✅ Done in …`
 when the shell exits with 0, `❌ Failed after … (exit N)` when it exits with
 another code, and `⏹ Stopped after …` when it is stopped, by TaskStop or by the
 end of the subagent that started it. A finished row leaves the message five
-minutes after the message first shows it finished, so the rows still running
-keep their full length however long the group goes on; a quiet subagent dropped
-after two hours leaves the same way, while running and quiet rows stay. Every
+minutes after the message first shows it finished, so finished rows stop
+taking room from the rows still running; a quiet subagent dropped after two
+hours leaves the same way, while running and quiet rows stay. Every
 row keeps the number it joined with: the numbers of rows that left are not
 reused, a row that joins later takes the next number the message has not used,
 and a subagent resumed after its row left comes back under its old number. Once
