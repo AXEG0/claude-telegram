@@ -2,7 +2,9 @@ name: Close External PRs
 
 on:
   pull_request_target:
-    types: [opened]
+    # check-membership is a required check of main's ruleset, so it runs on every head a
+    # pull request reaches, not only the one it opened with.
+    types: [opened, synchronize, reopened]
 
 permissions:
   pull-requests: write
