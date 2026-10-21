@@ -20,7 +20,7 @@ function processAt(dir: string, pid: number, parent: number, argv: string[], com
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }) })
 
 describe('polling ownership from the server\'s own ancestors', () => {
-  test('the real argylle2 channel argv, through its bun-run wrapper, polls', () => {
+  test('a real channel argv, through its bun-run wrapper, polls', () => {
     const dir = tree()
     processAt(dir, 20, 30, ['bun', 'run', '--cwd', '/plugin', '--silent', 'start'])
     processAt(dir, 30, 1, fixture.argv)
@@ -29,7 +29,7 @@ describe('polling ownership from the server\'s own ancestors', () => {
 
   test.each([
     ['claude', '-p', 'hello'],
-    ['/home/ec2-user/.local/bin/claude', 'mcp', 'list'],
+    ['/Users/someone/.local/bin/claude', 'mcp', 'list'],
     ['claude', '--continue'],
     ['claude', '-p', `explain ${CHANNEL_ENTRY}`],
     ['claude', '--channels=' + CHANNEL_ENTRY],

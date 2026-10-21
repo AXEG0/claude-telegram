@@ -12,7 +12,7 @@ const photo = [{ file_id: 'f', file_unique_id: 'u', width: 1, height: 1 }]
 
 describe('editEvent', () => {
   test('a text edit: the new text under the message id, marked edited, at the edit time', () => {
-    expect(editEvent(edited({ text: 'deploy to prod' }), 'argylle_bot')).toEqual({
+    expect(editEvent(edited({ text: 'deploy to prod' }), 'helper_bot')).toEqual({
       text: 'deploy to prod',
       item: {
         content: 'deploy to prod',
@@ -48,8 +48,8 @@ describe('editEvent', () => {
   })
 
   test('an edited reply keeps what it replies to', () => {
-    const bot = { id: 7, is_bot: true, first_name: 'Argylle', username: 'argylle_bot' }
-    const e = editEvent(edited({ text: 'no, the second', reply_to_message: { message_id: 40, date: 0, chat, from: bot, text: 'Which one?' } }), 'argylle_bot')!
+    const bot = { id: 7, is_bot: true, first_name: 'Helper', username: 'helper_bot' }
+    const e = editEvent(edited({ text: 'no, the second', reply_to_message: { message_id: 40, date: 0, chat, from: bot, text: 'Which one?' } }), 'helper_bot')!
     expect(e.item.meta).toMatchObject({ reply_to_message_id: '40', reply_to_user: 'this bot', reply_to_text: 'Which one?' })
   })
 

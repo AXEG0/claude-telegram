@@ -26,8 +26,8 @@ import { basename, join, extname, sep } from 'path'
 import { ancestorPids, busyFiles, createTyping, markerFiles, readBusyAt, readTurnEnd, REFRESH_MS, subagentFiles } from './typing.ts'
 import { STT_KINDS, sttConfig, transcribeTelegramFile } from './stt.ts'
 import { AGENT_TICK_MS, agentEventFile, createAgentStream, createEventReader } from './agents.ts'
-import { editRich, RICH_FORMAT_HELP, RICH_INSTRUCTIONS, richEnabled, sendRich, type RawApi } from './rich.ts'
-import { replyMeta } from './reply.ts'
+import { editRichParsed, RICH_FORMAT_HELP, RICH_INSTRUCTIONS, richEditParse, richEnabled, sendRich, type RawApi } from './rich.ts'
+import { replyMeta, richText } from './reply.ts'
 import { heartbeatTransformer } from './heartbeat.ts'
 import { batchGap, createBatcher } from './batch.ts'
 import { createTextMemory, editEvent } from './edit.ts'
@@ -37,6 +37,11 @@ import { alertConfig, createIdleAlarm, idleText, NO_OWNER, RECOVERED_TEXT, stuck
 import { CHAT_ID, createBotLookup, createConfirm, createPeers, listed, noticeChat, plainObject, sendStyle } from './bots.ts'
 import { askOwner, NO_ASKS, ownerAnswers } from './asks.ts'
 import { createPermitReader, permitDetail, permitFile, permitText, type PermitEvent } from './permit.ts'
+import {
+  chosen, CLOSED, createButtonStore, drop, GaveUp, judge, join as joinMessage, keyboardOf, keyboardRefused, messageGone,
+  NOT_ON_MESSAGE, notModified, onKeyboard, parseButtonData, parseButtons, PRESS_AGAIN, pressEvent, replace,
+  newKeyboard, entryOf, reserve, restore, take, unreserve, withinLimit, type ButtonRecord, type Entry, type Held, type Markup,
+} from './buttons.ts'
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR
   ?? join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'channels', 'telegram')
@@ -70,6 +75,10 @@ const INBOX_DIR = join(STATE_DIR, 'inbox')
 const PID_FILE = join(STATE_DIR, 'bot.pid')
 // Rewritten after every completed getUpdates; see heartbeat.ts.
 const HEARTBEAT_FILE = join(STATE_DIR, 'poll-heartbeat.json')
+// The answer buttons' record and its lock, shared by every server on the
+// state folder. See buttons.ts.
+const BUTTONS_FILE = join(STATE_DIR, 'buttons.json')
+const BUTTONS_LOCK = join(STATE_DIR, 'buttons.lock')
 const mode = channelMode()
 const POLLING = mode.poll
 if (mode.warning) process.stderr.write(mode.warning)
@@ -119,6 +128,26 @@ let botUsername = ''
 bot.api.config.use(heartbeatTransformer(HEARTBEAT_FILE, process.pid, Date.now, undefined, err => {
   process.stderr.write(`telegram channel: poll heartbeat not written: ${err}\n`)
 }))
+// Whether a getUpdates completed since polling last (re)started, so the
+// conflict retries count only failures in a row.
+let polled = false
+// From a poll that ended in a conflict (409) until a poll completes: a press
+// would then reach whichever process polls.
+let conflicted = false
+// The time each update arrived, for a press: grammY handles a round's updates
+// one by one, so a press can wait behind another's swap before its handler runs.
+const arrived = new WeakMap<object, number>()
+bot.api.config.use(async (prev, method, payload, signal) => {
+  const res = await prev(method, payload, signal)
+  if (method === 'getUpdates' && !res.ok && res.error_code === 409) conflicted = true
+  if (method === 'getUpdates' && res.ok) {
+    polled = true
+    conflicted = false
+    const now = Date.now()
+    for (const update of res.result as object[]) arrived.set(update, now)
+  }
+  return res
+})
 
 // "typing…" for the whole turn, not Telegram's 5 seconds. See typing.ts.
 const ancestors = ancestorPids()
@@ -385,8 +414,9 @@ type GateResult =
   | { action: 'pair'; code: string; isResend: boolean }
 
 // Whether this sender reaches Claude from this chat now, read-only: it neither
-// pairs nor writes access.json. New messages (through gate()) and edits share it.
-function admitted(access: Access, ctx: Context): boolean {
+// pairs nor writes access.json. New messages (through gate()) and edits share
+// it; a button press asks it with no mention needed.
+function admitted(access: Access, ctx: Context, mention = true): boolean {
   if (access.dmPolicy === 'disabled') return false
   const from = ctx.from
   if (!from) return false
@@ -405,7 +435,7 @@ function admitted(access: Access, ctx: Context): boolean {
     // shape admits nobody.
     const anyMember = groupAllowFrom == null || (Array.isArray(groupAllowFrom) && groupAllowFrom.length === 0)
     if (!anyMember && !listed(groupAllowFrom, senderId)) return false
-    if (requireMention && !isMentioned(ctx, access.mentionPatterns)) return false
+    if (mention && requireMention && !isMentioned(ctx, access.mentionPatterns)) return false
     return true
   }
 
@@ -572,9 +602,7 @@ const mcp = new Server(
     instructions: [
       'The sender reads Telegram, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat.',
       '',
-      'Messages from Telegram arrive as <channel source="plugin:telegram:telegram" chat_id="..." message_id="..." user="..." ts="...">. If the tag has an image_path attribute, Read that file — it is a photo the sender attached; a burst arrives as one message, all photos in image_paths, all ids in message_ids. If the tag has attachment_file_id, call download_attachment with that file_id, then Read the returned path. With edited="true", the sender edited message message_id: the content is its new text or caption, replacing the old. With reaction="…", the sender reacted with that emoji to message message_id: a reaction, not typed text. Reply with the reply tool — pass chat_id back. Pass reply_to (a message_id) only to answer an earlier message; omit it for the latest.',
-      '',
-      'reply accepts file paths (files: ["/abs/path.png"]) for attachments. Use react to add emoji reactions, and edit_message for interim progress updates.',
+      'Messages from Telegram arrive as <channel source="plugin:telegram:telegram" chat_id="..." message_id="..." user="..." ts="...">. If the tag has an image_path attribute, Read that file — it is a photo the sender attached; a burst arrives as one message, all photos in image_paths, all ids in message_ids. If the tag has attachment_file_id, call download_attachment with that file_id, then Read the returned path. With edited="true", the sender edited message message_id: the content is its new text or caption, replacing the old. With reaction="…", the sender reacted with that emoji to message message_id: a reaction, not typed text. With button="…", the sender pressed that button under message message_id: a press, not typed text. Reply with the reply tool — pass chat_id back. Pass reply_to (a message_id) only to answer an earlier message; omit it for the latest.',
       '',
       "Telegram's Bot API exposes no history or search — you only see messages as they arrive. If you need earlier context, ask the user to paste it or summarize.",
       '',
@@ -585,6 +613,11 @@ const mcp = new Server(
     ].join('\n'),
   },
 )
+
+const BUTTONS_HELP =
+  'Answer buttons under the last message sent, a text part or a file: 1 to 4 rows of 1 to 4 labels, each 1 to 40 characters, distinct, ' +
+  'with single spaces between words and none of " < > [ ] ;. A press arrives once, as an event with button="<label>", and the buttons then show the choice. ' +
+  'Not in a bot\'s chat, and only in the session that receives Telegram messages.'
 
 // Stores full permission details for "See more" expansion keyed by request_id.
 const pendingPermissions = new Map<string, { tool_name: string; description: string; input_preview: string }>()
@@ -626,7 +659,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'reply',
       description:
-        'Reply on Telegram. Pass chat_id from the inbound message, or the numeric id of an allowlisted chat that has written to this bot, or of a bot the owner added with its username; chat ids are numeric, and only the owner adds another bot, in the terminal, with /telegram:access bot <id> @username. A message to a bot goes to its @username as plain text, whatever the format, and the reply stops at a message Telegram says went to another chat. Optionally pass reply_to (message_id) for threading, and files (absolute paths) to attach images or documents.',
+        'Reply on Telegram. Pass chat_id from the inbound message, or the numeric id of an allowlisted chat that has written to this bot, or of a bot the owner added with its username; chat ids are numeric, and only the owner adds another bot, in the terminal, with /telegram:access bot <id> @username. A message to a bot goes to its @username as plain text, whatever the format, and the reply stops at a message Telegram says went to another chat. Optionally pass reply_to (message_id) for threading, files (absolute paths) to attach images or documents, and buttons for fixed answers the user taps.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -645,6 +678,11 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: 'string',
             enum: RICH ? ['rich', 'text', 'markdownv2'] : ['text', 'markdownv2'],
             description: RICH ? RICH_FORMAT_HELP : "Rendering mode. 'markdownv2' enables Telegram formatting (bold, italic, code, links). Caller must escape special chars per MarkdownV2 rules. Default: 'text' (plain, no escaping needed).",
+          },
+          buttons: {
+            type: 'array',
+            items: { type: 'array', items: { type: 'string' } },
+            description: BUTTONS_HELP,
           },
         },
         required: ['chat_id', 'text'],
@@ -676,7 +714,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'edit_message',
-      description: 'Edit a message the bot previously sent. Useful for interim progress updates. Edits don\'t trigger push notifications — send a new reply when a long task completes so the user\'s device pings.',
+      description: 'Edit a message the bot previously sent. Useful for interim progress updates. Edits don\'t trigger push notifications — send a new reply when a long task completes so the user\'s device pings. Pass text, buttons, or both: with text and no buttons the message loses its buttons; buttons alone change only the buttons, under a file too, and an empty list removes them.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -688,12 +726,222 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
             enum: RICH ? ['rich', 'text', 'markdownv2'] : ['text', 'markdownv2'],
             description: RICH ? RICH_FORMAT_HELP : "Rendering mode. 'markdownv2' enables Telegram formatting (bold, italic, code, links). Caller must escape special chars per MarkdownV2 rules. Default: 'text' (plain, no escaping needed).",
           },
+          buttons: {
+            type: 'array',
+            items: { type: 'array', items: { type: 'string' } },
+            description: `${BUTTONS_HELP} An empty list removes them.`,
+          },
         },
-        required: ['chat_id', 'message_id', 'text'],
+        required: ['chat_id', 'message_id'],
       },
     },
   ],
 }))
+
+// Answer buttons. The record every server on the state folder shares, and
+// the lock it is changed under. See buttons.ts.
+const buttonStore = createButtonStore({
+  file: BUTTONS_FILE,
+  lockFile: BUTTONS_LOCK,
+  log: line => process.stderr.write(`telegram channel: ${line}\n`),
+})
+
+const reason = (err: unknown) => err instanceof Error ? err.message : String(err)
+const logButtons = (line: string) => process.stderr.write(`telegram channel: buttons: ${line}\n`)
+
+// A press reaches whichever process polls, so only the polling server offers
+// buttons. Removing them is allowed anywhere.
+function assertPressesReachHere(): void {
+  if (!POLLING) throw new Error('buttons are refused here: this server does not poll the bot, so a press would reach whichever process polls')
+  if (conflicted) throw new Error('buttons are refused here: a poll of this server ended in a conflict (409) with no poll completed since, so a press would reach whichever process polls')
+}
+const BOT_BUTTONS = "buttons are refused in a bot's chat: a bot cannot press one"
+
+// A Telegram call that replaces, removes or swaps a keyboard, made under the
+// lock: it gives up after 10 seconds, and then may still land.
+const limited = <T>(run: (signal?: AbortSignal) => Promise<T>): Promise<T> => withinLimit(signal => run(signal))
+
+// Swaps the message's keyboard for one disabled button showing the label the
+// record holds, while keyboard is still its current one. Runs under the lock.
+// The entry ends once the swap lands, or Telegram refuses it with a 400 or
+// 403; anything else, a 429 or no answer in time, leaves it pending.
+async function swap(held: Held, chat_id: string, message_id: number, keyboard: number): Promise<void> {
+  const entry = entryOf(held.read(), chat_id, message_id)
+  if (!entry || entry.keyboard !== keyboard || entry.taken === undefined) return
+  const label = entry.taken
+  try {
+    await limited(signal => bot.api.editMessageReplyMarkup(chat_id, message_id, { reply_markup: chosen(label) as never }, signal))
+  } catch (err) {
+    const code = (err as { error_code?: number }).error_code
+    const ends = notModified(err) || code === 400 || code === 403
+    logButtons(`swap on message ${message_id} in chat ${chat_id} ${ends ? 'refused, its entry ends' : 'still pending'}: ${reason(err)}`)
+    if (!ends) return
+  }
+  try {
+    held.update(rec => drop(rec, chat_id, message_id, keyboard))
+  } catch (err) {
+    logButtons(`could not end the entry of message ${message_id} in chat ${chat_id}: ${reason(err)}`)
+  }
+}
+
+// The polling server retries every pending swap when it starts.
+async function retryPendingSwaps(): Promise<void> {
+  try {
+    const pending = await buttonStore.withLock(held => held.read().entries.filter(e => e.taken !== undefined && e.message !== undefined))
+    for (const e of pending) await buttonStore.withLock(held => swap(held, e.chat, e.message!, e.keyboard!))
+  } catch (err) {
+    logButtons(`pending swaps not retried: ${reason(err)}`)
+  }
+}
+
+async function unreserveKeyboard(chat_id: string, keyboard: number): Promise<void> {
+  try {
+    await buttonStore.withLock(held => held.update(rec => unreserve(rec, chat_id, keyboard)))
+  } catch (err) {
+    logButtons(`reservation ${keyboard} in chat ${chat_id} not dropped: ${reason(err)}`)
+  }
+}
+
+// Joins the message id to the reply's reservation, unless a press joined it
+// first. If that cannot be written, the reply removes the keyboard it sent and
+// fails.
+async function joinKeyboard(chat_id: string, keyboard: number, message_id: number, sentIds: number[]): Promise<void> {
+  let why: string | undefined
+  const remove = async () => {
+    try {
+      await limited(signal => bot.api.editMessageReplyMarkup(chat_id, message_id, undefined, signal))
+      return `so they were removed from message ${message_id}`
+    } catch (err) {
+      return `and removing them from message ${message_id} failed too (${reason(err)})`
+    }
+  }
+  let removed: string | undefined
+  try {
+    await buttonStore.withLock(async held => {
+      try {
+        held.update(rec => joinMessage(rec, chat_id, keyboard, message_id))
+      } catch (err) {
+        why = reason(err)
+        removed = await remove()
+      }
+    })
+  } catch (err) {
+    // The lock itself could not be taken.
+    why = reason(err)
+    removed = await remove()
+  }
+  if (why !== undefined) {
+    throw new Error(`sent (ids: ${sentIds.join(', ')}), but could not record the buttons, ${removed}: ${why}`)
+  }
+}
+
+// After a text edit without buttons of a message the record did not hold,
+// once its call ends, answered or not: if the record holds the message now,
+// another call gave it buttons meanwhile, which the text edit removed if it
+// reached Telegram second. Under the lock, a
+// taken keyboard gets its swap and an untaken one is set again, so the
+// message ends with what the record holds.
+async function textEditDone(chat_id: string, message_id: number): Promise<void> {
+  const after = buttonStore.peek()
+  if (after && !entryOf(after, chat_id, message_id)) return
+  await buttonStore.withLock(async held => {
+    const entry = entryOf(held.read(), chat_id, message_id)
+    if (!entry || entry.keyboard === null) return
+    if (entry.taken !== undefined) return swap(held, chat_id, message_id, entry.keyboard)
+    if (!entry.rows) return
+    const markup = keyboardOf(entry.rows, entry.keyboard)
+    try {
+      await limited(signal => bot.api.editMessageReplyMarkup(chat_id, message_id, { reply_markup: markup as never }, signal))
+    } catch (err) {
+      if (notModified(err)) return
+      if (messageGone(err)) {
+        try {
+          held.update(rec => drop(rec, chat_id, message_id))
+        } catch (e) {
+          logButtons(`could not end the entry of message ${message_id} in chat ${chat_id}: ${reason(e)}`)
+        }
+      }
+      throw new Error(`the buttons another call gave message ${message_id} meanwhile could not be set again: ${reason(err)}`)
+    }
+  })
+}
+
+// A Telegram call with no time limit of its own.
+const unlimited = <T>(run: (signal?: AbortSignal) => Promise<T>): Promise<T> => run()
+
+// Sets the message's keyboard to rows (none when undefined or empty) through
+// call. A text edit without buttons of a message the record does not hold
+// goes as before, with neither the lock nor the 10-second limit, then mends
+// what it may have removed: see textEditDone. Every other edit runs under the
+// lock with the limit: before the call, the record names the new id, or none,
+// as current, and the old one comes back if Telegram refuses the change.
+async function changeKeyboard(
+  chat_id: string,
+  message_id: number,
+  rows: string[][] | undefined,
+  call: (markup: Markup | undefined, limit: typeof limited) => Promise<unknown>,
+): Promise<void> {
+  const setting = rows !== undefined && rows.length > 0
+  const peeked = buttonStore.peek()
+  if (rows === undefined && peeked && !entryOf(peeked, chat_id, message_id)) {
+    let failed: unknown
+    try {
+      await call(undefined, unlimited)
+    } catch (err) {
+      // "Message is not modified": the message already holds what the call asked for.
+      if (!notModified(err)) failed = err
+    }
+    // Answered or not, the text edit may have landed.
+    try {
+      await textEditDone(chat_id, message_id)
+    } catch (err) {
+      throw new Error(failed === undefined ? `the text was edited, but ${reason(err)}` : `${reason(failed)}; and ${reason(err)}`)
+    }
+    if (failed !== undefined) throw failed
+    return
+  }
+  await buttonStore.withLock(async held => {
+    const recorded = entryOf(held.read(), chat_id, message_id) !== undefined
+    const touches = setting || recorded
+    let change: { keyboard: number | null; was: Entry | undefined } = { keyboard: null, was: undefined }
+    if (touches) {
+      try {
+        change = held.update(rec => {
+          const keyboard = setting ? newKeyboard(rec) : null
+          return { keyboard, was: replace(rec, chat_id, message_id, keyboard, setting ? rows : undefined) }
+        })
+      } catch (err) {
+        throw new Error(`could not record the buttons, so nothing was edited: ${reason(err)}`)
+      }
+    }
+    const { keyboard, was } = change
+    const settle = (change: (rec: ButtonRecord) => unknown) => {
+      if (!touches) return
+      try {
+        held.update(change)
+      } catch (err) {
+        logButtons(`record not updated after the edit of message ${message_id} in chat ${chat_id}: ${reason(err)}`)
+      }
+    }
+    // A removal that landed ends the entry.
+    const landed = () => { if (keyboard === null) settle(rec => drop(rec, chat_id, message_id, null)) }
+    try {
+      await call(keyboard !== null ? keyboardOf(rows!, keyboard) : undefined, limited)
+    } catch (err) {
+      // The message already holds what the call asked for.
+      if (notModified(err)) return landed()
+      // Counts as not refused: the new keyboard, or none, stays current.
+      if (err instanceof GaveUp) {
+        landed()
+        throw err
+      }
+      if (messageGone(err)) settle(rec => drop(rec, chat_id, message_id))
+      else settle(rec => restore(rec, chat_id, message_id, was))
+      throw err
+    }
+    landed()
+  })
+}
 
 mcp.setRequestHandler(CallToolRequestSchema, async req => {
   // A tool call means Claude is running again, e.g. after a prompt answered in the terminal.
@@ -708,6 +956,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const reply_to = args.reply_to != null ? Number(args.reply_to) : undefined
         const files = (args.files as string[] | undefined) ?? []
         const format = (args.format as string | undefined) ?? (RICH ? 'rich' : 'text')
+        const rows = args.buttons !== undefined ? parseButtons(args.buttons, false) : undefined
+        if (rows) assertPressesReachHere()
 
         assertAllowedChat(chat_id)
 
@@ -723,6 +973,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         // format Claude asked for aside. See bots.ts.
         const to = await peers.target(chat_id)
         const toBot = await peers.botChat(chat_id)
+        if (rows && toBot) throw new Error(BOT_BUTTONS)
         const style = sendStyle(format, toBot)
         const parseMode = style === 'markdownv2' ? 'MarkdownV2' as const : undefined
 
@@ -739,6 +990,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         // username to be checked again. See bots.ts.
         const dest = async () => toBot ? await peers.target(chat_id) : to
         const total = chunks.length + files.length
+        const ids = () => sentIds.length ? ` (ids: ${sentIds.join(', ')})` : ''
         const sentTo = (sent: { message_id: number; chat: { id: number } }, words: string) => {
           sentIds.push(sent.message_id)
           if (!toBot || String(sent.chat.id) === chat_id) {
@@ -746,63 +998,101 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
             return
           }
           peers.forget(chat_id)
-          const line = `reply failed after ${sentIds.length} of ${total} message(s) sent: message ${sent.message_id} went to chat ${sent.chat.id}, not ${chat_id}`
+          const line = `reply failed after ${sentIds.length} of ${total} message(s) sent${ids()}: message ${sent.message_id} went to chat ${sent.chat.id}, not ${chat_id}`
           process.stderr.write(`telegram channel: ${line}\n`)
           throw new WentElsewhere(line)
         }
 
+        // The keyboard goes on the last message sent, a text part or a file,
+        // under an id reserved for the chat before anything is sent.
+        let keyboard: number | undefined
+        if (rows) {
+          try {
+            keyboard = await buttonStore.withLock(held => held.update(rec => reserve(rec, chat_id, rows)))
+          } catch (err) {
+            throw new Error(`could not record the buttons, so nothing was sent: ${reason(err)}`)
+          }
+        }
+        const markup = rows && keyboard !== undefined ? keyboardOf(rows, keyboard) : undefined
+        const textMarkup = files.length === 0 ? markup : undefined
+        // The message carrying the keyboard, once Telegram has it.
+        let carrier: number | undefined
+
         try {
-          if (rich) {
-            await sendRich({
-              raw: richApi,
-              chatId: to,
-              text,
-              replyTo: n => reply_to != null && replyMode !== 'off' && (replyMode === 'all' || n === 0) ? reply_to : undefined,
-              plainChunks: t => chunk(t, limit, mode),
-              progress: rich,
-              sent: (id, words) => sentWords.remember(chat_id, id, opening(words)),
-            })
-          } else
-          for (let i = 0; i < chunks.length; i++) {
-            const shouldReplyTo =
-              reply_to != null &&
-              replyMode !== 'off' &&
-              (replyMode === 'all' || i === 0)
-            const sent = await bot.api.sendMessage(await dest(), chunks[i], {
-              ...(shouldReplyTo ? { reply_parameters: { message_id: reply_to } } : {}),
-              ...(parseMode ? { parse_mode: parseMode } : {}),
-            })
-            sentTo(sent, chunks[i])
+          try {
+            if (rich) {
+              await sendRich({
+                raw: richApi,
+                chatId: to,
+                text,
+                replyTo: n => reply_to != null && replyMode !== 'off' && (replyMode === 'all' || n === 0) ? reply_to : undefined,
+                plainChunks: t => chunk(t, limit, mode),
+                progress: rich,
+                sent: (id, words) => sentWords.remember(chat_id, id, opening(words)),
+                markup: textMarkup,
+              })
+              if (textMarkup) carrier = sentIds.at(-1)
+            } else
+            for (let i = 0; i < chunks.length; i++) {
+              const shouldReplyTo =
+                reply_to != null &&
+                replyMode !== 'off' &&
+                (replyMode === 'all' || i === 0)
+              const withKeyboard = textMarkup && i === chunks.length - 1
+              const sent = await bot.api.sendMessage(await dest(), chunks[i], {
+                ...(shouldReplyTo ? { reply_parameters: { message_id: reply_to } } : {}),
+                ...(parseMode ? { parse_mode: parseMode } : {}),
+                ...(withKeyboard ? { reply_markup: textMarkup as never } : {}),
+              })
+              sentTo(sent, chunks[i])
+              if (withKeyboard) carrier = sent.message_id
+            }
+          } catch (err) {
+            if (err instanceof WentElsewhere) throw err
+            const msg = err instanceof Error ? err.message : String(err)
+            throw new Error(
+              rich
+                ? `reply failed after ${rich.done} of ${rich.total} part(s) sent${ids()}: ${msg}`
+                : `reply failed after ${sentIds.length} of ${chunks.length} chunk(s) sent${ids()}: ${msg}`,
+            )
+          }
+
+          // Files go as separate messages (Telegram doesn't mix text+file in one
+          // sendMessage call). Thread under reply_to if present.
+          for (let k = 0; k < files.length; k++) {
+            const f = files[k]!
+            const ext = extname(f).toLowerCase()
+            const input = new InputFile(f)
+            const withKeyboard = markup && k === files.length - 1
+            const opts = reply_to != null && replyMode !== 'off' || withKeyboard
+              ? {
+                  ...(reply_to != null && replyMode !== 'off' ? { reply_parameters: { message_id: reply_to } } : {}),
+                  ...(withKeyboard ? { reply_markup: markup as never } : {}),
+                }
+              : undefined
+            const photo = PHOTO_EXTS.has(ext)
+            let sent: { message_id: number; chat: { id: number } }
+            try {
+              sent = photo ? await bot.api.sendPhoto(await dest(), input, opts) : await bot.api.sendDocument(await dest(), input, opts)
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : String(err)
+              throw new Error(`reply failed after ${sentIds.length} of ${sentIds.length + files.length - k} message(s) sent${ids()}: ${msg}`)
+            }
+            sentTo(sent, photo ? `(photo: ${basename(f)})` : `(document: ${basename(f)})`)
+            if (withKeyboard) carrier = sent.message_id
           }
         } catch (err) {
-          if (err instanceof WentElsewhere) throw err
-          const msg = err instanceof Error ? err.message : String(err)
-          throw new Error(
-            rich
-              ? `reply failed after ${rich.done} of ${rich.total} part(s) sent (${sentIds.length} message(s)): ${msg}`
-              : `reply failed after ${sentIds.length} of ${chunks.length} chunk(s) sent: ${msg}`,
-          )
+          // A reply that sends no keyboard drops its reservation.
+          if (keyboard !== undefined && carrier === undefined) await unreserveKeyboard(chat_id, keyboard)
+          throw err
         }
-
-        // Files go as separate messages (Telegram doesn't mix text+file in one
-        // sendMessage call). Thread under reply_to if present.
-        for (const f of files) {
-          const ext = extname(f).toLowerCase()
-          const input = new InputFile(f)
-          const opts = reply_to != null && replyMode !== 'off'
-            ? { reply_parameters: { message_id: reply_to } }
-            : undefined
-          if (PHOTO_EXTS.has(ext)) {
-            sentTo(await bot.api.sendPhoto(await dest(), input, opts), `(photo: ${basename(f)})`)
-          } else {
-            sentTo(await bot.api.sendDocument(await dest(), input, opts), `(document: ${basename(f)})`)
-          }
-        }
+        if (keyboard !== undefined && carrier !== undefined) await joinKeyboard(chat_id, keyboard, carrier, sentIds)
 
         const result =
-          sentIds.length === 1
+          (sentIds.length === 1
             ? `sent (id: ${sentIds[0]})`
-            : `sent ${sentIds.length} parts (ids: ${sentIds.join(', ')})`
+            : `sent ${sentIds.length} parts (ids: ${sentIds.join(', ')})`) +
+          (carrier !== undefined ? `; buttons on message ${carrier}` : '')
         return { content: [{ type: 'text', text: result }] }
       }
       case 'react': {
@@ -831,29 +1121,39 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         return { content: [{ type: 'text', text: path }] }
       }
       case 'edit_message': {
-        assertAllowedChat(args.chat_id as string)
-        // An edit in a bot's chat goes plain, like a reply. See bots.ts.
-        const editFormat = sendStyle(
-          (args.format as string | undefined) ?? (RICH ? 'rich' : 'text'),
-          await peers.botChat(args.chat_id as string),
-        )
-        // A reaction to the message then quotes its new text.
-        const rewrote = () => sentWords.remember(args.chat_id as string, Number(args.message_id), opening(args.text as string))
-        if (RICH && editFormat === 'rich') {
-          await editRich({ raw: richApi, chatId: args.chat_id as string, messageId: Number(args.message_id), text: args.text as string })
-          rewrote()
+        const chat_id = args.chat_id as string
+        const message_id = Number(args.message_id)
+        const text = args.text as string | undefined
+        if (text === undefined && args.buttons === undefined) throw new Error('pass text, buttons, or both')
+        // An empty list removes the buttons, which is allowed anywhere.
+        const rows = args.buttons !== undefined ? parseButtons(args.buttons, true) : undefined
+        if (rows?.length) assertPressesReachHere()
+        assertAllowedChat(chat_id)
+        const toBot = await peers.botChat(chat_id)
+        if (rows?.length && toBot) throw new Error(BOT_BUTTONS)
+        if (text === undefined) {
+          // Only the keyboard changes, under a file too.
+          await changeKeyboard(chat_id, message_id, rows!, (markup, limit) =>
+            limit(signal => bot.api.editMessageReplyMarkup(chat_id, message_id, markup ? { reply_markup: markup as never } : undefined, signal)))
           return { content: [{ type: 'text', text: `edited (id: ${args.message_id})` }] }
         }
+        // An edit in a bot's chat goes plain, like a reply. See bots.ts.
+        const editFormat = sendStyle((args.format as string | undefined) ?? (RICH ? 'rich' : 'text'), toBot)
+        // The rich parse runs before the lock is taken.
+        const richEdit = RICH && editFormat === 'rich'
+        const parsed = richEdit ? await richEditParse(text) : undefined
         const editParseMode = editFormat === 'markdownv2' ? 'MarkdownV2' as const : undefined
-        const edited = await bot.api.editMessageText(
-          args.chat_id as string,
-          Number(args.message_id),
-          args.text as string,
-          ...(editParseMode ? [{ parse_mode: editParseMode }] : []),
-        )
-        rewrote()
-        const id = typeof edited === 'object' ? edited.message_id : args.message_id
-        return { content: [{ type: 'text', text: `edited (id: ${id})` }] }
+        // A text edit carries the keyboard in the same call, its plain
+        // fallback included; without buttons the message loses them.
+        await changeKeyboard(chat_id, message_id, rows, (markup, limit) => richEdit
+          ? editRichParsed({ raw: richApi, chatId: chat_id, messageId: message_id, text, rich: parsed, markup, limit })
+          : limit(signal => bot.api.editMessageText(chat_id, message_id, text, {
+              ...(editParseMode ? { parse_mode: editParseMode } : {}),
+              ...(markup ? { reply_markup: markup as never } : {}),
+            }, signal)))
+        // A reaction to the message then quotes its new text.
+        sentWords.remember(chat_id, message_id, opening(text))
+        return { content: [{ type: 'text', text: `edited (id: ${args.message_id})` }] }
       }
       default:
         return {
@@ -876,6 +1176,19 @@ await mcp.connect(new StdioServerTransport())
 // the bot keeps polling forever as a zombie, holding the token and blocking
 // the next session with 409 Conflict.
 let shuttingDown = false
+// The polling loop, which ends once grammY has worked through its batch.
+let pollLoop: Promise<void> = Promise.resolve()
+// Presses being judged, and press answers still on their way, which shutdown
+// waits for within its 2-second limit.
+const pressing = new Set<Promise<unknown>>()
+const tracked = <T>(p: Promise<T>): Promise<T> => {
+  pressing.add(p)
+  void p.finally(() => pressing.delete(p)).catch(() => {})
+  return p
+}
+// Whether the session's connection still takes a press: its MCP input is open.
+const inputOpen = () => !shuttingDown && !process.stdin.destroyed && !process.stdin.readableEnded
+
 // A burst from one sender reaches Claude as one message. See batch.ts.
 const batcher = createBatcher({
   deliver: ({ content, meta }) => mcp.notification({
@@ -903,8 +1216,12 @@ function shutdown(): void {
   // may take up to its long-poll timeout to return. Force-exit after 2s.
   setTimeout(() => process.exit(0), 2000)
   // Messages still waiting in a batch go now: Telegram has counted them delivered.
+  // grammY then works through the batch it fetched, and a press in it gets
+  // the notice to press again, whose answer goes out before the exit.
   void batcher.flushAll()
     .then(() => { if (POLLING && bot.isRunning()) bot.stop() })
+    .then(() => pollLoop)
+    .then(async () => { while (pressing.size > 0) await Promise.allSettled([...pressing]) })
     .finally(() => process.exit(0))
 }
 process.stdin.on('end', shutdown)
@@ -972,18 +1289,100 @@ bot.command('status', async ctx => {
   await ctx.reply(`Not paired. Send me a message to get a pairing code.`)
 })
 
-// Inline-button handler for permission requests. Callback data is
-// `perm:allow:<id>`, `perm:deny:<id>`, or `perm:more:<id>`, and
-// `permit:<id>` for a notice's See more.
+// A press on an answer button. It counts only when its data is on the
+// message's own keyboard, from a sender the chat admits as it would a new
+// message with no mention needed, never a bot, and when the record holds its
+// message with that keyboard current and untaken, or a reservation for its
+// chat with that keyboard, which the press joins. The take is recorded before
+// the press is handed to the session, in one step with nothing awaited
+// between, then the keyboard becomes one disabled button showing the choice.
+// A press never pairs, writes access.json, answers a permission prompt or
+// joins a batch. See buttons.ts.
+async function press(ctx: Context): Promise<void> {
+  // The time the server got the press, before any wait behind other updates
+  // or for the lock.
+  const at = arrived.get(ctx.update) ?? Date.now()
+  const q = ctx.callbackQuery!
+  const data = q.data!
+  let answered = false
+  // Every press is answered once it is judged; nothing waits on the answer.
+  const answer = (text?: string) => {
+    if (answered) return
+    answered = true
+    void tracked(ctx.answerCallbackQuery(text ? { text } : undefined).catch(err => {
+      logButtons(`press answer not sent: ${reason(err)}`)
+    }))
+  }
+  const button = parseButtonData(data)!
+  const msg = q.message
+  const label = onKeyboard(msg, data)
+  if (!msg || label === undefined) return answer(NOT_ON_MESSAGE)
+  if (ctx.from.is_bot || !admitted(loadAccess(), ctx, false)) return answer()
+  const chat_id = String(msg.chat.id)
+  const message_id = msg.message_id
+  try {
+    await buttonStore.withLock(async held => {
+      const verdict = judge(held.read(), chat_id, message_id, button.keyboard)
+      if (verdict === 'closed') return answer(CLOSED)
+      if (verdict === 'taken') {
+        // The swap that should have shown the choice, again.
+        answer(CLOSED)
+        return swap(held, chat_id, message_id, button.keyboard)
+      }
+      // From here to the hand-over, nothing is awaited.
+      if (!inputOpen()) return answer(PRESS_AGAIN)
+      try {
+        if (!held.update(rec => take(rec, chat_id, message_id, button.keyboard, label))) return answer(CLOSED)
+      } catch (err) {
+        logButtons(`press on message ${message_id} in chat ${chat_id} not recorded: ${reason(err)}`)
+        return answer(PRESS_AGAIN)
+      }
+      const words = msg.text ?? msg.caption ?? richText(msg)
+      const item = pressEvent({
+        chat_id,
+        message_id,
+        label,
+        from: ctx.from,
+        words: words?.trim() ? opening(words) : sentWords.get(chat_id, message_id),
+        at,
+      })
+      // Like a reaction, it goes alone, after every batch waiting in the chat.
+      batcher.flushChat(chat_id)
+      batcher.flush(`${chat_id}:${ctx.from.id}`, item)
+      answer()
+      typing.start(chat_id)
+      if (msg.chat.type === 'private') lastChat = chat_id
+      await swap(held, chat_id, message_id, button.keyboard)
+    })
+  } catch (err) {
+    logButtons(`press on message ${message_id} in chat ${chat_id} not judged: ${reason(err)}`)
+    answer(PRESS_AGAIN)
+  }
+}
+
+// Inline-button handler for answer buttons, and for permission requests.
+// Permission callback data is `perm:allow:<id>`, `perm:deny:<id>`, or
+// `perm:more:<id>`, and `permit:<id>` for a notice's See more.
 // Security mirrors the text-reply path: a permission button answers only the
 // owner, who must also be on allowFrom (see asks.ts); a notice's See more
-// answers anyone on allowFrom.
+// answers anyone on allowFrom. Each counts only when its data is on the
+// message's own keyboard, so a button written into a rich message's body
+// settles and expands nothing.
 bot.on('callback_query:data', async ctx => {
   const data = ctx.callbackQuery.data
+  if (parseButtonData(data)) {
+    await tracked(press(ctx))
+    return
+  }
+  const own = () => onKeyboard(ctx.callbackQuery.message, data) !== undefined
   const permit = /^permit:(p\d+)$/.exec(data)
   if (permit) {
     if (!listed(loadAccess().allowFrom, String(ctx.from.id))) {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    if (!own()) {
+      await ctx.answerCallbackQuery({ text: NOT_ON_MESSAGE }).catch(() => {})
       return
     }
     const ev = permits.get(permit[1]!)
@@ -1004,6 +1403,10 @@ bot.on('callback_query:data', async ctx => {
   const senderId = String(ctx.from.id)
   if (!listed(access.allowFrom, senderId) || !ownerAnswers(OWNER, ctx.from)) {
     await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+    return
+  }
+  if (!own()) {
+    await ctx.answerCallbackQuery({ text: NOT_ON_MESSAGE }).catch(() => {})
     return
   }
   const [, behavior, request_id] = m
@@ -1322,14 +1725,21 @@ bot.catch(err => {
 // returned, and polling stopped permanently while the process stayed alive
 // (MCP stdin keeps it running). Outbound tools kept working but the bot was
 // deaf to inbound messages until a full restart.
-if (POLLING) void (async () => {
-  for (let attempt = 1; ; attempt++) {
+if (POLLING) pollLoop = (async () => {
+  // Failures in a row. onStart runs before the first getUpdates, so only a
+  // poll that completed since the last start begins a new count. A conflict
+  // is never given up on: the wait grows by a second up to 15 seconds, so the
+  // server hears the chat again soon after the other poller stops.
+  let attempt = 0
+  for (;;) {
+    polled = false
     try {
       await bot.start({
         // Telegram sends reactions only to a bot that asks for them.
         allowed_updates: [...API_CONSTANTS.DEFAULT_UPDATE_TYPES, 'message_reaction'],
         onStart: info => {
-          attempt = 0
+          // A swap left pending by a 429 or a restart lands now.
+          void retryPendingSwaps()
           botUsername = info.username
           process.stderr.write(`telegram channel: polling as @${info.username}\n`)
           void bot.api.setMyCommands(
@@ -1348,19 +1758,15 @@ if (POLLING) void (async () => {
       // bot.stop() mid-setup rejects with grammy's "Aborted delay" — expected, not an error.
       if (err instanceof Error && err.message === 'Aborted delay') return
       const is409 = err instanceof GrammyError && err.error_code === 409
-      if (is409 && attempt >= 8) {
-        process.stderr.write(
-          `telegram channel: 409 Conflict persists after ${attempt} attempts — ` +
-          `another poller is holding the bot token (stray 'bun server.ts' process or a second session). Exiting.\n`,
-        )
-        return
-      }
+      attempt = polled ? 1 : attempt + 1
       const delay = Math.min(1000 * attempt, 15000)
       const detail = is409
         ? `409 Conflict${attempt === 1 ? ' — another instance is polling (zombie session, or a second Claude Code running?)' : ''}`
         : `polling error: ${err}`
       process.stderr.write(`telegram channel: ${detail}, retrying in ${delay / 1000}s\n`)
       await new Promise(r => setTimeout(r, delay))
+      // A shutdown during the wait starts no further poll.
+      if (shuttingDown) return
     }
   }
 })()

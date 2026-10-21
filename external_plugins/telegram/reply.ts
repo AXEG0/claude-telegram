@@ -12,7 +12,7 @@ const MEDIA = ['photo', 'video', 'animation', 'voice', 'audio', 'video_note', 'd
 // Meta values land inside the <channel> tag. Characters that could close the
 // tag or forge an entry become lookalikes, lines are joined, and long text is
 // cut at a code point.
-function metaText(s: string, max: number): string {
+export function metaText(s: string, max: number): string {
   const flat = s
     .replace(/\s+/g, ' ')
     .trim()
@@ -43,7 +43,7 @@ function block(b: RichNode): string {
     ...(b.cells ?? []).flat().map(c => inline(c.text)),
   ].filter(Boolean).join(' ')
 }
-function richText(m: object): string | undefined {
+export function richText(m: object): string | undefined {
   const blocks = (m as { rich_message?: { blocks?: RichNode[] } }).rich_message?.blocks
   return blocks ? blocks.map(block).join(' ') : undefined
 }

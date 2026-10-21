@@ -1,6 +1,9 @@
 import { describe, expect, test } from 'bun:test'
 import { BOT_USERNAME, CHAT_ID, createBotLookup, createConfirm, createPeers, listed, noticeChat, PeerError, plainObject, sendStyle, type Peer } from './bots.ts'
 
+// Another bot, made up for these tests.
+const OTHER_BOT = { id: 7491000, username: 'peer_7491_bot' }
+
 function peers(users: Record<string, Peer | Error> = {}) {
   const lookups: string[] = []
   const p = createPeers(async id => {
@@ -15,15 +18,15 @@ function peers(users: Record<string, Peer | Error> = {}) {
 describe('where a message goes', () => {
   test('a bot that wrote gets its @username, and no lookup', async () => {
     const { p, lookups } = peers()
-    p.learn({ id: 8606571973, is_bot: true, username: 'lana_7491_bot' })
-    expect(await p.target('8606571973')).toBe('@lana_7491_bot')
+    p.learn({ ...OTHER_BOT, is_bot: true })
+    expect(await p.target(String(OTHER_BOT.id))).toBe(`@${OTHER_BOT.username}`)
     expect(lookups).toEqual([])
   })
 
   test('a person with a username keeps the numeric id', async () => {
     const { p, lookups } = peers({ '6': { is_bot: false, username: 'someone' } })
-    p.learn({ id: 64024129, is_bot: false, username: 'axego' })
-    expect(await p.target('64024129')).toBe('64024129')
+    p.learn({ id: 3141592, is_bot: false, username: 'owner' })
+    expect(await p.target('3141592')).toBe('3141592')
     expect(await p.target('6')).toBe('6')
     expect(lookups).toEqual(['6'])
   })
@@ -70,17 +73,17 @@ describe('where a notice goes', () => {
   test('a person’s chat keeps it, a bot’s chat hands it to the owner chat', () => {
     const { p } = peers()
     p.learn({ id: 5, is_bot: false, username: 'manager' })
-    p.learn({ id: 8606571973, is_bot: true, username: 'lana_7491_bot' })
-    expect(noticeChat('5', p, '64024129')).toBe('5')
-    expect(noticeChat('8606571973', p, '64024129')).toBe('64024129')
-    expect(noticeChat('-100', p, '64024129')).toBe('-100')
-    expect(noticeChat(undefined, p, '64024129')).toBeUndefined()
+    p.learn({ ...OTHER_BOT, is_bot: true })
+    expect(noticeChat('5', p, '3141592')).toBe('5')
+    expect(noticeChat(String(OTHER_BOT.id), p, '3141592')).toBe('3141592')
+    expect(noticeChat('-100', p, '3141592')).toBe('-100')
+    expect(noticeChat(undefined, p, '3141592')).toBeUndefined()
   })
 
   test('with no owner chat, a bot’s notice goes nowhere', () => {
     const { p } = peers()
-    p.learn({ id: 8606571973, is_bot: true, username: 'lana_7491_bot' })
-    expect(noticeChat('8606571973', p, undefined)).toBeUndefined()
+    p.learn({ ...OTHER_BOT, is_bot: true })
+    expect(noticeChat(String(OTHER_BOT.id), p, undefined)).toBeUndefined()
   })
 
   test('a chat the server knows nothing about keeps its notice', () => {
@@ -93,9 +96,9 @@ describe('where a notice goes', () => {
 describe('whether a chat is a bot’s', () => {
   test('from what the server heard, else from Telegram once; a group asks nothing', async () => {
     const { p, lookups } = peers({ '7777': { is_bot: true, username: 'quiet_bot' } })
-    p.learn({ id: 8606571973, is_bot: true, username: 'lana_7491_bot' })
+    p.learn({ ...OTHER_BOT, is_bot: true })
     p.learn({ id: 5, is_bot: false })
-    expect(await p.botChat('8606571973')).toBe(true)
+    expect(await p.botChat(String(OTHER_BOT.id))).toBe(true)
     expect(await p.botChat('5')).toBe(false)
     expect(await p.botChat('7777')).toBe(true)
     expect(await p.target('7777')).toBe('@quiet_bot')

@@ -1,5 +1,5 @@
 {
-  "source": "argylle2 /proc/823860/cmdline, 2026-10-09",
+  "source": "a channel session's /proc/<pid>/cmdline, 2026-10-09",
   "argv": [
     "claude",
     "--dangerously-skip-permissions",

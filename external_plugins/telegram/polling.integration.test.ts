@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { spawn, type ChildProcessWithoutNullStreams } from 'child_process'
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
-import { tmpdir } from 'os'
+import { spawn } from 'child_process'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'fs'
 import { join } from 'path'
+import { calls, children, cleanup, deliver, start, state, until } from './fixtures/harness.ts'
 import fixture from './fixtures/channel-argv.json'
 import { AGENT_TICK_MS, appendAgentEvent, agentEventFile } from './agents.ts'
 import { appendPermit, permitDetail, permitFile, permitText, type PermitEvent } from './permit.ts'
@@ -11,100 +11,14 @@ import { NO_ASKS } from './asks.ts'
 import { REFRESH_MS } from './typing.ts'
 import { API_CONSTANTS } from 'grammy'
 
-const children: ChildProcessWithoutNullStreams[] = []
-const dirs: string[] = []
-function state(access: object = { dmPolicy: 'allowlist', allowFrom: ['1'] }): string {
-  const dir = mkdtempSync(join(tmpdir(), 'tg-polling-'))
-  dirs.push(dir)
-  writeFileSync(join(dir, 'access.json'), JSON.stringify(access))
-  return dir
-}
-async function until(check: () => boolean, timeout = 4000): Promise<void> {
-  const end = Date.now() + timeout
-  while (!check()) {
-    if (Date.now() > end) throw new Error('subprocess did not reach expected state')
-    await Bun.sleep(10)
-  }
-}
-function calls(dir: string): { pid: number; method: string; payload: any }[] {
-  const file = join(dir, 'api.jsonl')
-  return existsSync(file) ? readFileSync(file, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) : []
-}
-function start(dir: string, argv: string[], env: Record<string, string> = {}) {
-  const child = spawn(process.execPath, [join(import.meta.dir, 'fixtures', 'claude-parent.ts'), ...argv.slice(1)], {
-    argv0: argv[0],
-    env: {
-      ...process.env,
-      TELEGRAM_STATE_DIR: dir,
-      TELEGRAM_BOT_TOKEN: '123:test-token',
-      TELEGRAM_ACCESS_MODE: 'static',
-      TELEGRAM_RICH_MESSAGES: 'false',
-      TELEGRAM_STT_OPENAI_KEY: '',
-      TELEGRAM_TEST_API_LOG: join(dir, 'api.jsonl'),
-      TELEGRAM_TEST_INBOUND: join(dir, 'inbound.json'),
-      ...env,
-    },
-    stdio: ['pipe', 'pipe', 'pipe'],
-  })
-  children.push(child)
-  let stderr = ''
-  child.stderr.on('data', chunk => { stderr += chunk })
-  let output = ''
-  let id = 0
-  const replies = new Map<number, (value: any) => void>()
-  // Notifications the server sent Claude, such as inbound channel messages.
-  const notifications: { method: string; params: any }[] = []
-  child.stdout.on('data', chunk => {
-    output += chunk
-    let newline: number
-    while ((newline = output.indexOf('\n')) >= 0) {
-      const message = JSON.parse(output.slice(0, newline))
-      output = output.slice(newline + 1)
-      if (message.id === undefined) notifications.push(message)
-      replies.get(message.id)?.(message)
-      replies.delete(message.id)
-    }
-  })
-  async function request(method: string, params: object) {
-    const next = ++id
-    const response = new Promise<any>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`${method} timed out: ${stderr}`)), 4000)
-      replies.set(next, value => { clearTimeout(timer); resolve(value) })
-    })
-    child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: next, method, params }) + '\n')
-    return response
-  }
-  return {
-    child, request, stderr: () => stderr,
-    // A notification from Claude Code, such as a permission prompt.
-    notify(method: string, params: object) {
-      child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method, params }) + '\n')
-    },
-    notifications,
-    inbound: () => notifications.filter(n => n.method === 'notifications/claude/channel').map(n => n.params),
-    async ready() {
-      await request('initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'test', version: '1' } })
-      child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n')
-    },
-    async close() { child.stdin.end(); await until(() => child.exitCode !== null) },
-  }
-}
-afterEach(async () => {
-  for (const child of children.splice(0)) {
-    if (child.exitCode === null && child.signalCode === null) {
-      child.stdin.end()
-      await until(() => child.exitCode !== null || child.signalCode !== null)
-    }
-  }
-  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
-})
+afterEach(cleanup)
 
 // Real /proc ancestry, real MCP transport, and the production server. Only
 // grammy's HTTP transport is fake; these tests never use the owner's bot.
 describe.skipIf(process.platform !== 'linux')('polling ownership in the running server', () => {
   test('the channel server tells the owner chat alone what the hook allowed, and See more shows the command', async () => {
     // The allowlist also holds another person and another bot.
-    const dir = state({ dmPolicy: 'allowlist', allowFrom: ['5', '8606571973', '1'] })
+    const dir = state({ dmPolicy: 'allowlist', allowFrom: ['5', '7491000', '1'] })
     const channel = start(dir, fixture.argv, { TELEGRAM_ALERT_CHAT: '1' })
     await channel.ready()
     const ev: PermitEvent = { t: Date.now(), event: 'allowed', tool_name: 'Bash', description: 'Push job archive to rental', command: 'ls -la /w', agent_type: 'general-purpose' }
@@ -123,7 +37,8 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
       callback_query: {
         id: 'cb1', chat_instance: 'c', data: 'permit:p1',
         from: { id: 1, is_bot: false, first_name: 'Owner' },
-        message: { message_id: 42, date: Math.floor(Date.now() / 1000), chat: { id: 1, type: 'private' }, text: permitText(ev) },
+        message: { message_id: notices()[0]!.message_id, date: Math.floor(Date.now() / 1000), chat: { id: 1, type: 'private' }, text: permitText(ev),
+          reply_markup: notices()[0]!.payload.reply_markup },
       },
     }]))
     await until(() => calls(dir).some(c => c.method === 'editMessageText' && c.payload.text === permitDetail(ev)))
@@ -277,7 +192,7 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
   }, 20000)
 
   // Another bot on the allowlist, a person who is not the owner, and the owner.
-  const BOT = { id: 8606571973, is_bot: true, first_name: 'Lana', username: 'lana_7491_bot' }
+  const BOT = { id: 7491000, is_bot: true, first_name: 'Peer', username: 'peer_7491_bot' }
   const PERSON = { id: 5, is_bot: false, first_name: 'Manager', username: 'manager' }
   const OWNER = { id: 1, is_bot: false, first_name: 'Owner', username: 'owner' }
   const PEERS = { dmPolicy: 'allowlist', allowFrom: ['1', String(BOT.id), '5'] }
@@ -370,11 +285,11 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     const sent = (text: string) => calls(dir).filter(c => c.method === 'sendMessage' && c.payload.text === text).map(c => c.payload.chat_id)
 
     expect((await reply(String(BOT.id), 'to the bot')).isError).not.toBe(true)
-    expect(sent('to the bot')).toEqual(['@lana_7491_bot'])
+    expect(sent('to the bot')).toEqual([`@${BOT.username}`])
     const before = calls(dir).length
     expect((await reply(String(BOT.id), 'with files', [join(dir, 'inbox', 'chart.png'), join(dir, 'inbox', 'notes.txt')])).isError).not.toBe(true)
     expect(calls(dir).slice(before).filter(c => c.method.startsWith('send')).map(c => [c.method, c.payload.chat_id])).toEqual([
-      ['sendMessage', '@lana_7491_bot'], ['sendPhoto', '@lana_7491_bot'], ['sendDocument', '@lana_7491_bot'],
+      ['sendMessage', `@${BOT.username}`], ['sendPhoto', `@${BOT.username}`], ['sendDocument', `@${BOT.username}`],
     ])
     await reply('5', 'to the person')
     expect(sent('to the person')).toEqual(['5'])
@@ -387,7 +302,7 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     expect(sent('to the group')).toEqual(['-100'])
 
     // The outbound gate reads the id Claude passed, so a username gets past nothing.
-    const byName = await reply('@lana_7491_bot', 'by name')
+    const byName = await reply(`@${BOT.username}`, 'by name')
     expect(byName.isError).toBe(true)
     expect(byName.content[0].text).toContain('not allowlisted')
     // When Telegram will not say whether the chat is a bot's, nothing goes out.
@@ -414,9 +329,9 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     const sent = await sender.request('tools/call', { name: 'reply', arguments: { chat_id: String(BOT.id), text: '**rich** to the bot' } })
     expect(sent.result.isError).not.toBe(true)
     expect(calls(dir).map(c => [c.method, c.payload.chat_id])).toEqual([
-      ['getChatMember', String(BOT.id)], ['sendMessage', '@lana_7491_bot'],
+      ['getChatMember', String(BOT.id)], ['sendMessage', `@${BOT.username}`],
     ])
-    expect(calls(dir)[1]!.payload).toEqual({ chat_id: '@lana_7491_bot', text: '**rich** to the bot' })
+    expect(calls(dir)[1]!.payload).toEqual({ chat_id: `@${BOT.username}`, text: '**rich** to the bot' })
     await sender.close()
   }, 15000)
 
@@ -447,7 +362,7 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
       expect(c.payload.parse_mode).toBeUndefined()
       expect(c.payload.rich_message).toBeUndefined()
     }
-    expect(botCalls.filter(c => c.method === 'sendMessage').map(c => c.payload.chat_id)).toEqual(Array(4).fill('@lana_7491_bot'))
+    expect(botCalls.filter(c => c.method === 'sendMessage').map(c => c.payload.chat_id)).toEqual(Array(4).fill(`@${BOT.username}`))
 
     // A person's chat keeps the format asked for.
     await call('reply', { chat_id: '5', text })
@@ -463,15 +378,27 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     await sender.close()
   }, 15000)
 
-  // A permission prompt from Claude Code, and a tap on one of its buttons.
+  // A permission prompt from Claude Code, and a tap on one of its buttons,
+  // which carries the keyboard its prompt, or a notice, was sent with.
   const ASK = { request_id: 'abcde', tool_name: 'Write', description: 'Write a file', input_preview: '{"file_path":"/w/a.txt"}' }
   const ASK_TEXT = '🔐 Permission: Write'
-  const tap = (id: string, from: { id: number }, data: string) => ({
+  const keyboardOf = (data: string) => data.startsWith('permit:')
+    ? { inline_keyboard: [[{ text: 'See more', callback_data: data }]] }
+    : { inline_keyboard: [[
+        { text: 'See more', callback_data: data.replace(/^perm:\w+:/, 'perm:more:') },
+        { text: '✅ Allow', callback_data: data.replace(/^perm:\w+:/, 'perm:allow:') },
+        { text: '❌ Deny', callback_data: data.replace(/^perm:\w+:/, 'perm:deny:') },
+      ]] }
+  const bare = (id: string, from: { id: number }, data: string) => ({
     callback_query: {
       id, chat_instance: 'c', data, from,
       message: { message_id: 42, date: Math.floor(Date.now() / 1000), chat: { id: from.id, type: 'private' }, text: ASK_TEXT },
     },
   })
+  const tap = (id: string, from: { id: number }, data: string) => {
+    const update = bare(id, from, data)
+    return { callback_query: { ...update.callback_query, message: { ...update.callback_query.message, reply_markup: keyboardOf(data) } } }
+  }
   const answers = (channel: ReturnType<typeof start>) =>
     channel.notifications.filter(n => n.method === 'notifications/claude/channel/permission').map(n => n.params)
   const callbackAnswers = (dir: string) =>
@@ -891,6 +818,64 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     expect(existsSync(join(dir, 'bot.pid'))).toBe(false)
   })
 
+  const CONFLICT = { error_code: 409, description: 'Conflict: terminated by other getUpdates request' }
+  const conflicts = (rules: object[]) => ({ TELEGRAM_TEST_RULES: JSON.stringify(rules) })
+  // The gaps between the server's polls, in milliseconds, by the fake's log.
+  const pollGaps = (dir: string) => calls(dir).filter(c => c.method === 'getUpdates').map((c, i, all) => i ? c.at - all[i - 1]!.at : 0).slice(1)
+  // Each gap within slack of its seconds reads as those seconds; one outside
+  // reads as its milliseconds.
+  const asSeconds = (gaps: number[], seconds: number[], slack: number) =>
+    gaps.map((gap, i) => Math.abs(gap - (seconds[i] ?? 0) * 1000) <= slack ? seconds[i] : gap)
+
+  test('through sixteen conflicts in a row the server waits 1 to 15 seconds between polls and then 15 again, keeps polling, and hears a message sent after the conflict ends', async () => {
+    const dir = state()
+    const channel = start(dir, fixture.argv, conflicts([{ method: 'getUpdates', times: 16, error: CONFLICT }]))
+    await channel.ready()
+    const waits = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 15]
+    await until(() => pollGaps(dir).length > waits.length, 160_000)
+    expect(asSeconds(pollGaps(dir).slice(0, waits.length), waits, 500)).toEqual(waits)
+    deliver(dir, [{ message: { message_id: 10, date: Math.floor(Date.now() / 1000), from: { id: 1, is_bot: false, first_name: 'Owner' }, chat: { id: 1, type: 'private' }, text: 'after the conflict' } }])
+    await until(() => channel.inbound().length === 1, 5000)
+    expect(channel.inbound()[0]!.content).toBe('after the conflict')
+    await channel.close()
+  }, 180_000)
+
+  test('with two runs of three conflicts and a completed poll between them, the server waits 1, 2 and 3 seconds in each run', async () => {
+    const dir = state()
+    const channel = start(dir, fixture.argv, conflicts([
+      { method: 'getUpdates', times: 3, error: CONFLICT },
+      { method: 'getUpdates', skip: 1, times: 3, error: CONFLICT },
+    ]))
+    await channel.ready()
+    await until(() => pollGaps(dir).length >= 7, 35_000)
+    const [a, b, c, , d, e, f] = pollGaps(dir)
+    expect(asSeconds([a!, b!, c!, d!, e!, f!], [1, 2, 3, 1, 2, 3], 400)).toEqual([1, 2, 3, 1, 2, 3])
+    await channel.close()
+  }, 45_000)
+
+  test('a server whose MCP input closes during the wait after a conflict polls no more', async () => {
+    const dir = state()
+    const channel = start(dir, fixture.argv, conflicts([{ method: 'getUpdates', times: 1, error: CONFLICT }]))
+    await channel.ready()
+    await until(() => calls(dir).some(c => c.method === 'getUpdates' && c.refused))
+    const closed = Date.now()
+    channel.child.stdin!.end()
+    await until(() => channel.child.exitCode !== null, 5000)
+    expect(calls(dir).filter(c => c.method === 'getUpdates' && c.at > closed)).toEqual([])
+  }, 20_000)
+
+  test('a server that gets SIGTERM during the wait after a conflict polls no more', async () => {
+    const dir = state()
+    const channel = start(dir, fixture.argv, conflicts([{ method: 'getUpdates', times: 1, error: CONFLICT }]))
+    await channel.ready()
+    await until(() => calls(dir).some(c => c.method === 'getUpdates' && c.refused))
+    const pid = Number(readFileSync(join(dir, 'bot.pid'), 'utf8'))
+    const termed = Date.now()
+    process.kill(pid, 'SIGTERM')
+    await until(() => !existsSync(`/proc/${pid}`), 5000)
+    expect(calls(dir).filter(c => c.method === 'getUpdates' && c.at > termed)).toEqual([])
+  }, 20_000)
+
   test('a send-only instance creates neither bot.pid nor a heartbeat', async () => {
     const dir = state()
     const sender = start(dir, ['claude', 'mcp', 'list'])
@@ -1077,9 +1062,9 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
   }, 15000)
 
   test.each([
-    ['the first chunk', 1, 'reply failed after 1 of 4 message(s) sent: message 500 went to chat 9999, not 7010'],
-    ['a later chunk', 2, 'reply failed after 2 of 4 message(s) sent: message 501 went to chat 9999, not 7010'],
-    ['the file', 4, 'reply failed after 4 of 4 message(s) sent: message 503 went to chat 9999, not 7010'],
+    ['the first chunk', 1, 'reply failed after 1 of 4 message(s) sent (ids: 500): message 500 went to chat 9999, not 7010'],
+    ['a later chunk', 2, 'reply failed after 2 of 4 message(s) sent (ids: 500, 501): message 501 went to chat 9999, not 7010'],
+    ['the file', 4, 'reply failed after 4 of 4 message(s) sent (ids: 500, 501, 502, 503): message 503 went to chat 9999, not 7010'],
   ])('when %s of a reply to a bot went to another chat, nothing more goes, the bot keeps its notices away from its chat, and its username is checked before the next reply', async (_, from, line) => {
     const PEER10 = peerBot(7010, 'peer_ten_bot')
     const dir = state({ dmPolicy: 'allowlist', allowFrom: ['1', '7010'], textChunkLimit: 10 })
@@ -1139,8 +1124,8 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     const first = toolCall(sender, 'reply', { chat_id: '7020', text: 'a'.repeat(10) + 'b'.repeat(10) })
     await until(() => sends(dir).length === 1)
     const second = failure(await toolCall(sender, 'reply', { chat_id: '7020', text: 'second' }))
-    expect(second).toBe('reply failed: reply failed after 1 of 1 message(s) sent: message 601 went to chat 9998, not 7020')
-    expect(failure(await first)).toBe('reply failed: reply failed after 1 of 2 chunk(s) sent: the username Telegram gives for 7020 is chat 9998, not 7020')
+    expect(second).toBe('reply failed: reply failed after 1 of 1 message(s) sent (ids: 601): message 601 went to chat 9998, not 7020')
+    expect(failure(await first)).toBe('reply failed: reply failed after 1 of 2 chunk(s) sent (ids: 600): the username Telegram gives for 7020 is chat 9998, not 7020')
     expect(calls(dir).map(c => [c.method, c.payload.chat_id ?? c.payload.text])).toEqual([
       ['getChatMember', '7020'], ['sendMessage', at(PEER20.username)], ['sendMessage', at(PEER20.username)],
       ['getChatMember', '7020'], ['getChat', at(PEER20.username)],

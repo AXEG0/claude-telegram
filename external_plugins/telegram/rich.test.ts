@@ -19,7 +19,7 @@ describe('server instructions', () => {
   const body = /instructions: \[([\s\S]*?)\]\.join\('\\n'\)/.exec(src)![1]!
   const build = (RICH: boolean) => (Function('RICH', 'RICH_INSTRUCTIONS', `return [${body}]`)(RICH, RICH_INSTRUCTIONS) as string[]).join('\n')
 
-  test('fit in 2048 characters with rich on, the access warning, the edit line and the reaction line whole', () => {
+  test('fit in 2048 characters with rich on, the access warning, the edit line, the reaction line and the press line whole', () => {
     const on = build(true)
     expect(on.length).toBeLessThanOrEqual(2048)
     expect(on).toContain(RICH_INSTRUCTIONS)
@@ -27,6 +27,7 @@ describe('server instructions', () => {
     expect(build(false)).not.toContain(RICH_INSTRUCTIONS)
     expect(on).toContain('With edited="true", the sender edited message message_id: the content is its new text or caption, replacing the old.')
     expect(on).toContain('With reaction="…", the sender reacted with that emoji to message message_id: a reaction, not typed text.')
+    expect(on).toContain('With button="…", the sender pressed that button under message message_id: a press, not typed text.')
   })
 })
 

@@ -1,9 +1,7 @@
 // Never contact Telegram in subprocess tests, even if the shell has a token.
 import { mock } from 'bun:test'
-import { appendFileSync, existsSync, readFileSync } from 'fs'
+import { appendFileSync, existsSync, readFileSync, renameSync } from 'fs'
 import * as grammy from 'grammy'
-
-let deliveredInbound = false
 
 // A file upload goes as a multipart stream; its fields are logged as text and
 // each file as its name.
@@ -44,6 +42,8 @@ const users = JSON.parse(process.env.TELEGRAM_TEST_USERS || '{}') as Record<stri
 //   getChat, from its `from`-th send onward (1 or unset: from the start);
 //   messages sent to it get their own ids from `ids` on.
 // - hold: the answer to the `send`-th send of the process waits `ms`.
+// - ids: every message the process sends to a numeric chat gets its own
+//   id, from `ids` on; unset, every message gets the same id, as before.
 type Chats = {
   unopened?: number[]
   closed?: number[]
@@ -52,8 +52,47 @@ type Chats = {
   refuse?: string[]
   redirect?: { username: string; to: number; from?: number; ids?: number }
   hold?: { send: number; ms: number }
+  ids?: number
 }
 const chats = JSON.parse(process.env.TELEGRAM_TEST_CHATS || '{}') as Chats
+let nextId = chats.ids
+
+// TELEGRAM_TEST_RULES shapes Telegram's answers to calls: each rule matches a
+// call by method, by `has` (texts all in the call's payload as JSON), and by
+// `markup` (whether the call carries a keyboard), for its first `times`
+// matches (every match, if unset), after letting its first `skip` matches
+// pass as usual. A matched call reaches the fake `preMs` late, so a call
+// sent after it can arrive first; its answer waits `holdMs`, then is `error`
+// if set, else the usual answer, unless `drop` loses the connection after the
+// fake applied the call and before it answers. The log marks a call a rule
+// refuses with `refused`.
+type Rule = {
+  method: string | string[]
+  has?: string | string[]
+  markup?: boolean
+  skip?: number
+  times?: number
+  preMs?: number
+  holdMs?: number
+  drop?: boolean
+  error?: { error_code: number; description: string; parameters?: object }
+}
+const rules = (JSON.parse(process.env.TELEGRAM_TEST_RULES || '[]') as Rule[]).map(rule => ({ rule, seen: 0, used: 0 }))
+function ruleFor(method: string, payload: Record<string, unknown>): Rule | undefined {
+  const text = JSON.stringify(payload)
+  for (const r of rules) {
+    const { rule } = r
+    if (![rule.method].flat().includes(method)) continue
+    if (rule.has !== undefined && ![rule.has].flat().every(h => text.includes(h))) continue
+    if (rule.markup !== undefined && (payload.reply_markup !== undefined) !== rule.markup) continue
+    if (rule.times !== undefined && r.used >= rule.times) continue
+    if (r.seen++ < (rule.skip ?? 0)) continue
+    r.used++
+    return rule
+  }
+  return undefined
+}
+let rounds = 0
 
 // The senders of every update delivered from TELEGRAM_TEST_INBOUND.
 const senders = new Map<number, User>()
@@ -132,15 +171,29 @@ function remember(updates: unknown[]): void {
 
 const json = (body: object) => new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } })
 
+const SENDS = ['sendMessage', 'sendPhoto', 'sendDocument', 'sendRichMessage']
+
 const fakeFetch = (async (url: string | URL | Request, options?: RequestInit) => {
   const method = String(url).split('/').pop()!
   const payload = await payloadOf(options)
-  appendFileSync(process.env.TELEGRAM_TEST_API_LOG!, JSON.stringify({ pid: process.pid, method, payload }) + '\n')
+  // A send is logged with the id it gets, unless a rule refuses it, and every
+  // call with when it came.
+  const n = SENDS.includes(method) ? ++sends : 0
+  const rule = ruleFor(method, payload)
+  if (rule?.preMs) await Bun.sleep(rule.preMs)
+  const to = n && !rule?.error ? recipient(payload.chat_id) : undefined
+  if (to && nextId !== undefined && !String(payload.chat_id).startsWith('@')) to.message_id = nextId++
+  appendFileSync(process.env.TELEGRAM_TEST_API_LOG!, JSON.stringify({
+    pid: process.pid, method, payload, at: Date.now(),
+    ...(to ? { message_id: to.message_id } : {}),
+    ...(rule?.error ? { refused: rule.error.description } : {}),
+  }) + '\n')
+  if (rule?.holdMs) await Bun.sleep(rule.holdMs)
+  if (rule?.error) return json({ ok: false, ...rule.error })
+  if (rule?.drop) throw new TypeError('fetch failed: the connection was reset')
   let result: unknown = true
   if (method === 'getMe') result = { id: 123, is_bot: true, first_name: 'Test', username: 'test_bot' }
-  if (['sendMessage', 'sendPhoto', 'sendDocument', 'sendRichMessage'].includes(method)) {
-    const n = ++sends
-    const to = recipient(payload.chat_id)
+  if (n) {
     if (chats.hold?.send === n) await Bun.sleep(chats.hold.ms)
     if (!to) return json(notFound)
     result = { message_id: to.message_id, date: 0, chat: { id: to.id, type: to.id < 0 ? 'supergroup' : 'private' } }
@@ -150,11 +203,16 @@ const fakeFetch = (async (url: string | URL | Request, options?: RequestInit) =>
   if (method === 'getUpdates') {
     await Bun.sleep(25)
     result = []
+    // Each round of updates the test writes is delivered once, then moved
+    // aside, so the test can write the next.
     const inbound = process.env.TELEGRAM_TEST_INBOUND
-    if (inbound && !deliveredInbound && existsSync(inbound)) {
-      result = JSON.parse(readFileSync(inbound, 'utf8'))
-      remember(result as unknown[])
-      deliveredInbound = true
+    if (inbound && existsSync(inbound)) {
+      try {
+        const updates = JSON.parse(readFileSync(inbound, 'utf8'))
+        renameSync(inbound, `${inbound}.${process.pid}.${++rounds}`)
+        result = updates
+        remember(updates as unknown[])
+      } catch {}
     }
   }
   return json({ ok: true, result })
