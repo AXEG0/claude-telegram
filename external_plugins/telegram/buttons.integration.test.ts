@@ -921,6 +921,15 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     await srv.close()
   }, 25000)
 
+  test('a plain text edit of a message the record does not hold, answered message is not modified, counts as done', async () => {
+    const dir = state()
+    const srv = await channel(dir, { rules: [{ method: 'editMessageText', error: NOT_MODIFIED }] })
+    const m = Number(/^sent \(id: (\d+)\)$/.exec(ok(await tool(srv, 'reply', { chat_id: '1', text: 'working' })))![1])
+    expect(ok(await tool(srv, 'edit_message', { chat_id: '1', message_id: String(m), text: 'working' }))).toBe(`edited (id: ${m})`)
+    expect(calls(dir).filter(c => c.method === 'editMessageText').map(c => [c.payload.message_id, c.refused !== undefined])).toEqual([[m, true]])
+    await srv.close()
+  }, 15000)
+
   test('a plain text edit of a message with no buttons that Telegram answers after 11 seconds succeeds, as before', async () => {
     const dir = state()
     const srv = await channel(dir, { rules: [{ method: 'editMessageText', holdMs: 11_000 }] })
