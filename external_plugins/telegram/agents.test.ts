@@ -254,6 +254,9 @@ describe('createAgentStream', () => {
     const mtimes = new Map<string, number>()
     const sent: { chat: string; text: string }[] = []
     const edits: { id: number; text: string }[] = []
+    // Every edit the stream tried: the clock when it went out, its text, and the
+    // error Telegram answered, if any.
+    const attempts: { at: number; text: string; error?: unknown }[] = []
     let failEdit: unknown
     let sendWait: Promise<void> | undefined
     let editWait: Promise<void> | undefined
@@ -263,6 +266,7 @@ describe('createAgentStream', () => {
       chat: () => current ?? undefined,
       send: async (c, text) => { sent.push({ chat: c, text }); const id = sent.length + 6; await sendWait; return id },
       edit: async (_c, id, text) => {
+        attempts.push({ at: t, text, error: failEdit })
         if (failEdit) throw failEdit
         edits.push({ id, text })
         await editWait
@@ -276,6 +280,7 @@ describe('createAgentStream', () => {
     const write = (path: string, text: string) => { files.set(path, text); mtimes.set(path, t) }
     return {
       stream, events, sent, edits, tick, write,
+      attempts,
       advance: (ms: number) => { t += ms },
       now: () => t,
       setChat: (c: string | null) => { current = c },
@@ -772,6 +777,317 @@ describe('createAgentStream', () => {
     await h.tick()
     expect(h.sent).toEqual([])
     expect(h.stream.agents()).toEqual([])
+  })
+
+  // A finished row leaves the message five minutes after the first edit
+  // Telegram accepted with its ending.
+  const FIVE_MINUTES = 5 * 60 * 1000
+  const stopOf = (h: { now(): number }, id: string, outcome?: 'stopped'): AgentEvent =>
+    ({ t: h.now(), event: 'stop', agent_id: id, ...(outcome ? { outcome } : {}) })
+  const settled = () => new Promise(r => setTimeout(r, 0))
+  // Ticks on the clock-refresh beat, landing on `until`.
+  async function runTo(h: ReturnType<typeof harness>, until: number) {
+    while (h.now() < until) { h.advance(Math.min(CLOCK_REFRESH_MS, until - h.now())); await h.tick() }
+  }
+  // Runs the clock to five minutes after `from`, with a tick a second before.
+  async function runPast(h: ReturnType<typeof harness>, from: number) {
+    await runTo(h, from + FIVE_MINUTES - 1000)
+    await runTo(h, from + FIVE_MINUTES)
+  }
+  // The edits Telegram took, with the clock when each went out.
+  const taken = (h: ReturnType<typeof harness>) => h.attempts.filter(e => e.error === undefined)
+  // A row is in every taken edit from `since` until five minutes after
+  // `from`, and gone from the first taken edit after that.
+  function expectLeaves(h: ReturnType<typeof harness>, label: string, from: number, since = from) {
+    const kept = taken(h).filter(e => e.at >= since && e.at < from + FIVE_MINUTES)
+    expect(kept.length).toBeGreaterThanOrEqual(10)
+    for (const e of kept) expect(e.text).toContain(label)
+    const next = taken(h).find(e => e.at >= from + FIVE_MINUTES)
+    expect(next).toBeDefined()
+    expect(next!.at).toBeLessThan(from + FIVE_MINUTES + CLOCK_REFRESH_MS)
+    expect(next!.text).not.toContain(label)
+  }
+
+  test('each kind of finished row leaves five minutes after the first accepted edit that showed it finished, while running and quiet rows stay', async () => {
+    const h = harness()
+    await h.tick()
+    const t0 = h.now()
+    h.events.push(start(h, 'idle', { agent_type: 'Idle-agent' }), shell(h, 'wait', 'Wait for deploy'))
+    h.write('/t/wait.output', '')
+    await h.tick()
+    h.advance(60 * 60 * 1000)
+    h.events.push(start(h, 'quiet', { agent_type: 'Quiet-agent' }))
+    await h.tick()
+    h.advance(AGENT_DROP_MS - 62 * 60 * 1000)
+    const joined = h.now()
+    h.events.push(start(h, 'done', { agent_type: 'Done-agent' }), start(h, 'halt', { agent_type: 'Halted-agent' }),
+      shell(h, 'ok', 'Build docs'), shell(h, 'bad', 'Lint'))
+    h.write('/t/ok.output', '')
+    h.write('/t/bad.output', '')
+    await h.tick()
+    // The endings reach the chat 20 seconds apart; the idle subagent is
+    // dropped after them, at the first tick past two hours without activity.
+    h.advance(20_000); h.events.push(stopOf(h, 'done')); await h.tick()
+    h.advance(20_000); h.write('/t/ok.output', 'built\n\n[exited with code 0]\n'); await h.tick()
+    h.advance(20_000); h.events.push(stopOf(h, 'halt', 'stopped')); await h.tick()
+    h.advance(20_000); h.write('/t/bad.output', '\n[exited with code 1]\n'); await h.tick()
+    for (const d of [20_000, 40_000, 60_000, 80_000, 130_000]) await runPast(h, joined + d)
+    await runTo(h, t0 + AGENT_DROP_MS + 6 * 60 * 1000)
+
+    for (const e of taken(h).filter(e => e.at >= joined)) {
+      expect(e.text).toContain('\n2. ⏳ shell · Wait for deploy · ')
+      expect(e.text).toMatch(/\n3\. ⚠️ No activity for [^\n]+ · Quiet-agent · last: Starting…/)
+    }
+
+    const firstShowing = (line: string) => taken(h).find(e => e.text.includes(line))!.at
+    const rows = [
+      { label: 'Done-agent', from: firstShowing('\n4. ✅ Done in 20s · Done-agent') },
+      { label: 'Build docs', from: firstShowing('\n6. ✅ Done in 40s · shell · Build docs') },
+      { label: 'Halted-agent', from: firstShowing('\n5. ⏹ Stopped after 1m 0s · Halted-agent') },
+      { label: 'Lint', from: firstShowing('\n7. ❌ Failed after 1m 20s (exit 1) · shell · Lint') },
+      // Its line reads quiet before and after the drop.
+      { label: 'Idle-agent', from: taken(h).find(e => e.at > t0 + AGENT_DROP_MS)!.at },
+    ]
+    expect(rows.map(r => r.from)).toEqual([20_000, 40_000, 60_000, 80_000, 130_000].map(d => joined + d))
+    expect(taken(h).find(e => e.at === rows[4]!.from)!.text).toContain('\n1. ⚠️ No activity for 2h 0m · Idle-agent')
+    for (const { label, from } of rows) expectLeaves(h, label, from, joined)
+
+    expect(h.edits.at(-1)!.text).toBe('🤖 Subagents · 🐚 Shells\n2. ⏳ shell · Wait for deploy · 2h 6m\n'
+      + '3. ⚠️ No activity for 1h 6m · Quiet-agent · last: Starting…')
+  })
+
+  test('an ending read while an edit is in flight, whose first edit a rate limit holds off a minute, leaves five minutes after the edit that carries it', async () => {
+    const h = harness()
+    await h.tick()
+    h.events.push(shell(h, 'wait', 'Wait for deploy'), start(h, 'a1', { agent_type: 'Ending-agent' }))
+    h.write('/t/wait.output', '')
+    await h.tick()
+    const release = h.holdEdit()
+    h.advance(CLOCK_REFRESH_MS); await h.tick()
+    h.advance(CHAT_GAP_MS)
+    h.events.push(stopOf(h, 'a1')); await h.tick()
+    release(); await settled()
+    expect(h.attempts).toHaveLength(1)
+    expect(h.attempts[0]!.text).toContain('\n2. ⏳ Ending-agent · Starting… · 10s')
+
+    h.failEditWith({ description: 'Too Many Requests: retry after 60', parameters: { retry_after: 60 } })
+    h.advance(CHAT_GAP_MS); await h.tick()
+    h.failEditWith(undefined)
+    const refused = h.attempts.at(-1)!
+    expect(refused.text).toContain('\n2. ✅ Done in 13s · Ending-agent')
+    expect(refused.error).toBeDefined()
+    h.advance(30_000); await h.tick()
+    expect(h.attempts.at(-1)).toBe(refused)
+    h.advance(30_000); await h.tick()
+    const carried = h.attempts.at(-1)!
+    expect(carried.at).toBe(refused.at + 60_000)
+    expect(carried.error).toBeUndefined()
+    expect(carried.text).toContain('\n2. ✅ Done in 13s · Ending-agent')
+
+    await runPast(h, carried.at)
+    expectLeaves(h, 'Ending-agent', carried.at, h.attempts[0]!.at)
+  })
+
+  test('an ending whose first edit fails leaves five minutes after the edit that carries it', async () => {
+    const h = harness()
+    await h.tick()
+    h.events.push(shell(h, 'wait', 'Wait for deploy'), start(h, 'a1', { agent_type: 'Ending-agent' }))
+    h.write('/t/wait.output', '')
+    await h.tick()
+    h.advance(CHAT_GAP_MS)
+    h.events.push(stopOf(h, 'a1'))
+    h.failEditWith({ description: 'Bad Gateway' })
+    await h.tick()
+    h.failEditWith(undefined)
+    expect(h.attempts.at(-1)!.text).toContain('\n2. ✅ Done in 3s · Ending-agent')
+    h.advance(CHAT_GAP_MS); await h.tick()
+    const carried = h.attempts.at(-1)!
+    expect(carried.error).toBeUndefined()
+    expect(carried.text).toContain('\n2. ✅ Done in 3s · Ending-agent')
+
+    await runPast(h, carried.at)
+    expectLeaves(h, 'Ending-agent', carried.at)
+  })
+
+  test('an ending first carried by an edit answered "message is not modified" leaves five minutes after that answer', async () => {
+    const h = harness()
+    await h.tick()
+    h.events.push(shell(h, 'wait', 'Wait for deploy'), start(h, 'a1', { agent_type: 'Ending-agent' }))
+    h.write('/t/wait.output', '')
+    await h.tick()
+    h.advance(CHAT_GAP_MS)
+    h.events.push(stopOf(h, 'a1'))
+    h.failEditWith({ description: 'Bad Request: message is not modified' })
+    await h.tick()
+    h.failEditWith(undefined)
+    const answered = h.attempts.at(-1)!
+    expect(answered.text).toContain('\n2. ✅ Done in 3s · Ending-agent')
+    expect(h.edits).toEqual([])
+
+    await runPast(h, answered.at)
+    expect(taken(h)[0]!.at).toBe(answered.at + CLOCK_REFRESH_MS)
+    expectLeaves(h, 'Ending-agent', answered.at)
+  })
+
+  test('a subagent resumed while its finished row is in the message runs on under the same number past the old run\'s five minutes', async () => {
+    const h = harness()
+    await h.tick()
+    h.events.push(shell(h, 'wait', 'Wait for deploy'), start(h, 'r1', { agent_type: 'Resumed-agent' }))
+    h.write('/t/wait.output', '')
+    await h.tick()
+    h.advance(CHAT_GAP_MS)
+    h.events.push(stopOf(h, 'r1')); await h.tick()
+    const ended = h.attempts.at(-1)!
+    expect(ended.text).toContain('\n2. ✅ Done in 3s · Resumed-agent')
+
+    h.advance(60_000)
+    h.events.push(start(h, 'r1', { agent_type: 'Resumed-agent' })); await h.tick()
+    expect(h.edits.at(-1)!.text).toBe('🤖 Subagents · 🐚 Shells\n1. ⏳ shell · Wait for deploy · 1m 3s\n2. ⏳ Resumed-agent · Starting… · 0s')
+    const resumedAt = h.now()
+    await runTo(h, ended.at + FIVE_MINUTES + 60_000)
+    const later = taken(h).filter(e => e.at > resumedAt)
+    expect(later.some(e => e.at >= ended.at + FIVE_MINUTES)).toBe(true)
+    for (const e of later) {
+      expect(e.text).toMatch(/^🤖 Subagents · 🐚 Shells\n1\. ⏳ shell · Wait for deploy · [^\n]+\n2\. ⏳ Resumed-agent · Starting… · [^\n]+$/)
+    }
+  })
+
+  test('a subagent resumed after its row left comes back running under its old number', async () => {
+    const h = harness()
+    await h.tick()
+    h.events.push(shell(h, 'wait', 'Wait for deploy'), start(h, 'r1', { agent_type: 'Resumed-agent' }), shell(h, 'next', 'Package'))
+    h.write('/t/wait.output', '')
+    h.write('/t/next.output', '')
+    await h.tick()
+    h.advance(CHAT_GAP_MS)
+    h.events.push(stopOf(h, 'r1')); await h.tick()
+    const ended = h.attempts.at(-1)!
+    expect(ended.text).toContain('\n2. ✅ Done in 3s · Resumed-agent')
+    await runTo(h, ended.at + FIVE_MINUTES)
+    expect(h.edits.at(-1)!.text).toBe('🐚 Shells\n1. ⏳ shell · Wait for deploy · 5m 3s\n3. ⏳ shell · Package · 5m 3s')
+
+    h.advance(CLOCK_REFRESH_MS)
+    h.events.push(start(h, 'r1', { agent_type: 'Resumed-agent' })); await h.tick()
+    expect(h.edits.at(-1)!.text).toBe('🤖 Subagents · 🐚 Shells\n1. ⏳ shell · Wait for deploy · 5m 13s\n'
+      + '2. ⏳ Resumed-agent · Starting… · 0s\n3. ⏳ shell · Package · 5m 13s')
+  })
+
+  test('once row 1, the only subagent, and the highest-numbered row have left, the edit is the remaining shells under their numbers, and a new row takes one past the highest number given', async () => {
+    const h = harness()
+    await h.tick()
+    h.events.push(start(h, 'a1', { agent_type: 'Explore' }), shell(h, 's2', 'Second'), shell(h, 's3', 'Third'), shell(h, 's4', 'Fourth'))
+    for (const id of ['s2', 's3', 's4']) h.write(`/t/${id}.output`, '')
+    await h.tick()
+    expect(h.sent[0]!.text).toBe('🤖 Subagents · 🐚 Shells\n1. ⏳ Explore · Starting… · 0s\n'
+      + '2. ⏳ shell · Second · 0s\n3. ⏳ shell · Third · 0s\n4. ⏳ shell · Fourth · 0s')
+    h.advance(CHAT_GAP_MS)
+    h.events.push(stopOf(h, 'a1')); await h.tick()
+    const firstEnded = h.now()
+    await runTo(h, firstEnded + 50_000)
+    h.advance(CLOCK_REFRESH_MS)
+    h.write('/t/s4.output', '\n[exited with code 0]\n'); await h.tick()
+    const lastEnded = h.now()
+    expect(h.edits.at(-1)!.text).toContain('\n4. ✅ Done in 1m 3s · shell · Fourth')
+
+    await runTo(h, firstEnded + FIVE_MINUTES)
+    expect(h.edits.at(-1)!.text).toBe('🐚 Shells\n2. ⏳ shell · Second · 5m 3s\n3. ⏳ shell · Third · 5m 3s\n4. ✅ Done in 1m 3s · shell · Fourth')
+    await runTo(h, lastEnded + FIVE_MINUTES - CLOCK_REFRESH_MS)
+    const before = h.edits.length
+    await runTo(h, lastEnded + FIVE_MINUTES)
+    expect(h.edits).toHaveLength(before + 1)
+    expect(h.edits.at(-1)!.text).toBe('🐚 Shells\n2. ⏳ shell · Second · 6m 3s\n3. ⏳ shell · Third · 6m 3s')
+
+    h.advance(CHAT_GAP_MS)
+    h.events.push(shell(h, 's5', 'Fifth'))
+    h.write('/t/s5.output', '')
+    await h.tick()
+    expect(h.edits.at(-1)!.text).toBe('🐚 Shells\n2. ⏳ shell · Second · 6m 6s\n3. ⏳ shell · Third · 6m 6s\n5. ⏳ shell · Fifth · 0s')
+    expect(h.sent).toHaveLength(1)
+  })
+
+  test('once 60 finished rows have left, a running row longer than a sixty-first of the message gets its whole line', async () => {
+    const h = harness()
+    await h.tick()
+    for (let i = 0; i < 60; i++) { h.events.push(shell(h, `d${i}`, `Step ${i}`)); h.write(`/t/d${i}.output`, '') }
+    const description = 'Compare the cache layer with the old storage notes and list each gap'
+    h.events.push(start(h, 'long'))
+    h.write('/s/agent-long.meta.json', JSON.stringify({ description }))
+    await h.tick()
+    h.advance(CHAT_GAP_MS)
+    for (let i = 0; i < 60; i++) h.write(`/t/d${i}.output`, '\n[exited with code 0]\n')
+    await h.tick()
+    const ended = h.now()
+    // With the 60 rows in the message, the running row's share cuts it short.
+    expect(h.edits.at(-1)!.text.split('\n').at(-1)).toMatch(/^61\. ⏳ general-purpose · Compare[^\n]*…$/)
+
+    await runTo(h, ended + FIVE_MINUTES)
+    h.write('/s/agent-long.jsonl', assistant([{ type: 'tool_use', name: 'Read', input: { description: 'Reading the storage notes one section at a time' } }],
+      { input_tokens: 85400 }))
+    h.advance(CLOCK_REFRESH_MS); await h.tick()
+    const full = `61. ⏳ general-purpose · ${description} · Reading the storage notes one section at a time · 5m 13s · 85.4k tokens`
+    expect(full.length).toBeGreaterThan(AGENT_MESSAGE_LIMIT / 61)
+    expect(h.edits.at(-1)!.text).toBe(`🤖 Subagents\n${full}`)
+  })
+
+  test('when the last running row ends, the final message keeps the endings of its last five minutes, no edit follows, and the next row starts a new message', async () => {
+    const h = harness()
+    await h.tick()
+    h.events.push(shell(h, 'e1', 'Early'), shell(h, 'e2', 'Recent'), shell(h, 'e3', 'Last'))
+    for (const id of ['e1', 'e2', 'e3']) h.write(`/t/${id}.output`, '')
+    await h.tick()
+    const began = h.now()
+    h.advance(CHAT_GAP_MS)
+    h.write('/t/e1.output', '\n[exited with code 0]\n'); await h.tick()
+    await runTo(h, began + 4 * 60 * 1000)
+    h.advance(CHAT_GAP_MS)
+    h.write('/t/e2.output', '\n[exited with code 0]\n'); await h.tick()
+    await runTo(h, began + 6 * 60 * 1000)
+    h.advance(CHAT_GAP_MS)
+    h.write('/t/e3.output', '\n[exited with code 0]\n'); await h.tick()
+    const final = h.edits.at(-1)!
+    expect(final).toEqual({ id: 7, text: '🐚 Shells\n2. ✅ Done in 4m 3s · shell · Recent\n3. ✅ Done in 6m 3s · shell · Last' })
+
+    const attempts = h.attempts.length
+    await runTo(h, h.now() + 10 * 60 * 1000)
+    expect(h.attempts).toHaveLength(attempts)
+    expect(h.sent).toHaveLength(1)
+    h.events.push(shell(h, 'e4', 'Next'))
+    h.write('/t/e4.output', '')
+    await h.tick()
+    expect(h.sent.map(s => s.text)).toEqual([expect.anything(), '🐚 Shells\n1. ⏳ shell · Next · 0s'])
+    expect(h.sent[1]!.chat).toBe(h.sent[0]!.chat)
+    expect(h.edits.at(-1)).toBe(final)
+  })
+
+  test('with over 100 rows still in the message after its lowest-numbered rows left, the cap shows 100 of them in its order and counts only the rest', async () => {
+    const h = harness()
+    await h.tick()
+    for (let i = 0; i < 110; i++) { h.events.push(shell(h, `s${i}`, `S${i}`)); h.write(`/t/s${i}.output`, '') }
+    await h.tick()
+    const began = h.now()
+    h.advance(CHAT_GAP_MS)
+    for (const i of [0, 1, 2]) h.write(`/t/s${i}.output`, '\n[exited with code 0]\n')
+    await h.tick()
+    const firstEnded = h.now()
+    await runTo(h, began + 60_000)
+    h.advance(CHAT_GAP_MS)
+    for (let i = 3; i < 108; i++) h.write(`/t/s${i}.output`, '\n[exited with code 0]\n')
+    await h.tick()
+    await runTo(h, firstEnded + FIVE_MINUTES)
+
+    const next = taken(h).find(e => e.at >= firstEnded + FIVE_MINUTES)!
+    expect(next.at).toBe(firstEnded + FIVE_MINUTES)
+    expect(next.text.length).toBeLessThanOrEqual(AGENT_MESSAGE_LIMIT)
+    const lines = next.text.split('\n')
+    expect(lines[0]).toBe('🐚 Shells')
+    // The running rows first, then the finished history by number.
+    const numbers = lines.slice(1, -1).map(l => Number(l.split('.')[0]))
+    expect(numbers).toEqual([...Array.from({ length: 98 }, (_, i) => i + 4), 109, 110])
+    expect(lines.at(-1)).toBe('… 7 more shells')
+    expect(lines[1]).toBe('4. ✅ Done in 1m 3s · shell · S3')
+    expect(lines.at(-3)).toBe('109. ⏳ shell · S108 · 5m 3s')
+    expect(lines.at(-2)).toBe('110. ⏳ shell · S109 · 5m 3s')
+    expect(taken(h).some(e => e.at < next.at && e.text.includes('\n4. ✅ Done in 1m 3s · shell · S3'))).toBe(true)
   })
 })
 
