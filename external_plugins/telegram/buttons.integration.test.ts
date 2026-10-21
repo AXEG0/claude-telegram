@@ -902,6 +902,191 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     await srv.close()
   }, 15000)
 
+  // The polling server sends a message with no buttons; text edits come from
+  // a server that does not poll, on the same state folder.
+  async function plainPair(senderRules: object[], channelRules: object[] = []) {
+    const dir = state()
+    const p = await channel(dir, { rules: channelRules })
+    // The record exists, holding another message.
+    await ask(p)
+    const m = Number(/^sent \(id: (\d+)\)$/.exec(ok(await tool(p, 'reply', { chat_id: '1', text: 'working' })))![1])
+    const s = await sender(dir, { rules: senderRules })
+    return { dir, p, s, m }
+  }
+  const editsOf = (dir: string, m: number) => calls(dir).filter(c => EDITS.includes(c.method) && c.payload.message_id === m)
+  // Each edit of m in the fake's log: whose (s, the text editor, or p), which
+  // call, the keyboard it carries, and whether Telegram refused it.
+  function editLog(dir: string, m: number) {
+    const edits = editsOf(dir, m)
+    const s = edits.find(c => c.method === 'editMessageText')?.pid
+    return edits.map(c => [c.pid === s ? 's' : 'p', c.method, markupOf(c) ? JSON.stringify(markupOf(c)) : 'none', c.refused ? 'refused' : 'ok'])
+  }
+  const PLAIN = { method: 'editMessageText', has: 'PLAIN' }
+  const SET = { method: 'editMessageReplyMarkup', markup: true, has: '"No"' }
+
+  test('with a text edit of a message the record does not hold held, buttons a second server sets land, and the message ends with them, set again after the text edit', async () => {
+    const { dir, p, s, m } = await plainPair([{ ...PLAIN, holdMs: 2000 }])
+    const text = tool(s, 'edit_message', { chat_id: '1', message_id: String(m), text: 'PLAIN' })
+    await until(() => editsOf(dir, m).length === 1)
+    ok(await tool(p, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [['Yes', 'No']] }))
+    const set = JSON.stringify(shown(dir, m))
+    expect(ok(await text)).toBe(`edited (id: ${m})`)
+    expect(editLog(dir, m)).toEqual([
+      ['s', 'editMessageText', 'none', 'ok'],
+      ['p', 'editMessageReplyMarkup', set, 'ok'],
+      ['s', 'editMessageReplyMarkup', set, 'ok'],
+    ])
+    // The record holds that keyboard's id and labels.
+    expect(entryOf(dir, m)).toEqual({ chat: '1', message: m, keyboard: Number(dataOf(JSON.parse(set), 'Yes').split(':')[1]), rows: [['Yes', 'No']] })
+    await s.close()
+    await p.close()
+  }, 20000)
+
+  test('a text edit reaching Telegram after a second server’s keyboard edit, whose answer is held, leaves the message with that keyboard, set again after the text edit', async () => {
+    const { dir, p, s, m } = await plainPair([{ ...PLAIN, preMs: 1500 }], [{ ...SET, holdMs: 3000 }])
+    const text = tool(s, 'edit_message', { chat_id: '1', message_id: String(m), text: 'PLAIN' })
+    await Bun.sleep(200)
+    const setting = tool(p, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [['Yes', 'No']] })
+    expect(ok(await text)).toBe(`edited (id: ${m})`)
+    expect(ok(await setting)).toBe(`edited (id: ${m})`)
+    // The keyboard the second server set.
+    const set = editLog(dir, m)[0]![2]!
+    expect(JSON.parse(set).inline_keyboard.flat().map((b: any) => b.text)).toEqual(['Yes', 'No'])
+    // The text edit, sent first, reached the fake after the keyboard edit.
+    expect(editLog(dir, m)).toEqual([
+      ['p', 'editMessageReplyMarkup', set, 'ok'],
+      ['s', 'editMessageText', 'none', 'ok'],
+      ['s', 'editMessageReplyMarkup', set, 'ok'],
+    ])
+    expect(JSON.stringify(shown(dir, m))).toBe(set)
+    await s.close()
+    await p.close()
+  }, 20000)
+
+  test('in that order, with the keyboard set again answered message is not modified, the text edit still succeeds', async () => {
+    const { dir, p, s, m } = await plainPair([{ ...PLAIN, holdMs: 2000 }, { method: 'editMessageReplyMarkup', error: NOT_MODIFIED }])
+    const text = tool(s, 'edit_message', { chat_id: '1', message_id: String(m), text: 'PLAIN' })
+    await until(() => editsOf(dir, m).length === 1)
+    ok(await tool(p, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [['Yes', 'No']] }))
+    expect(ok(await text)).toBe(`edited (id: ${m})`)
+    expect(editLog(dir, m).map(([who, method, , answer]) => [who, method, answer])).toEqual([
+      ['s', 'editMessageText', 'ok'],
+      ['p', 'editMessageReplyMarkup', 'ok'],
+      ['s', 'editMessageReplyMarkup', 'refused'],
+    ])
+    await s.close()
+    await p.close()
+  }, 20000)
+
+  test('a late text edit that Telegram applies but whose connection drops before an answer still leaves the message with that keyboard', async () => {
+    const { dir, p, s, m } = await plainPair([{ ...PLAIN, preMs: 1500, drop: true }], [{ ...SET, holdMs: 3000 }])
+    const text = tool(s, 'edit_message', { chat_id: '1', message_id: String(m), text: 'PLAIN' })
+    await Bun.sleep(200)
+    const setting = tool(p, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [['Yes', 'No']] })
+    expect(failed(await text)).toContain("Network request for 'editMessageText' failed")
+    ok(await setting)
+    // The keyboard the second server set.
+    const set = editLog(dir, m)[0]![2]!
+    expect(JSON.parse(set).inline_keyboard.flat().map((b: any) => b.text)).toEqual(['Yes', 'No'])
+    expect(editLog(dir, m)).toEqual([
+      ['p', 'editMessageReplyMarkup', set, 'ok'],
+      ['s', 'editMessageText', 'none', 'ok'],
+      ['s', 'editMessageReplyMarkup', set, 'ok'],
+    ])
+    expect(JSON.stringify(shown(dir, m))).toBe(set)
+    await s.close()
+    await p.close()
+  }, 20000)
+
+  test('when Telegram then refuses that held keyboard edit, the message ends without buttons, the record no longer holds it, and the text edit makes no further call', async () => {
+    const refused = { error_code: 400, description: "Bad Request: message can't be edited" }
+    const { dir, p, s, m } = await plainPair([{ ...PLAIN, preMs: 1500 }], [{ ...SET, holdMs: 3000, error: refused }])
+    const text = tool(s, 'edit_message', { chat_id: '1', message_id: String(m), text: 'PLAIN' })
+    await Bun.sleep(200)
+    const setting = tool(p, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [['Yes', 'No']] })
+    expect(ok(await text)).toBe(`edited (id: ${m})`)
+    expect(failed(await setting)).toContain("message can't be edited")
+    await Bun.sleep(300)
+    expect(editLog(dir, m).map(([who, method, , answer]) => [who, method, answer])).toEqual([
+      ['p', 'editMessageReplyMarkup', 'refused'],
+      ['s', 'editMessageText', 'ok'],
+    ])
+    expect(shown(dir, m)).toBeUndefined()
+    expect(entryOf(dir, m)).toBeUndefined()
+    await s.close()
+    await p.close()
+  }, 20000)
+
+  test('when Telegram refuses the keyboard set again with a 429, the text edit fails with that description', async () => {
+    const { dir, p, s, m } = await plainPair([{ ...PLAIN, preMs: 1500 }, { method: 'editMessageReplyMarkup', error: TOO_MANY }], [{ ...SET, holdMs: 3000 }])
+    const text = tool(s, 'edit_message', { chat_id: '1', message_id: String(m), text: 'PLAIN' })
+    await Bun.sleep(200)
+    const setting = tool(p, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [['Yes', 'No']] })
+    expect(failed(await text)).toBe(`edit_message failed: the text was edited, but the buttons another call gave message ${m} meanwhile could not be set again: Call to 'editMessageReplyMarkup' failed! (429: Too Many Requests: retry after 5)`)
+    ok(await setting)
+    expect(editLog(dir, m).map(([who, method, , answer]) => [who, method, answer])).toEqual([
+      ['p', 'editMessageReplyMarkup', 'ok'],
+      ['s', 'editMessageText', 'ok'],
+      ['s', 'editMessageReplyMarkup', 'refused'],
+    ])
+    await s.close()
+    await p.close()
+  }, 20000)
+
+  test('when the answer to the keyboard set again is held past 10 seconds, the text edit fails saying the change may still land', async () => {
+    const { dir, p, s, m } = await plainPair([{ ...PLAIN, preMs: 1500 }, { method: 'editMessageReplyMarkup', holdMs: 11_000 }], [{ ...SET, holdMs: 3000 }])
+    const text = tool(s, 'edit_message', { chat_id: '1', message_id: String(m), text: 'PLAIN' }, 25_000)
+    await Bun.sleep(200)
+    const setting = tool(p, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [['Yes', 'No']] })
+    ok(await setting)
+    expect(failed(await text)).toBe(`edit_message failed: the text was edited, but the buttons another call gave message ${m} meanwhile could not be set again: Telegram did not answer within 10 s; the change may still land`)
+    expect(editLog(dir, m).map(([who, method]) => [who, method])).toEqual([
+      ['p', 'editMessageReplyMarkup'],
+      ['s', 'editMessageText'],
+      ['s', 'editMessageReplyMarkup'],
+    ])
+    await s.close()
+    await p.close()
+  }, 35000)
+
+  test('when a press takes the keyboard and its swap gets a 429 before the late text edit arrives, the message ends with one disabled button showing the label, and the record no longer holds it', async () => {
+    const { dir, p, s, m } = await plainPair([{ ...PLAIN, preMs: 3000 }], [{ method: 'editMessageReplyMarkup', has: 'disabled', times: 1, error: TOO_MANY }])
+    const text = tool(s, 'edit_message', { chat_id: '1', message_id: String(m), text: 'PLAIN' })
+    await Bun.sleep(200)
+    ok(await tool(p, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [['Yes', 'No']] }))
+    const set = JSON.stringify(shown(dir, m))
+    deliver(dir, [press(dir, m, 'Yes').update])
+    await until(() => pressed(p).length === 1)
+    expect(ok(await text)).toBe(`edited (id: ${m})`)
+    expect(editLog(dir, m)).toEqual([
+      ['p', 'editMessageReplyMarkup', set, 'ok'],
+      ['p', 'editMessageReplyMarkup', JSON.stringify(chosen('Yes')), 'refused'],
+      ['s', 'editMessageText', 'none', 'ok'],
+      ['s', 'editMessageReplyMarkup', JSON.stringify(chosen('Yes')), 'ok'],
+    ])
+    expect(shown(dir, m)).toEqual(chosen('Yes'))
+    expect(entryOf(dir, m)).toBeUndefined()
+    await s.close()
+    await p.close()
+  }, 20000)
+
+  test('a text edit of a message no other call touches makes exactly one call, and succeeds with its answer held past 10 seconds', async () => {
+    const { dir, p, s, m } = await plainPair([{ ...PLAIN, holdMs: 11_000 }])
+    expect(ok(await tool(s, 'edit_message', { chat_id: '1', message_id: String(m), text: 'PLAIN' }, 15_000))).toBe(`edited (id: ${m})`)
+    await Bun.sleep(300)
+    expect(editLog(dir, m)).toEqual([['s', 'editMessageText', 'none', 'ok']])
+    await s.close()
+    await p.close()
+  }, 30000)
+
+  test('a removal of buttons from a message the record does not hold runs under the 10-second limit', async () => {
+    const dir = state()
+    const srv = await channel(dir, { rules: [{ method: 'editMessageReplyMarkup', holdMs: 11_000 }] })
+    const m = Number(/^sent \(id: (\d+)\)$/.exec(ok(await tool(srv, 'reply', { chat_id: '1', text: 'working' })))![1])
+    expect(failed(await tool(srv, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [] }, 15_000))).toBe('edit_message failed: Telegram did not answer within 10 s; the change may still land')
+    await srv.close()
+  }, 25000)
+
   test('an edit whose answer is held past 10 seconds fails saying the change may still land, and a press on the keyboard it replaced delivers nothing', async () => {
     const dir = state()
     const srv = await channel(dir, { rules: [{ method: 'editMessageReplyMarkup', has: 'Ship', holdMs: 11_000 }] })
@@ -930,14 +1115,6 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     await srv.close()
   }, 15000)
 
-  test('a plain text edit of a message with no buttons that Telegram answers after 11 seconds succeeds, as before', async () => {
-    const dir = state()
-    const srv = await channel(dir, { rules: [{ method: 'editMessageText', holdMs: 11_000 }] })
-    const m = Number(/^sent \(id: (\d+)\)$/.exec(ok(await tool(srv, 'reply', { chat_id: '1', text: 'working' })))![1])
-    expect(ok(await tool(srv, 'edit_message', { chat_id: '1', message_id: String(m), text: 'done' }, 15_000))).toBe(`edited (id: ${m})`)
-    await srv.close()
-  }, 25000)
-
   test('a swap refused with a 400 ends its entry, and the next press gets the closed notice', async () => {
     const dir = state()
     const srv = await channel(dir, { rules: [{ method: 'editMessageReplyMarkup', has: 'disabled', error: { error_code: 400, description: "Bad Request: message can't be edited" } }] })
@@ -960,7 +1137,7 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     const m = await ask(srv)
     const k1 = entryOf(dir, m).keyboard
     expect(failed(await tool(srv, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [['Refused']] }))).toContain('MESSAGE_ID_INVALID')
-    expect(entryOf(dir, m)).toEqual({ chat: '1', message: m, keyboard: k1 })
+    expect(entryOf(dir, m)).toEqual({ chat: '1', message: m, keyboard: k1, rows: [['Yes', 'No']] })
     deliver(dir, [press(dir, m, 'Yes').update])
     await until(() => pressed(srv).length === 1)
     const n = await ask(srv, 'Another?')

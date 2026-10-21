@@ -89,40 +89,46 @@ describe('keyboards', () => {
 
 describe('the record', () => {
   const fresh = (): ButtonRecord => ({ next: 100, entries: [] })
+  const YN = [['Yes', 'No']]
+  const LATER = [['Now'], ['Later']]
 
-  test('a reply reserves an id, sends, then joins its message; a press that came first joins it itself', () => {
+  test('a reply reserves an id with its labels, sends, then joins its message; a press that came first joins it itself', () => {
     const rec = fresh()
-    const k = reserve(rec, '1')
+    const k = reserve(rec, '1', YN)
     expect(k).toBe(100)
     expect(rec.next).toBe(101)
+    expect(rec.entries).toEqual([{ chat: '1', keyboard: k, rows: YN }])
     expect(judge(rec, '1', 50, k)).toBe('reserved')
     expect(take(rec, '1', 50, k, 'Yes')).toBe(true)
-    expect(rec.entries).toEqual([{ chat: '1', message: 50, keyboard: k, taken: 'Yes' }])
+    expect(rec.entries).toEqual([{ chat: '1', message: 50, keyboard: k, rows: YN, taken: 'Yes' }])
     // The reply's join then leaves the record as it finds it.
     expect(joinMessage(rec, '1', k, 50)).toBe(false)
-    expect(rec.entries).toEqual([{ chat: '1', message: 50, keyboard: k, taken: 'Yes' }])
+    expect(rec.entries).toEqual([{ chat: '1', message: 50, keyboard: k, rows: YN, taken: 'Yes' }])
     expect(judge(rec, '1', 50, k)).toBe('taken')
     expect(take(rec, '1', 50, k, 'No')).toBe(false)
   })
 
   test('a reservation in another chat, or for another keyboard, lets no press count', () => {
     const rec = fresh()
-    const k = reserve(rec, '1')
+    const k = reserve(rec, '1', YN)
     expect(judge(rec, '2', 50, k)).toBe('closed')
     expect(judge(rec, '1', 50, k + 1)).toBe('closed')
     expect(unreserve(rec, '1', k)).toBe(true)
     expect(rec.entries).toEqual([])
   })
 
-  test('buttons set again open under a new id, and the old one comes back if Telegram refuses', () => {
+  test('buttons set again open under a new id with their labels, and the old ones come back if Telegram refuses', () => {
     const rec = fresh()
-    const k1 = reserve(rec, '1')
+    const k1 = reserve(rec, '1', YN)
     joinMessage(rec, '1', k1, 50)
+    expect(rec.entries).toEqual([{ chat: '1', message: 50, keyboard: k1, rows: YN }])
     const k2 = rec.next++
-    const was = replace(rec, '1', 50, k2)
+    const was = replace(rec, '1', 50, k2, LATER)
+    expect(rec.entries).toEqual([{ chat: '1', message: 50, keyboard: k2, rows: LATER }])
     expect(judge(rec, '1', 50, k1)).toBe('closed')
     expect(judge(rec, '1', 50, k2)).toBe('open')
     restore(rec, '1', 50, was)
+    expect(rec.entries).toEqual([{ chat: '1', message: 50, keyboard: k1, rows: YN }])
     expect(judge(rec, '1', 50, k1)).toBe('open')
     // Removal names none as current, then ends the entry once it lands.
     replace(rec, '1', 50, null)
@@ -136,11 +142,11 @@ describe('the record', () => {
 
   test('a new keyboard clears a pending swap, and a swap ends only the keyboard it showed', () => {
     const rec = fresh()
-    const k1 = reserve(rec, '1')
+    const k1 = reserve(rec, '1', YN)
     take(rec, '1', 50, k1, 'Yes')
     const k2 = rec.next++
-    replace(rec, '1', 50, k2)
-    expect(rec.entries).toEqual([{ chat: '1', message: 50, keyboard: k2 }])
+    replace(rec, '1', 50, k2, LATER)
+    expect(rec.entries).toEqual([{ chat: '1', message: 50, keyboard: k2, rows: LATER }])
     expect(drop(rec, '1', 50, k1)).toBe(false)
     expect(drop(rec, '1', 50, k2)).toBe(true)
   })
@@ -148,13 +154,13 @@ describe('the record', () => {
   test(`opening one more than ${RECORD_MAX} drops the oldest, reservations and taken entries included`, () => {
     const rec: ButtonRecord = { next: 5000, entries: [{ chat: '1', keyboard: 1 }, { chat: '1', message: 2, keyboard: 2, taken: 'Yes' }] }
     for (let i = 3; i <= RECORD_MAX; i++) rec.entries.push({ chat: '1', message: i, keyboard: i })
-    reserve(rec, '1')
+    reserve(rec, '1', YN)
     expect(rec.entries).toHaveLength(RECORD_MAX)
     expect(rec.entries[0]).toEqual({ chat: '1', message: 2, keyboard: 2, taken: 'Yes' })
-    replace(rec, '1', 7777, rec.next++)
+    replace(rec, '1', 7777, rec.next++, YN)
     expect(rec.entries[0]!.message).toBe(3)
     // Set again, an entry moves to the newest place.
-    replace(rec, '1', 3, rec.next++)
+    replace(rec, '1', 3, rec.next++, YN)
     expect(rec.entries[0]!.message).toBe(4)
     expect(rec.entries.at(-1)!.message).toBe(3)
   })
@@ -173,11 +179,11 @@ describe('the record file', () => {
   test('a new record counts from the clock’s milliseconds, and each write replaces the file whole', async () => {
     const dir = folder()
     const s = store(dir)
-    const k = await s.withLock(held => held.update(rec => reserve(rec, '1')))
+    const k = await s.withLock(held => held.update(rec => reserve(rec, '1', [['Yes']])))
     expect(k).toBe(1791544879112)
-    expect(JSON.parse(readFileSync(join(dir, 'buttons.json'), 'utf8'))).toEqual({ next: 1791544879113, entries: [{ chat: '1', keyboard: k }] })
+    expect(JSON.parse(readFileSync(join(dir, 'buttons.json'), 'utf8'))).toEqual({ next: 1791544879113, entries: [{ chat: '1', keyboard: k, rows: [['Yes']] }] })
     // Another clock does not restart the counter of a record that exists.
-    expect(await store(dir, () => 5).withLock(held => held.update(rec => reserve(rec, '1')))).toBe(1791544879113)
+    expect(await store(dir, () => 5).withLock(held => held.update(rec => reserve(rec, '1', [['Yes']])))).toBe(1791544879113)
     expect(readdirSync(dir).filter(f => f.endsWith('.tmp'))).toEqual([])
     for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true })
   })
@@ -191,6 +197,10 @@ describe('the record file', () => {
     expect(readdirSync(dir).filter(f => f.startsWith('buttons.json.corrupt-'))).toHaveLength(1)
     expect(existsSync(join(dir, 'buttons.json'))).toBe(false)
     expect(lines).toEqual(['buttons.json is unreadable, moved aside. Starting fresh.'])
+    // So is one whose labels are not rows of labels.
+    writeFileSync(join(dir, 'buttons.json'), JSON.stringify({ next: 9, entries: [{ chat: '1', message: 2, keyboard: 3, rows: ['Yes'] }] }))
+    expect(await s.withLock(held => held.read())).toEqual({ next: 9, entries: [] })
+    expect(readdirSync(dir).filter(f => f.startsWith('buttons.json.corrupt-'))).toHaveLength(2)
     for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true })
   })
 

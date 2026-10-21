@@ -61,8 +61,10 @@ let nextId = chats.ids
 // call by method, by `has` (texts all in the call's payload as JSON), and by
 // `markup` (whether the call carries a keyboard), for its first `times`
 // matches (every match, if unset), after letting its first `skip` matches
-// pass as usual. A matched call's answer waits `holdMs`,
-// then is `error` if set, else the usual answer. The log marks a call a rule
+// pass as usual. A matched call reaches the fake `preMs` late, so a call
+// sent after it can arrive first; its answer waits `holdMs`, then is `error`
+// if set, else the usual answer, unless `drop` loses the connection after the
+// fake applied the call and before it answers. The log marks a call a rule
 // refuses with `refused`.
 type Rule = {
   method: string | string[]
@@ -70,7 +72,9 @@ type Rule = {
   markup?: boolean
   skip?: number
   times?: number
+  preMs?: number
   holdMs?: number
+  drop?: boolean
   error?: { error_code: number; description: string; parameters?: object }
 }
 const rules = (JSON.parse(process.env.TELEGRAM_TEST_RULES || '[]') as Rule[]).map(rule => ({ rule, seen: 0, used: 0 }))
@@ -176,6 +180,7 @@ const fakeFetch = (async (url: string | URL | Request, options?: RequestInit) =>
   // call with when it came.
   const n = SENDS.includes(method) ? ++sends : 0
   const rule = ruleFor(method, payload)
+  if (rule?.preMs) await Bun.sleep(rule.preMs)
   const to = n && !rule?.error ? recipient(payload.chat_id) : undefined
   if (to && nextId !== undefined && !String(payload.chat_id).startsWith('@')) to.message_id = nextId++
   appendFileSync(process.env.TELEGRAM_TEST_API_LOG!, JSON.stringify({
@@ -185,6 +190,7 @@ const fakeFetch = (async (url: string | URL | Request, options?: RequestInit) =>
   }) + '\n')
   if (rule?.holdMs) await Bun.sleep(rule.holdMs)
   if (rule?.error) return json({ ok: false, ...rule.error })
+  if (rule?.drop) throw new TypeError('fetch failed: the connection was reset')
   let result: unknown = true
   if (method === 'getMe') result = { id: 123, is_bot: true, first_name: 'Test', username: 'test_bot' }
   if (n) {

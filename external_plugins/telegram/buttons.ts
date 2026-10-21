@@ -155,8 +155,9 @@ export async function withinLimit<T>(run: (signal: AbortSignal) => Promise<T>, m
 }
 
 // The record. An entry without a message is a reservation; keyboard null is a
-// removal under way; taken is a swap still pending.
-export type Entry = { chat: string; message?: number; keyboard: number | null; taken?: string }
+// removal under way; rows are the keyboard's labels, by row; taken is a swap
+// still pending.
+export type Entry = { chat: string; message?: number; keyboard: number | null; rows?: string[][]; taken?: string }
 export type ButtonRecord = { next: number; entries: Entry[] }
 
 function validEntry(e: unknown): e is Entry {
@@ -164,6 +165,7 @@ function validEntry(e: unknown): e is Entry {
   return !!x && typeof x === 'object' && typeof x.chat === 'string'
     && (x.message === undefined || Number.isSafeInteger(x.message))
     && (x.keyboard === null || Number.isSafeInteger(x.keyboard))
+    && (x.rows === undefined || Array.isArray(x.rows) && x.rows.every(row => Array.isArray(row) && row.every(label => typeof label === 'string')))
     && (x.taken === undefined || typeof x.taken === 'string')
 }
 
@@ -177,9 +179,9 @@ export function newKeyboard(rec: ButtonRecord): number {
   return rec.next++
 }
 
-export function reserve(rec: ButtonRecord, chat: string): number {
+export function reserve(rec: ButtonRecord, chat: string, rows: string[][]): number {
   const keyboard = newKeyboard(rec)
-  open(rec, { chat, keyboard })
+  open(rec, { chat, keyboard, rows })
   return keyboard
 }
 
@@ -236,14 +238,15 @@ export function drop(rec: ButtonRecord, chat: string, message: number, keyboard?
   return rec.entries.length !== before
 }
 
-// Names a new keyboard, or none, as message's current one before the call
-// that sets it; returns what to put back if Telegram refuses the change. An
-// entry whose keyboard is set again moves to the newest place.
-export function replace(rec: ButtonRecord, chat: string, message: number, keyboard: number | null): Entry | undefined {
+// Names a new keyboard with its rows, or none, as message's current one before
+// the call that sets it; returns what to put back if Telegram refuses the
+// change. An entry whose keyboard is set again moves to the newest place.
+export function replace(rec: ButtonRecord, chat: string, message: number, keyboard: number | null, rows?: string[][]): Entry | undefined {
   const before = entryOf(rec, chat, message)
   const was = before && { ...before }
   if (before) rec.entries = rec.entries.filter(e => e !== before)
-  if (keyboard !== null || before) open(rec, { chat, message, keyboard })
+  if (keyboard !== null) open(rec, { chat, message, keyboard, rows })
+  else if (before) open(rec, { chat, message, keyboard })
   return was
 }
 

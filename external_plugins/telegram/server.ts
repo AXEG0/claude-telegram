@@ -835,14 +835,46 @@ async function joinKeyboard(chat_id: string, keyboard: number, message_id: numbe
   }
 }
 
+// After a text edit without buttons of a message the record did not hold,
+// once its call ends, answered or not: if the record holds the message now,
+// another call gave it buttons meanwhile, which the text edit removed if it
+// reached Telegram second. Under the lock, a
+// taken keyboard gets its swap and an untaken one is set again, so the
+// message ends with what the record holds.
+async function textEditDone(chat_id: string, message_id: number): Promise<void> {
+  const after = buttonStore.peek()
+  if (after && !entryOf(after, chat_id, message_id)) return
+  await buttonStore.withLock(async held => {
+    const entry = entryOf(held.read(), chat_id, message_id)
+    if (!entry || entry.keyboard === null) return
+    if (entry.taken !== undefined) return swap(held, chat_id, message_id, entry.keyboard)
+    if (!entry.rows) return
+    const markup = keyboardOf(entry.rows, entry.keyboard)
+    try {
+      await limited(signal => bot.api.editMessageReplyMarkup(chat_id, message_id, { reply_markup: markup as never }, signal))
+    } catch (err) {
+      if (notModified(err)) return
+      if (messageGone(err)) {
+        try {
+          held.update(rec => drop(rec, chat_id, message_id))
+        } catch (e) {
+          logButtons(`could not end the entry of message ${message_id} in chat ${chat_id}: ${reason(e)}`)
+        }
+      }
+      throw new Error(`the buttons another call gave message ${message_id} meanwhile could not be set again: ${reason(err)}`)
+    }
+  })
+}
+
 // A Telegram call with no time limit of its own.
 const unlimited = <T>(run: (signal?: AbortSignal) => Promise<T>): Promise<T> => run()
 
 // Sets the message's keyboard to rows (none when undefined or empty) through
-// call. When the call sets buttons, or the record holds the message, it runs
-// under the lock with the 10-second limit: before the call, the record names
-// the new id, or none, as current, and the old one comes back if Telegram
-// refuses the change. Any other edit goes as before, with neither.
+// call. A text edit without buttons of a message the record does not hold
+// goes as before, with neither the lock nor the 10-second limit, then mends
+// what it may have removed: see textEditDone. Every other edit runs under the
+// lock with the limit: before the call, the record names the new id, or none,
+// as current, and the old one comes back if Telegram refuses the change.
 async function changeKeyboard(
   chat_id: string,
   message_id: number,
@@ -851,13 +883,21 @@ async function changeKeyboard(
 ): Promise<void> {
   const setting = rows !== undefined && rows.length > 0
   const peeked = buttonStore.peek()
-  if (!setting && peeked && !entryOf(peeked, chat_id, message_id)) {
+  if (rows === undefined && peeked && !entryOf(peeked, chat_id, message_id)) {
+    let failed: unknown
     try {
       await call(undefined, unlimited)
     } catch (err) {
-      // The message already holds what the call asked for.
-      if (!notModified(err)) throw err
+      // "Message is not modified": the message already holds what the call asked for.
+      if (!notModified(err)) failed = err
     }
+    // Answered or not, the text edit may have landed.
+    try {
+      await textEditDone(chat_id, message_id)
+    } catch (err) {
+      throw new Error(failed === undefined ? `the text was edited, but ${reason(err)}` : `${reason(failed)}; and ${reason(err)}`)
+    }
+    if (failed !== undefined) throw failed
     return
   }
   await buttonStore.withLock(async held => {
@@ -868,7 +908,7 @@ async function changeKeyboard(
       try {
         change = held.update(rec => {
           const keyboard = setting ? newKeyboard(rec) : null
-          return { keyboard, was: replace(rec, chat_id, message_id, keyboard) }
+          return { keyboard, was: replace(rec, chat_id, message_id, keyboard, setting ? rows : undefined) }
         })
       } catch (err) {
         throw new Error(`could not record the buttons, so nothing was edited: ${reason(err)}`)
@@ -968,7 +1008,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         let keyboard: number | undefined
         if (rows) {
           try {
-            keyboard = await buttonStore.withLock(held => held.update(rec => reserve(rec, chat_id)))
+            keyboard = await buttonStore.withLock(held => held.update(rec => reserve(rec, chat_id, rows)))
           } catch (err) {
             throw new Error(`could not record the buttons, so nothing was sent: ${reason(err)}`)
           }
