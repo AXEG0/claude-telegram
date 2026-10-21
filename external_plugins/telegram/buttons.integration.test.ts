@@ -219,24 +219,38 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     await probe.close()
   }, 20000)
 
-  test('a server that gave up after its conflict retries refuses non-empty buttons, and removes them', async () => {
+  test('non-empty buttons are refused from a poll that ended in 409 until a poll completes, a later poll that fails another way included, and removing them works throughout', async () => {
     const dir = state()
-    const srv = start(dir, fixture.argv, envOf({ rules: [{ method: 'getUpdates', error: { error_code: 409, description: 'Conflict: terminated by other getUpdates request' } }] }))
+    const srv = start(dir, fixture.argv, envOf({ rules: [
+      { method: 'getUpdates', times: 1, error: { error_code: 409, description: 'Conflict: terminated by other getUpdates request' } },
+      { method: 'getUpdates', times: 1, error: { error_code: 502, description: 'Bad Gateway' } },
+    ] }))
     await srv.ready()
-    await until(() => srv.stderr().includes('409 Conflict persists after 8 attempts'), 40_000)
-    const refusal = 'buttons are refused here: this server stopped polling after its conflict retries, so a press would reach whichever process polls'
-    expect(failed(await tool(srv, 'reply', { chat_id: '1', text: 'Q', buttons: [['Yes']] }))).toBe(`reply failed: ${refusal}`)
-    expect(failed(await tool(srv, 'edit_message', { chat_id: '1', message_id: '77', buttons: [['Yes']] }))).toBe(`edit_message failed: ${refusal}`)
-    expect(failed(await tool(srv, 'edit_message', { chat_id: '1', message_id: '77', text: 'Q', buttons: [['Yes']] }))).toBe(`edit_message failed: ${refusal}`)
-    expect(calls(dir).filter(c => SENDS.includes(c.method) || EDITS.includes(c.method))).toEqual([])
-    // It still sends without buttons, and removes them.
-    ok(await tool(srv, 'reply', { chat_id: '1', text: 'Q' }))
-    ok(await tool(srv, 'edit_message', { chat_id: '1', message_id: '77', buttons: [] }))
-    expect(calls(dir).filter(c => EDITS.includes(c.method)).map(c => [c.method, c.payload])).toEqual([
-      ['editMessageReplyMarkup', { chat_id: '1', message_id: 77 }],
-    ])
+    const polls = () => calls(dir).filter(c => c.method === 'getUpdates')
+    const refusal = 'buttons are refused here: a poll of this server ended in a conflict (409) with no poll completed since, so a press would reach whichever process polls'
+    const refused = async () => {
+      expect(failed(await tool(srv, 'reply', { chat_id: '1', text: 'Q', buttons: [['Yes']] }))).toBe(`reply failed: ${refusal}`)
+      expect(failed(await tool(srv, 'edit_message', { chat_id: '1', message_id: '77', buttons: [['Yes']] }))).toBe(`edit_message failed: ${refusal}`)
+      expect(failed(await tool(srv, 'edit_message', { chat_id: '1', message_id: '77', text: 'Q', buttons: [['Yes']] }))).toBe(`edit_message failed: ${refusal}`)
+      ok(await tool(srv, 'edit_message', { chat_id: '1', message_id: '77', buttons: [] }))
+    }
+    await until(() => polls()[0]?.refused !== undefined)
+    await Bun.sleep(100)
+    await refused()
+    // The next poll fails with a 502, and grammY polls again 3 seconds later.
+    await until(() => polls()[1]?.refused !== undefined, 5000)
+    await Bun.sleep(100)
+    expect(existsSync(join(dir, 'poll-heartbeat.json'))).toBe(false)
+    await refused()
+    // A completed poll writes the heartbeat.
+    await until(() => existsSync(join(dir, 'poll-heartbeat.json')), 6000)
+    await Bun.sleep(100)
+    const m = await ask(srv)
+    ok(await tool(srv, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [] }))
+    expect(calls(dir).filter(c => SENDS.includes(c.method) || c.method === 'editMessageText').map(c => [c.method, c.payload.text])).toEqual([['sendMessage', 'Merge now?']])
+    expect(calls(dir).filter(c => c.method === 'editMessageReplyMarkup').map(c => [c.payload.message_id, c.payload.reply_markup])).toEqual([[77, undefined], [77, undefined], [m, undefined]])
     await srv.close()
-  }, 50000)
+  }, 30000)
 
   test('a rich part carrying the keyboard that Telegram rejects for its content goes plain, with the keyboard on the last message of that fallback', async () => {
     const dir = state({ dmPolicy: 'allowlist', allowFrom: ['1'], textChunkLimit: 12 })
@@ -1002,20 +1016,6 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     expect(permissionAnswers(srv)).toEqual([])
     await srv.close()
   }, 15000)
-
-  test('after a poll that completed, the conflict retries count from one again', async () => {
-    const dir = state()
-    const conflict = { error_code: 409, description: 'Conflict: terminated by other getUpdates request' }
-    const srv = start(dir, fixture.argv, envOf({ rules: [
-      { method: 'getUpdates', times: 1, error: conflict },
-      { method: 'getUpdates', skip: 3, times: 1, error: conflict },
-    ] }))
-    await srv.ready()
-    const retries = () => [...srv.stderr().matchAll(/409 Conflict.*retrying in (\d+)s/g)].map(m => m[1])
-    await until(() => retries().length === 2, 10_000)
-    expect(retries()).toEqual(['1', '1'])
-    await srv.close()
-  }, 20000)
 
   test('the owner pressing a button labelled yes abcde settles no permission prompt', async () => {
     const dir = state()

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { spawn } from 'child_process'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'fs'
 import { join } from 'path'
-import { calls, children, cleanup, start, state, until } from './fixtures/harness.ts'
+import { calls, children, cleanup, deliver, start, state, until } from './fixtures/harness.ts'
 import fixture from './fixtures/channel-argv.json'
 import { AGENT_TICK_MS, appendAgentEvent, agentEventFile } from './agents.ts'
 import { appendPermit, permitDetail, permitFile, permitText, type PermitEvent } from './permit.ts'
@@ -817,6 +817,64 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     await channel.close()
     expect(existsSync(join(dir, 'bot.pid'))).toBe(false)
   })
+
+  const CONFLICT = { error_code: 409, description: 'Conflict: terminated by other getUpdates request' }
+  const conflicts = (rules: object[]) => ({ TELEGRAM_TEST_RULES: JSON.stringify(rules) })
+  // The gaps between the server's polls, in milliseconds, by the fake's log.
+  const pollGaps = (dir: string) => calls(dir).filter(c => c.method === 'getUpdates').map((c, i, all) => i ? c.at - all[i - 1]!.at : 0).slice(1)
+  // Each gap within slack of its seconds reads as those seconds; one outside
+  // reads as its milliseconds.
+  const asSeconds = (gaps: number[], seconds: number[], slack: number) =>
+    gaps.map((gap, i) => Math.abs(gap - (seconds[i] ?? 0) * 1000) <= slack ? seconds[i] : gap)
+
+  test('through sixteen conflicts in a row the server waits 1 to 15 seconds between polls and then 15 again, keeps polling, and hears a message sent after the conflict ends', async () => {
+    const dir = state()
+    const channel = start(dir, fixture.argv, conflicts([{ method: 'getUpdates', times: 16, error: CONFLICT }]))
+    await channel.ready()
+    const waits = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 15]
+    await until(() => pollGaps(dir).length > waits.length, 160_000)
+    expect(asSeconds(pollGaps(dir).slice(0, waits.length), waits, 500)).toEqual(waits)
+    deliver(dir, [{ message: { message_id: 10, date: Math.floor(Date.now() / 1000), from: { id: 1, is_bot: false, first_name: 'Owner' }, chat: { id: 1, type: 'private' }, text: 'after the conflict' } }])
+    await until(() => channel.inbound().length === 1, 5000)
+    expect(channel.inbound()[0]!.content).toBe('after the conflict')
+    await channel.close()
+  }, 180_000)
+
+  test('with two runs of three conflicts and a completed poll between them, the server waits 1, 2 and 3 seconds in each run', async () => {
+    const dir = state()
+    const channel = start(dir, fixture.argv, conflicts([
+      { method: 'getUpdates', times: 3, error: CONFLICT },
+      { method: 'getUpdates', skip: 1, times: 3, error: CONFLICT },
+    ]))
+    await channel.ready()
+    await until(() => pollGaps(dir).length >= 7, 35_000)
+    const [a, b, c, , d, e, f] = pollGaps(dir)
+    expect(asSeconds([a!, b!, c!, d!, e!, f!], [1, 2, 3, 1, 2, 3], 400)).toEqual([1, 2, 3, 1, 2, 3])
+    await channel.close()
+  }, 45_000)
+
+  test('a server whose MCP input closes during the wait after a conflict polls no more', async () => {
+    const dir = state()
+    const channel = start(dir, fixture.argv, conflicts([{ method: 'getUpdates', times: 1, error: CONFLICT }]))
+    await channel.ready()
+    await until(() => calls(dir).some(c => c.method === 'getUpdates' && c.refused))
+    const closed = Date.now()
+    channel.child.stdin!.end()
+    await until(() => channel.child.exitCode !== null, 5000)
+    expect(calls(dir).filter(c => c.method === 'getUpdates' && c.at > closed)).toEqual([])
+  }, 20_000)
+
+  test('a server that gets SIGTERM during the wait after a conflict polls no more', async () => {
+    const dir = state()
+    const channel = start(dir, fixture.argv, conflicts([{ method: 'getUpdates', times: 1, error: CONFLICT }]))
+    await channel.ready()
+    await until(() => calls(dir).some(c => c.method === 'getUpdates' && c.refused))
+    const pid = Number(readFileSync(join(dir, 'bot.pid'), 'utf8'))
+    const termed = Date.now()
+    process.kill(pid, 'SIGTERM')
+    await until(() => !existsSync(`/proc/${pid}`), 5000)
+    expect(calls(dir).filter(c => c.method === 'getUpdates' && c.at > termed)).toEqual([])
+  }, 20_000)
 
   test('a send-only instance creates neither bot.pid nor a heartbeat', async () => {
     const dir = state()

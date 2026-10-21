@@ -131,16 +131,18 @@ bot.api.config.use(heartbeatTransformer(HEARTBEAT_FILE, process.pid, Date.now, u
 // Whether a getUpdates completed since polling last (re)started, so the
 // conflict retries count only failures in a row.
 let polled = false
-// Set once the server gives up after its conflict retries: a press would then
-// reach whichever process polls.
-let pollingGaveUp = false
+// From a poll that ended in a conflict (409) until a poll completes: a press
+// would then reach whichever process polls.
+let conflicted = false
 // The time each update arrived, for a press: grammY handles a round's updates
 // one by one, so a press can wait behind another's swap before its handler runs.
 const arrived = new WeakMap<object, number>()
 bot.api.config.use(async (prev, method, payload, signal) => {
   const res = await prev(method, payload, signal)
+  if (method === 'getUpdates' && !res.ok && res.error_code === 409) conflicted = true
   if (method === 'getUpdates' && res.ok) {
     polled = true
+    conflicted = false
     const now = Date.now()
     for (const update of res.result as object[]) arrived.set(update, now)
   }
@@ -751,7 +753,7 @@ const logButtons = (line: string) => process.stderr.write(`telegram channel: but
 // buttons. Removing them is allowed anywhere.
 function assertPressesReachHere(): void {
   if (!POLLING) throw new Error('buttons are refused here: this server does not poll the bot, so a press would reach whichever process polls')
-  if (pollingGaveUp) throw new Error('buttons are refused here: this server stopped polling after its conflict retries, so a press would reach whichever process polls')
+  if (conflicted) throw new Error('buttons are refused here: a poll of this server ended in a conflict (409) with no poll completed since, so a press would reach whichever process polls')
 }
 const BOT_BUTTONS = "buttons are refused in a bot's chat: a bot cannot press one"
 
@@ -1685,7 +1687,9 @@ bot.catch(err => {
 // deaf to inbound messages until a full restart.
 if (POLLING) pollLoop = (async () => {
   // Failures in a row. onStart runs before the first getUpdates, so only a
-  // poll that completed since the last start begins a new count.
+  // poll that completed since the last start begins a new count. A conflict
+  // is never given up on: the wait grows by a second up to 15 seconds, so the
+  // server hears the chat again soon after the other poller stops.
   let attempt = 0
   for (;;) {
     polled = false
@@ -1715,20 +1719,14 @@ if (POLLING) pollLoop = (async () => {
       if (err instanceof Error && err.message === 'Aborted delay') return
       const is409 = err instanceof GrammyError && err.error_code === 409
       attempt = polled ? 1 : attempt + 1
-      if (is409 && attempt >= 8) {
-        pollingGaveUp = true
-        process.stderr.write(
-          `telegram channel: 409 Conflict persists after ${attempt} attempts — ` +
-          `another poller is holding the bot token (stray 'bun server.ts' process or a second session). Exiting.\n`,
-        )
-        return
-      }
       const delay = Math.min(1000 * attempt, 15000)
       const detail = is409
         ? `409 Conflict${attempt === 1 ? ' — another instance is polling (zombie session, or a second Claude Code running?)' : ''}`
         : `polling error: ${err}`
       process.stderr.write(`telegram channel: ${detail}, retrying in ${delay / 1000}s\n`)
       await new Promise(r => setTimeout(r, delay))
+      // A shutdown during the wait starts no further poll.
+      if (shuttingDown) return
     }
   }
 })()
