@@ -55,6 +55,8 @@ Supergroup IDs are negative numbers with a `-100` prefix, e.g. `-1001654782309`.
 
 With the default `requireMention: true`, the bot responds only when @mentioned or replied to. Pass `--no-mention` to process every message, or `--allow id1,id2` to restrict which members can trigger it.
 
+A press on [answer buttons](./README.md#button-presses) Claude put under a message in the group counts from any member the group admits, with no mention needed. The first press answers for everyone.
+
 ```
 /telegram:access group add -1001654782309 --no-mention
 /telegram:access group add -1001654782309 --allow 412587349,628194073

@@ -170,10 +170,10 @@ can answer no prompt. The typing indicator still goes to the bot's chat.
 
 | Tool | Purpose |
 | --- | --- |
-| `reply` | Sends to a chat, and to [another bot](#other-bots) by its `@username`, as plain text. Takes a numeric `chat_id` and `text`, with `reply_to` (a message ID) for native threading and `files` (absolute paths) for attachments. Images (`.jpg`/`.jpeg`/`.png`/`.gif`/`.webp`) go as photos with an inline preview, other files as documents, up to 50MB each, after the text. `format` picks `text` or `markdownv2`, and with rich messages on also `rich`, which is then the default. Long text goes out in several messages. Returns the sent message IDs. |
+| `reply` | Sends to a chat, and to [another bot](#other-bots) by its `@username`, as plain text. Takes a numeric `chat_id` and `text`, with `reply_to` (a message ID) for native threading and `files` (absolute paths) for attachments. Images (`.jpg`/`.jpeg`/`.png`/`.gif`/`.webp`) go as photos with an inline preview, other files as documents, up to 50MB each, after the text. `format` picks `text` or `markdownv2`, and with rich messages on also `rich`, which is then the default. Long text goes out in several messages. `buttons` puts [answer buttons](#button-presses) under the last message sent, a text part or a file: 1 to 4 rows of 1 to 4 labels, each 1 to 40 characters and distinct across the keyboard, with single spaces between words and none of `"` `<` `>` `[` `]` `;`, control characters, or the invisible and combining characters Telegram would change. Buttons are refused in another bot's chat and in a server that does not poll the bot. Returns the sent message IDs, and with buttons also the message that carries them; a reply that fails partway names the IDs already sent. |
 | `react` | Adds an emoji reaction to a message by ID, from Telegram's fixed set of reaction emoji (👍 👎 ❤ 🔥 👀 and others). |
 | `download_attachment` | Downloads an attachment by the `attachment_file_id` on its message to the inbox and returns the local path. Telegram serves bot downloads up to 20MB. |
-| `edit_message` | Edits a message the bot sent, for progress updates such as "working…" turning into the result. Takes the same `format` as `reply`. An edit stays one message, so longer text goes in a new reply, and an edit sends no notification, so a finished task gets a new reply too. |
+| `edit_message` | Edits a message the bot sent, for progress updates such as "working…" turning into the result. Takes `text`, `buttons`, or both, and the same `format` as `reply`. With `text`, the edit carries `buttons` in the same call, so a text edit without `buttons` leaves the message without buttons, a shown choice included. With `buttons` alone only the buttons change, under a file too, and an empty list removes them, which works from any server. An edit Telegram answers with "message is not modified" counts as done. An edit stays one message, so longer text goes in a new reply, and an edit sends no notification, so a finished task gets a new reply too. |
 
 ## Messages Claude receives
 
@@ -281,6 +281,45 @@ reached Claude since the server started. The server also remembers the opening
 words of the last 1000 messages it sent with `reply`, as `edit_message` last
 left them; a reaction on a message neither memory holds, such as one sent
 before a restart, names it by its number alone.
+
+### Button presses
+
+When you press a button Claude put under a message with `reply` or
+`edit_message`, the press reaches Claude once, at once, as an event of its own,
+never as text you typed. The tag carries the button's label as `button` and the
+message's `message_id`, its `ts` is the time the server got the press, and the
+content names the message and quotes its opening words:
+
+```
+<channel source="plugin:telegram:telegram" chat_id="1" message_id="10" button="Yes" user="owner" user_id="1" ts="2026-10-21T12:07:00.000Z">
+Pressed "Yes" on message 10: "Deploy finished. Merge?"
+</channel>
+```
+
+The buttons then become one disabled button showing the choice, which does
+nothing when tapped, and the message's text, rich content or file stays as it
+was. In a group, the first press answers for everyone. A press counts from a
+sender the chat admits as it would admit a new message, with no mention needed,
+never under `dmPolicy` `disabled` and never from a bot, read-only: it never
+starts pairing, writes `access.json`, answers a permission prompt or joins a
+burst. It goes alone, after any burst waiting in the chat. A second press, a
+press on buttons an edit replaced or removed, and a press on a button written
+into a rich message's body deliver nothing, and the presser sees a short notice.
+
+Every server on the state directory, polling or not, shares one record of the
+buttons it set, `buttons.json`, and changes it under a lock on `buttons.lock`.
+So a press made while a server polls reaches Claude, on a message sent before a
+restart or a plugin reload too. The record holds 1000 entries; a press on
+buttons older than that gets a notice that the question is closed. A Telegram
+call that sets, removes or swaps buttons gives up after 10 seconds, and a tool
+call that gave up says the change may still land. A press waiting for the lock
+holds back that server's other inbound messages for up to 10 seconds per
+Telegram call made under it. When Telegram answers the swap to the disabled
+button with a 429, the buttons stay live until the next press on them, which
+delivers nothing and shows the first choice, or until the polling server next
+starts. Telegram's Bot API server keeps an unread press for 150 seconds, so a
+press made while no server polls for longer is lost and its buttons stay live.
+A press that arrives while the server shuts down gets a notice to press again.
 
 ## What the chat shows
 

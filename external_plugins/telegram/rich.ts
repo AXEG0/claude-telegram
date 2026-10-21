@@ -12,6 +12,7 @@ import { fromMarkdown } from 'mdast-util-from-markdown'
 import { gfmFromMarkdown } from 'mdast-util-gfm'
 import { gfm } from 'micromark-extension-gfm'
 import type { Nodes, Parents, Root, RootContent } from 'mdast'
+import { keyboardRefused } from './buttons.ts'
 
 // Telegram rejects a rich message over 32768 characters, rejected one of 600
 // paragraphs (the docs say 500 blocks; list items and table rows did not
@@ -383,7 +384,7 @@ function cutBlock(r: Rendered, from: number, to: number, node: RootContent | und
 export type RawApi = {
   sendRichMessage(params: Record<string, unknown>): Promise<{ message_id: number }>
   sendMessage(params: Record<string, unknown>): Promise<{ message_id: number }>
-  editMessageText(params: Record<string, unknown>): Promise<unknown>
+  editMessageText(params: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>
 }
 
 // Whether a failed rich send or edit goes out plain instead: Telegram rejected
@@ -492,6 +493,9 @@ export function richPartsAsync(text: string, limits?: Limits, ms = RICH_PARSE_MS
 // text keeps whole, goes out plain, cut by plainChunks. Message ids land in
 // progress.ids as they are sent, and progress.done counts finished parts of
 // progress.total, so a failure part way reports what already went out.
+// markup goes on the last message sent: the last part, or the last message
+// of its plain fallback. A call carrying it that Telegram refuses for the
+// keyboard fails at once, with no plain copy.
 export async function sendRich(opts: {
   raw: RawApi
   chatId: string
@@ -502,6 +506,7 @@ export async function sendRich(opts: {
   progress: { ids: number[]; done: number; total: number }
   // Called for each message sent, with the text Claude wrote for it.
   sent?: (messageId: number, text: string) => void
+  markup?: object
 }): Promise<void> {
   const { raw, chatId, progress } = opts
   const parts = await richPartsAsync(opts.text)
@@ -510,21 +515,26 @@ export async function sendRich(opts: {
     const to = opts.replyTo(progress.ids.length)
     return to != null ? { reply_parameters: { message_id: to, allow_sending_without_reply: true } } : {}
   }
-  for (const part of parts) {
+  for (let p = 0; p < parts.length; p++) {
+    const part = parts[p]!
+    const markup = opts.markup && p === parts.length - 1 ? { reply_markup: opts.markup } : {}
     if (part.rich !== undefined) {
       try {
-        const sent = await raw.sendRichMessage({ chat_id: chatId, rich_message: { markdown: part.rich }, ...replyParams() })
+        const sent = await raw.sendRichMessage({ chat_id: chatId, rich_message: { markdown: part.rich }, ...replyParams(), ...markup })
         progress.ids.push(sent.message_id)
         opts.sent?.(sent.message_id, part.plain)
         progress.done++
         continue
       } catch (err) {
+        if ('reply_markup' in markup && keyboardRefused(err)) throw err
         if (!plainFallback(err)) throw err
         process.stderr.write(`telegram channel: rich message rejected, sending plain: ${describe(err)}\n`)
       }
     }
-    for (const text of opts.plainChunks(part.plain)) {
-      const sent = await raw.sendMessage({ chat_id: chatId, text, ...replyParams() })
+    const chunks = opts.plainChunks(part.plain)
+    for (let i = 0; i < chunks.length; i++) {
+      const text = chunks[i]!
+      const sent = await raw.sendMessage({ chat_id: chatId, text, ...replyParams(), ...(i === chunks.length - 1 ? markup : {}) })
       progress.ids.push(sent.message_id)
       opts.sent?.(sent.message_id, text)
     }
@@ -535,19 +545,42 @@ export async function sendRich(opts: {
 // Edits a message into rich text; if Telegram rejects the content, into plain.
 // Only Telegram's size limit applies here: an edit has no second message.
 export async function editRich(opts: { raw: RawApi; chatId: string; messageId: number; text: string }): Promise<void> {
-  const parts = await richPartsAsync(opts.text, { bytes: RICH_PART_BYTES, blocks: Infinity })
+  await editRichParsed({ ...opts, rich: await richEditParse(opts.text) })
+}
+
+// The rich Markdown for an edit to text, or undefined when only plain text
+// keeps it whole; parsed before any lock is taken.
+export async function richEditParse(text: string): Promise<string | undefined> {
+  const parts = await richPartsAsync(text, { bytes: RICH_PART_BYTES, blocks: Infinity })
   if (parts.length > 1) throw new Error('text too long for one rich message: send it with reply instead')
-  const rich = parts[0]?.rich
-  if (rich !== undefined) {
+  return parts[0]?.rich
+}
+
+// The edit itself, with markup in the same call, its plain fallback included;
+// a refusal of the keyboard fails at once, with no plain edit. limit wraps
+// each call, as a call made under the button lock gives up in time.
+export async function editRichParsed(opts: {
+  raw: RawApi
+  chatId: string
+  messageId: number
+  text: string
+  rich: string | undefined
+  markup?: object
+  limit?: <T>(run: (signal?: AbortSignal) => Promise<T>) => Promise<T>
+}): Promise<void> {
+  const limit = opts.limit ?? (run => run())
+  const markup = opts.markup ? { reply_markup: opts.markup } : {}
+  if (opts.rich !== undefined) {
     try {
-      await opts.raw.editMessageText({ chat_id: opts.chatId, message_id: opts.messageId, rich_message: { markdown: rich } })
+      await limit(signal => opts.raw.editMessageText({ chat_id: opts.chatId, message_id: opts.messageId, rich_message: { markdown: opts.rich }, ...markup }, signal))
       return
     } catch (err) {
+      if (opts.markup && keyboardRefused(err)) throw err
       if (!plainFallback(err)) throw err
       process.stderr.write(`telegram channel: rich edit rejected, editing plain: ${describe(err)}\n`)
     }
   }
-  await opts.raw.editMessageText({ chat_id: opts.chatId, message_id: opts.messageId, text: opts.text })
+  await limit(signal => opts.raw.editMessageText({ chat_id: opts.chatId, message_id: opts.messageId, text: opts.text, ...markup }, signal))
 }
 
 function describe(err: unknown): string {
