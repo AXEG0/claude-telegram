@@ -200,7 +200,8 @@ describe('the record file', () => {
     // So is one whose labels are not rows of labels.
     writeFileSync(join(dir, 'buttons.json'), JSON.stringify({ next: 9, entries: [{ chat: '1', message: 2, keyboard: 3, rows: ['Yes'] }] }))
     expect(await s.withLock(held => held.read())).toEqual({ next: 9, entries: [] })
-    expect(readdirSync(dir).filter(f => f.startsWith('buttons.json.corrupt-'))).toHaveLength(2)
+    expect(existsSync(join(dir, 'buttons.json'))).toBe(false)
+    expect(lines).toEqual(Array(2).fill('buttons.json is unreadable, moved aside. Starting fresh.'))
     for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true })
   })
 
