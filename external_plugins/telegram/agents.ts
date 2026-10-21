@@ -6,6 +6,9 @@
 //   2. ⏳ shell · Wait for CI · 2m 5s
 //   3. ❌ Failed after 12s (exit 1) · shell · Run the tests
 //
+// A finished row leaves the message five minutes after the message first
+// showed it finished; every row keeps the number it joined with.
+//
 // The plugin's SubagentStart, SubagentStop and PostToolUse hook
 // (hooks/subagent.ts) appends one line per event to a file named for the
 // Claude Code pid. The server reads the files of its ancestors, then follows
@@ -32,6 +35,9 @@ export const CLOCK_REFRESH_MS = 10_000
 export const AGENT_STALE_MS = 30 * 60 * 1000
 // After this long quiet, a subagent is dropped without a stop.
 export const AGENT_DROP_MS = 2 * 60 * 60 * 1000
+// A finished row leaves the message this long after the first send or edit
+// Telegram accepted with its ending, so the rows still running keep their room.
+export const FINISHED_ROW_MS = 5 * 60 * 1000
 const TAIL_BYTES = 256 * 1024
 
 export type AgentEvent = {
@@ -349,6 +355,9 @@ type Agent = {
   exitCode?: number
   shown?: boolean
   dropped?: boolean
+  // When Telegram first accepted a send or edit carrying this run's ending,
+  // or a dropped subagent's line after its drop.
+  endShownAt?: number
 }
 
 const shellKey = (taskId: string) => `shell:${taskId}`
@@ -356,6 +365,10 @@ const shellKey = (taskId: string) => `shell:${taskId}`
 type Batch = {
   chatId: string
   members: Map<string, Agent>
+  // The number each row got when it joined, kept for the message's life, so a
+  // number names the same subagent or shell after rows before it left.
+  numbers: Map<string, number>
+  lastNumber: number
   msgId?: number
   gone?: boolean
   failures: number
@@ -399,9 +412,15 @@ function contentKey(a: Agent, now: number): string {
 export const AGENT_MESSAGE_LIMIT = 4096
 const MAX_PANEL_ROWS = 100
 
+const isEnded = (a: Agent) => a.done !== undefined || !!a.dropped
+const hasLeft = (a: Agent, t: number) => a.endShownAt !== undefined && t - a.endShownAt >= FINISHED_ROW_MS
+
 function panel(batch: Batch, agents: Map<string, Agent>, t: number) {
-  const members = [...batch.members.values()]
-  let shown = members.map((a, i) => ({ a, ordinal: i + 1, key: contentKey(a, t) }))
+  // Only the rows still in the message count: for the cap, the count of more
+  // rows, the header and each row's width.
+  const members = [...batch.members.values()].filter(a => !hasLeft(a, t))
+  let shown = members.map(a => ({ a, ordinal: batch.numbers.get(a.key)!, key: contentKey(a, t), ended: isEnded(a) }))
+    .sort((a, b) => a.ordinal - b.ordinal)
   if (shown.length > MAX_PANEL_ROWS) {
     // If even shortened rows cannot all fit, show unacknowledged endings and
     // new agents first, then running agents, ahead of finished history.
@@ -494,6 +513,9 @@ export function createAgentStream(opts: {
       if (![...batch.members.values()].some(a => a.done === undefined && !a.dropped)) batches.delete(batch.chatId)
       return
     }
+    // A row that left with its ending acknowledged is done with; its number
+    // stays taken, so a resumed subagent comes back under it.
+    for (const [key, a] of batch.members) if (hasLeft(a, t) && agents.get(key) !== a) batch.members.delete(key)
     const frame = panel(batch, agents, t)
     const running = [...batch.members.values()].some(a => a.done === undefined && !a.dropped)
     if (frame.key === batch.sentKey && (!running || t - batch.lastEdit < CLOCK_REFRESH_MS)) return
@@ -505,8 +527,11 @@ export function createAgentStream(opts: {
     const ok = () => {
       batch.sentKey = frame.key
       batch.failures = 0
-      for (const { a, key } of frame.shown) {
+      for (const { a, key, ended } of frame.shown) {
         a.shown = true
+        // The five minutes run from the first accepted frame that carried the
+        // ending, never from a frame built before it or one Telegram refused.
+        if (ended) a.endShownAt ??= now()
         // An ending received while this send/edit was in flight still needs
         // its own acknowledgement. A resumed run is a different Agent object.
         if (contentKey(a, now()) === key && (a.done !== undefined || a.dropped)
@@ -595,9 +620,10 @@ export function createAgentStream(opts: {
         }
         let batch = batches.get(a.chatId)
         if (!batch) {
-          batch = { chatId: a.chatId, members: new Map(), failures: 0, lastEdit: 0 }
+          batch = { chatId: a.chatId, members: new Map(), numbers: new Map(), lastNumber: 0, failures: 0, lastEdit: 0 }
           batches.set(a.chatId, batch)
         }
+        if (!batch.numbers.has(a.key)) batch.numbers.set(a.key, ++batch.lastNumber)
         batch.members.set(a.key, a)
       }
       for (const batch of batches.values()) flush(batch, t)
