@@ -30,4 +30,6 @@ jobs:
         with:
           bun-version: 1.3.13
       - run: bun install --frozen-lockfile
-      - run: bun test
+      # Four test files at a time: the running-server tests mostly wait on
+      # real timers, so the files that hold them run side by side.
+      - run: bun run test

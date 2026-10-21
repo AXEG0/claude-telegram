@@ -30,6 +30,17 @@ export function calls(dir: string): Call[] {
   return existsSync(file) ? readFileSync(file, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) : []
 }
 
+// Telegram's answer to a poll while another poller holds the bot, and the
+// environment that makes the fake give it, by the fake's rules.
+export const CONFLICT = { error_code: 409, description: 'Conflict: terminated by other getUpdates request' }
+export const conflicts = (rules: object[]) => ({ TELEGRAM_TEST_RULES: JSON.stringify(rules) })
+// The gaps between the server's polls, in milliseconds, by the fake's log.
+export const pollGaps = (dir: string) => calls(dir).filter(c => c.method === 'getUpdates').map((c, i, all) => i ? c.at - all[i - 1]!.at : 0).slice(1)
+// Each gap within slack of its seconds reads as those seconds; one outside
+// reads as its milliseconds.
+export const asSeconds = (gaps: number[], seconds: number[], slack: number) =>
+  gaps.map((gap, i) => Math.abs(gap - (seconds[i] ?? 0) * 1000) <= slack ? seconds[i] : gap)
+
 // A round of updates for the next getUpdates, written whole before the fake
 // can read it.
 export function deliver(dir: string, updates: object[]): void {
