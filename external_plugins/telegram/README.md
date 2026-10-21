@@ -427,10 +427,16 @@ interrupted. A shell's line carries the description Claude gave the command,
 never the command itself, and its running time. It changes to `✅ Done in …`
 when the shell exits with 0, `❌ Failed after … (exit N)` when it exits with
 another code, and `⏹ Stopped after …` when it is stopped, by TaskStop or by the
-end of the subagent that started it. Finished rows stay visible while the
-others run. Once the whole group ends, its final message stays intact and the
-next group gets a new one. The header names what the message carries:
-`🤖 Subagents`, `🐚 Shells`, or both.
+end of the subagent that started it. A finished row leaves the message five
+minutes after the message first shows it finished, so finished rows stop
+taking room from the rows still running; a quiet subagent dropped after two
+hours leaves the same way, while running and quiet rows stay. Every
+row keeps the number it joined with: the numbers of rows that left are not
+reused, a row that joins later takes the next number the message has not used,
+and a subagent resumed after its row left comes back under its old number. Once
+the whole group ends, its final message stays intact with the endings of its
+last five minutes, and the next group gets a new one. The header names what the
+message carries: `🤖 Subagents`, `🐚 Shells`, or both.
 The plugin's `SubagentStart`, `SubagentStop` and
 successful `TaskStop` hooks ([hooks/subagent.ts](./hooks/subagent.ts)) record each
 subagent under `agents/` in the state directory, and the server reads the
