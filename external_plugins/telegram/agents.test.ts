@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'fs'
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
@@ -27,6 +27,7 @@ import {
   type StreamEvent,
 } from './agents.ts'
 import shellHooks from './fixtures/shell-hooks.json'
+import workflowHooks from './fixtures/workflow-hooks.json'
 
 const assistant = (content: unknown[], usage?: Record<string, number>, ts = '2026-10-08T15:00:00.000Z') =>
   JSON.stringify({ type: 'assistant', timestamp: ts, message: { content, usage } })
@@ -155,10 +156,21 @@ describe('shellEndFromOutput', () => {
   })
 })
 
-const interrupted = (t: number) => JSON.stringify({
+const interrupted = (t: number, forToolUse = false) => JSON.stringify({
   type: 'user', timestamp: new Date(t).toISOString(),
-  message: { role: 'user', content: [{ type: 'text', text: '[Request interrupted by user]' }] },
+  message: { role: 'user', content: [{ type: 'text', text: forToolUse ? '[Request interrupted by user for tool use]' : '[Request interrupted by user]' }] },
 })
+
+// A workflow's subagents, as Claude Code 2.1.310 keeps them: the start hook
+// names the session's own transcript, while each subagent's transcript and meta
+// file sit in the workflow run's folder, <session>/subagents/workflows/<run id>/.
+const WORKFLOW_RUN = 'wf_0a1b2c3d-001'
+const workflowStartInput = (id: string, transcriptPath: string, agentType = 'workflow-subagent') =>
+  ({ ...workflowHooks.subagent_start_workflow, agent_id: id, agent_type: agentType, transcript_path: transcriptPath })
+const workflowMeta = (label: string, agentType = 'workflow-subagent') =>
+  JSON.stringify({ agentType, isBuiltIn: true, description: label, workflowPhase: 'Check', spawnDepth: 1 })
+const toolCall = (t: number, description: string, tokens: number) =>
+  assistant([{ type: 'tool_use', name: 'Bash', input: { command: 'true', description } }], { input_tokens: tokens }, new Date(t).toISOString())
 
 describe('interruptionFromTranscript', () => {
   test('reads an explicit terminal interruption, ignoring a partial line and trailing metadata', () => {
@@ -273,6 +285,11 @@ describe('createAgentStream', () => {
       },
       readFile: p => files.get(p),
       mtime: p => mtimes.get(p),
+      listDir: dir => {
+        const names = new Set<string>()
+        for (const p of files.keys()) if (p.startsWith(`${dir}/`)) names.add(p.slice(dir.length + 1).split('/')[0]!)
+        return names.size ? [...names] : undefined
+      },
       now: () => t,
     })
     const settle = () => new Promise(r => setTimeout(r, 0))
@@ -779,6 +796,90 @@ describe('createAgentStream', () => {
     expect(h.stream.agents()).toEqual([])
   })
 
+  // A workflow subagent's start event as the hook records it, and the run
+  // folder its files are in.
+  const WORKFLOW_SESSION = '/p/sess-w'
+  const RUN_DIR = `${WORKFLOW_SESSION}/subagents/workflows/${WORKFLOW_RUN}`
+  const workflowStart = (h: { now(): number }, id: string, agentType?: string) =>
+    eventFromHook(workflowStartInput(id, `${WORKFLOW_SESSION}.jsonl`, agentType), h.now())!
+
+  test('a workflow subagent shows its label once its meta file appears in its run folder, then its step and tokens', async () => {
+    const h = harness()
+    await h.tick()
+    const ev = workflowStart(h, 'w1')
+    expect(ev.agent_base).toBe(`${WORKFLOW_SESSION}/subagents/agent-w1`)
+    h.events.push(ev)
+    await h.tick()
+    expect(h.sent.map(s => s.text)).toEqual(['🤖 Subagents\n1. ⏳ workflow-subagent · Starting… · 0s'])
+
+    h.advance(CHAT_GAP_MS)
+    h.write(`${RUN_DIR}/agent-w1.meta.json`, workflowMeta('check:one'))
+    await h.tick()
+    expect(h.edits.at(-1)).toEqual({ id: 7, text: '🤖 Subagents\n1. ⏳ workflow-subagent · check:one · Starting… · 3s' })
+
+    h.advance(CHAT_GAP_MS)
+    h.write(`${RUN_DIR}/agent-w1.jsonl`, toolCall(h.now(), 'Read the file', 32300))
+    await h.tick()
+    expect(h.edits.at(-1)).toEqual({ id: 7, text: '🤖 Subagents\n1. ⏳ workflow-subagent · check:one · Read the file · 6s · 32.3k tokens' })
+  })
+
+  test('a workflow subagent of a custom type is found in its run folder too', async () => {
+    const h = harness()
+    await h.tick()
+    h.events.push(workflowStart(h, 'w6', 'code-reviewer'))
+    h.write(`${RUN_DIR}/agent-w6.meta.json`, workflowMeta('review:six', 'code-reviewer'))
+    h.write(`${RUN_DIR}/agent-w6.jsonl`, toolCall(h.now(), 'Read the diff', 2000))
+    await h.tick()
+    expect(h.sent.map(s => s.text)).toEqual(['🤖 Subagents\n1. ⏳ code-reviewer · review:six · Read the diff · 0s · 2.0k tokens'])
+  })
+
+  test('a workflow subagent whose transcript keeps changing never shows as quiet', async () => {
+    const h = harness()
+    await h.tick()
+    h.events.push(workflowStart(h, 'w1'))
+    h.write(`${RUN_DIR}/agent-w1.meta.json`, workflowMeta('check:one'))
+    await h.tick()
+    for (let i = 1; i <= 40; i++) {
+      h.advance(60_000)
+      h.write(`${RUN_DIR}/agent-w1.jsonl`, toolCall(h.now(), `Step ${i}`, 1000 + i))
+      await h.tick()
+    }
+    expect([...h.sent.map(s => s.text), ...h.edits.map(e => e.text)].filter(text => text.includes('No activity'))).toEqual([])
+    expect(h.edits.at(-1)?.text).toBe('🤖 Subagents\n1. ⏳ workflow-subagent · check:one · Step 40 · 40m 0s · 1.0k tokens')
+  })
+
+  test('a stopped workflow closes each of its rows from the stop line in its own transcript', async () => {
+    const h = harness()
+    await h.tick()
+    for (const id of ['w1', 'w2']) {
+      h.events.push(workflowStart(h, id))
+      h.write(`${RUN_DIR}/agent-${id}.meta.json`, workflowMeta(`check:${id}`))
+      h.write(`${RUN_DIR}/agent-${id}.jsonl`, toolCall(h.now(), 'Work', 100))
+    }
+    await h.tick()
+    expect(h.sent.map(s => s.text)).toEqual(['🤖 Subagents\n'
+      + '1. ⏳ workflow-subagent · check:w1 · Work · 0s · 100 tokens\n2. ⏳ workflow-subagent · check:w2 · Work · 0s · 100 tokens'])
+
+    h.advance(21_000)
+    h.write(`${RUN_DIR}/agent-w1.jsonl`, toolCall(h.now() - 1000, 'Work', 100) + '\n' + interrupted(h.now()))
+    h.write(`${RUN_DIR}/agent-w2.jsonl`, toolCall(h.now() - 1000, 'Work', 100) + '\n' + interrupted(h.now(), true))
+    await h.tick()
+    expect(h.edits.at(-1)).toEqual({ id: 7, text: '🤖 Subagents\n'
+      + '1. ⏹ Stopped after 21s · workflow-subagent · check:w1 · 100 tokens\n2. ⏹ Stopped after 21s · workflow-subagent · check:w2 · 100 tokens' })
+    expect(h.stream.agents()).toEqual([])
+  })
+
+  test('a workflow subagent stopped before the server started is not announced', async () => {
+    const h = harness()
+    h.events.push(workflowStart(h, 'w4'))
+    h.write(`${RUN_DIR}/agent-w4.meta.json`, workflowMeta('check:four'))
+    h.write(`${RUN_DIR}/agent-w4.jsonl`, toolCall(h.now(), 'Work', 100) + '\n' + interrupted(h.now() + 5000))
+    h.advance(60_000)
+    await h.tick()
+    expect(h.sent).toEqual([])
+    expect(h.stream.agents()).toEqual([])
+  })
+
   // A finished row leaves the message five minutes after the first edit
   // Telegram accepted with its ending.
   const FIVE_MINUTES = 5 * 60 * 1000
@@ -1216,5 +1317,60 @@ describe('hooks/subagent.ts', () => {
     stream.tick()
     await new Promise(r => setTimeout(r, 0))
     expect(sent.at(-1)).toMatch(/^🐚 Shells\n1\. ❌ Failed after \d+s \(exit 3\) · shell · Probe failing shell$/)
+  })
+
+  // The real hook, the subagents' files in Claude Code's own layout and the
+  // stream's own file readers: a workflow of four subagents stopped by TaskStop.
+  test('a stopped workflow through the hook: four SubagentStart inputs, a TaskStop result that appends nothing, then the stop lines close every row', async () => {
+    const state = mkdtempSync(join(tmpdir(), 'agents-'))
+    const projects = mkdtempSync(join(tmpdir(), 'projects-'))
+    try {
+      const { session_id } = workflowHooks.subagent_start_workflow
+      const transcript = join(projects, `${session_id}.jsonl`)
+      const runDir = join(projects, session_id, 'subagents', 'workflows', WORKFLOW_RUN)
+      mkdirSync(runDir, { recursive: true })
+      const hook = (stdin: unknown) => Bun.spawnSync(['bun', join(import.meta.dir, 'hooks', 'subagent.ts')], {
+        stdin: new TextEncoder().encode(JSON.stringify(stdin)),
+        env: { PATH: process.env.PATH!, HOME: process.env.HOME!, TELEGRAM_STATE_DIR: state, CLAUDE_PID: '4242' },
+      })
+      const file = agentEventFile(state, 4242)
+      const ids = [1, 2, 3, 4].map(n => `${workflowHooks.subagent_start_workflow.agent_id.slice(0, -1)}${n}`)
+      for (const [i, id] of ids.entries()) {
+        expect(hook(workflowStartInput(id, transcript)).exitCode).toBe(0)
+        writeFileSync(join(runDir, `agent-${id}.meta.json`), workflowMeta(`check:${i + 1}`))
+        writeFileSync(join(runDir, `agent-${id}.jsonl`), toolCall(Date.now(), 'Work', 100) + '\n')
+      }
+
+      let clock = Date.now()
+      const sent: string[] = []
+      const stream = createAgentStream({
+        readEvents: createEventReader([file], false),
+        chat: () => '1001',
+        send: async (_c, text) => { sent.push(text); return 7 },
+        edit: async (_c, _id, text) => { sent.push(text) },
+        now: () => clock,
+      })
+      stream.tick()
+      await new Promise(r => setTimeout(r, 0))
+      expect(sent).toHaveLength(1)
+      expect(sent[0]).toMatch(new RegExp('^🤖 Subagents'
+        + ids.map((_, i) => `\\n${i + 1}\\. ⏳ workflow-subagent · check:${i + 1} · Work · \\d+s · 100 tokens`).join('') + '$'))
+
+      const before = readFileSync(file, 'utf8')
+      expect(hook({ ...workflowHooks.task_stop_workflow, transcript_path: transcript }).exitCode).toBe(0)
+      expect(readFileSync(file, 'utf8')).toBe(before)
+
+      for (const [i, id] of ids.entries()) appendFileSync(join(runDir, `agent-${id}.jsonl`), interrupted(Date.now(), i === 1) + '\n')
+      clock = Date.now() + CHAT_GAP_MS
+      stream.tick()
+      await new Promise(r => setTimeout(r, 0))
+      expect(sent).toHaveLength(2)
+      expect(sent[1]).toMatch(new RegExp('^🤖 Subagents'
+        + ids.map((_, i) => `\\n${i + 1}\\. ⏹ Stopped after \\d+s · workflow-subagent · check:${i + 1} · 100 tokens`).join('') + '$'))
+      expect(stream.agents()).toEqual([])
+    } finally {
+      rmSync(state, { recursive: true, force: true })
+      rmSync(projects, { recursive: true, force: true })
+    }
   })
 })

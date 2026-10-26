@@ -13,8 +13,9 @@
 // (hooks/subagent.ts) appends one line per event to a file named for the
 // Claude Code pid. The server reads the files of its ancestors, then follows
 // each subagent's own transcript for its current step and token count, and its
-// meta file for its description; and each shell's output file for the line
-// Claude Code appends when the shell ends.
+// meta file for its description, in the workflow run's own folder for a
+// workflow's subagent; and each shell's output file for the line Claude Code
+// appends when the shell ends.
 //
 // This file carries no dependencies beyond Node's, so the hook can import it
 // before `bun install` has run.
@@ -46,6 +47,8 @@ export type AgentEvent = {
   agent_id: string
   agent_type?: string
   // <session transcript dir>/<session id>/subagents/agent-<id>, without suffix.
+  // A workflow's subagent keeps its files in subagents/workflows/<run id>/
+  // instead, where the stream finds them.
   agent_base?: string
   outcome?: 'stopped'
 }
@@ -452,11 +455,13 @@ export function createAgentStream(opts: {
   edit: (chatId: string, msgId: number, text: string) => Promise<void>
   readFile?: (path: string) => string | undefined
   mtime?: (path: string) => number | undefined
+  listDir?: (path: string) => string[] | undefined
   now?: () => number
 }): AgentStream {
   const now = opts.now ?? Date.now
   const readFile = opts.readFile ?? tailOf
   const mtime = opts.mtime ?? mtimeOf
+  const listDir = opts.listDir ?? listDirOf
   const agents = new Map<string, Agent>()
   // Stops whose start has not been read yet: the two hooks run concurrently.
   const earlyStops = new Map<string, StreamEvent>()
@@ -478,8 +483,24 @@ export function createAgentStream(opts: {
     a.exitCode = end.exitCode
   }
 
+  // A workflow's agent, whatever its type, keeps its files in
+  // <session>/subagents/workflows/<run id>/, not beside the session's other
+  // subagents, and they can appear after its start hook ran: while none sit
+  // where the row looks, look in each run folder.
+  function locate(a: Agent) {
+    if (!a.base) return
+    const has = (b: string) => mtime(`${b}.jsonl`) !== undefined || mtime(`${b}.meta.json`) !== undefined
+    if (has(a.base)) return
+    const runs = join(a.base, '..', 'workflows')
+    for (const run of listDir(runs) ?? []) {
+      const b = join(runs, run, `agent-${a.id}`)
+      if (has(b)) { a.base = b; return }
+    }
+  }
+
   function refresh(a: Agent) {
     if (a.kind === 'shell') return refreshShell(a)
+    locate(a)
     if (!a.base) return
     if (a.description === undefined) {
       try {
@@ -640,6 +661,14 @@ function definedOnly(p: Progress): Progress {
   if (p.tokens !== undefined) out.tokens = p.tokens
   if (p.updatedAt !== undefined) out.updatedAt = p.updatedAt
   return out
+}
+
+function listDirOf(path: string): string[] | undefined {
+  try {
+    return readdirSync(path)
+  } catch {
+    return undefined
+  }
 }
 
 function mtimeOf(path: string): number | undefined {

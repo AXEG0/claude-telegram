@@ -1,0 +1,29 @@
+{
+  "source": "Claude Code 2.1.310: the SubagentStart input's fields as the binary builds them and the hooks reference's example shows them; the TaskStop result's shape copied from a real one. Paths, ids and labels are neutral.",
+  "subagent_start_workflow": {
+    "session_id": "sess0002-test-4000-8000-000000000a02",
+    "transcript_path": "/Users/someone/.claude/projects/-srv-probe-workflow-probe-work/sess0002-test-4000-8000-000000000a02.jsonl",
+    "cwd": "/srv/probe/workflow-probe/work",
+    "hook_event_name": "SubagentStart",
+    "agent_id": "a0f1e2d3c4b5a6978",
+    "agent_type": "workflow-subagent"
+  },
+  "task_stop_workflow": {
+    "session_id": "sess0002-test-4000-8000-000000000a02",
+    "transcript_path": "/Users/someone/.claude/projects/-srv-probe-workflow-probe-work/sess0002-test-4000-8000-000000000a02.jsonl",
+    "cwd": "/srv/probe/workflow-probe/work",
+    "permission_mode": "dontAsk",
+    "hook_event_name": "PostToolUse",
+    "tool_name": "TaskStop",
+    "tool_input": {
+      "task_id": "wq7k2m9xz"
+    },
+    "tool_response": {
+      "message": "Successfully stopped task: wq7k2m9xz (Check each file in the probe folder)",
+      "task_id": "wq7k2m9xz",
+      "task_type": "local_workflow",
+      "command": "Check each file in the probe folder"
+    },
+    "tool_use_id": "toolu_01ProbeWorkflowStop000001"
+  }
+}
