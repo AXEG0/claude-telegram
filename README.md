@@ -20,7 +20,7 @@ through it.
 | --- | --- |
 | ⌨️ **Typing for the whole turn** | "typing…" stays on while Claude works, whoever started the turn. |
 | 🚨 **Stuck alerts** | The bot tells you when a turn shows no activity for 10 minutes, or, with an alert chat set, the whole session for 45, and again when Claude is back. |
-| 🤖 **Live subagents and shells** | Concurrent subagents and background shells share one live message: one row each with step, time and tokens, or a shell's description and time, then Done, Failed with its exit code, or Stopped. A finished row leaves the message five minutes after it first shows finished. |
+| 🤖 **Live subagents and shells** | Concurrent subagents and background shells share one live message: one row each with step, time and tokens, or a shell's description and time, then Done, Failed with its exit code, or Stopped. A workflow's subagents show under the labels the workflow gave them, and stopping the workflow closes their rows still running as Stopped. A finished row leaves the message five minutes after it first shows finished. |
 | 📝 **Rich messages** | Headings, tables, task lists, code and collapsible sections render natively in Telegram. |
 | 🎙️ **Voice messages** | Voice notes, audio and video notes reach Claude as text, transcribed by OpenAI. |
 | 📦 **Bursts as one message** | Quick texts, a long paste Telegram split, and a photo with its question arrive together, so Claude answers once. |
