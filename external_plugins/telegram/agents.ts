@@ -474,6 +474,11 @@ type Agent = {
   endEntry?: string
   endTick?: number
   confirmed?: boolean
+  // Set when the last read of the transcript found no whole user or assistant
+  // entry: an unchanged file then cannot confirm the ending.
+  noEntry?: boolean
+  // The group whose message last carried this row.
+  group?: Batch
 }
 
 const shellKey = (taskId: string) => `shell:${taskId}`
@@ -646,10 +651,33 @@ export function createAgentStream(opts: {
   // The close-time frame's text of each message, once the stream closes.
   const closeTexts = new Map<Batch, string>()
 
-  // A row out of the rows: one its transcript closed stays watched.
+  // A row out of the rows: one its transcript closed stays watched, as long
+  // as the stream still follows it; a row a later start replaced is done
+  // with.
   function retire(a: Agent) {
+    const followed = agents.get(a.key) === a || watched.get(a.key) === a
     if (agents.get(a.key) === a) agents.delete(a.key)
-    if (a.kind !== 'shell' && a.endedBy === 'transcript' && a.done !== undefined) watched.set(a.key, a)
+    if (followed && a.kind !== 'shell' && a.endedBy === 'transcript' && a.done !== undefined) watched.set(a.key, a)
+  }
+
+  // Whether a row's run ended in its transcript before a later start: an
+  // API-error entry, or an interruption Claude Code did not write for its own
+  // shutdown, stamped between the row's start and that start. A start read
+  // while the row still shows running, as in the backlog a server reads at
+  // its start, or when the ending, the resumed prompt and the start land
+  // within one tick, still replaces it then.
+  function endedBefore(a: Agent, t: number): boolean {
+    if (a.kind === 'shell') return false
+    locate(a)
+    const tail = a.base ? readFile(`${a.base}.jsonl`) : undefined
+    if (!tail) return false
+    for (const line of tail.split('\n')) {
+      if (!line.includes('"isApiErrorMessage"') && !line.includes('[Request interrupted by user')) continue
+      const e = newestEntry(line)
+      if (!e || e.at === undefined || e.at < a.started || e.at > t) continue
+      if (e.kind === 'error' || (e.kind === 'interruption' && !e.shutdown)) return true
+    }
+    return false
   }
 
   // A stop hook's ending, which replaces an ending read from the transcript:
@@ -664,6 +692,15 @@ export function createAgentStream(opts: {
     a.endEntry = undefined
     a.confirmed = undefined
     if (changed) a.endShownAt = undefined
+  }
+
+  // A watched row's final ending, from a stop hook after its group ended: the
+  // group's message takes one more edit with that ending, unless a newer group
+  // holds the chat or the row has left the message.
+  function reopenGroup(a: Agent) {
+    const b = a.group
+    if (!b || b.gone || b.msgId === undefined || batches.has(b.chatId) || b.members.get(a.key) !== a) return
+    batches.set(b.chatId, b)
   }
 
   // The transcript rule: the newest entry closes the row as failed or
@@ -736,12 +773,15 @@ export function createAgentStream(opts: {
       a.transcriptMtime = m
       a.quietSince = Math.max(a.quietSince, m)
       const tail = readFile(`${a.base}.jsonl`)
+      const entry = tail ? newestEntry(tail) : undefined
+      a.noEntry = entry === undefined
       if (tail) {
         a.progress = { ...a.progress, ...definedOnly(progressFromTranscript(tail)) }
-        applyEntry(a, newestEntry(tail))
+        applyEntry(a, entry)
       }
-    } else if (a.endedBy === 'transcript' && ticks > (a.endTick ?? ticks)) {
-      // An unchanged transcript still has the same newest entry.
+    } else if (a.endedBy === 'transcript' && !a.noEntry && ticks > (a.endTick ?? ticks)) {
+      // An unchanged transcript whose last read found the closing entry still
+      // has it newest; one whose tail held no whole entry confirms nothing.
       a.confirmed = true
     }
   }
@@ -760,8 +800,11 @@ export function createAgentStream(opts: {
   // the next overlapping group gets a new one.
   function endIfFinished(batch: Batch) {
     if (batches.get(batch.chatId) !== batch || batch.sending) return
+    // A group whose rows have all left the message ends with no edit: its
+    // last frame already shows their endings, and a frame of no rows is empty.
+    const empty = batch.members.size === 0
     const finished = [...batch.members.values()].every(settled)
-    if (!finished || !(batch.gone || batch.sentKey === panel(batch, agents, now()).key)) return
+    if (!empty && (!finished || !(batch.gone || batch.sentKey === panel(batch, agents, now()).key))) return
     batches.delete(batch.chatId)
     for (const a of batch.members.values()) retire(a)
     if (batch.msgId === undefined) return
@@ -788,6 +831,7 @@ export function createAgentStream(opts: {
     // A row that left with its ending acknowledged is done with; its number
     // stays taken, so a resumed subagent comes back under it.
     for (const [key, a] of batch.members) if (hasLeft(a, t) && agents.get(key) !== a) batch.members.delete(key)
+    if (batch.members.size === 0) return endIfFinished(batch)
     const frame = panel(batch, agents, t)
     const running = [...batch.members.values()].some(a => a.done === undefined && !a.dropped)
     if (frame.key === batch.sentKey && (!running || t - batch.lastEdit < CLOCK_REFRESH_MS)) {
@@ -883,15 +927,19 @@ export function createAgentStream(opts: {
         // A start replaces a row whose last ending came from its transcript,
         // even one that has opened again since: a resumed run's prompt can
         // reach the transcript before its start hook writes.
-        if (old && old.done === undefined && !old.fromTranscript) continue
+        if (old && old.done === undefined && !old.fromTranscript && !endedBefore(old, ev.t)) continue
         // A shell's output file says whether it still runs, however old.
         if (ev.event === 'start' && t - ev.t > AGENT_STALE_MS) continue
+        // The run it replaces stays in its chat: agents stay in the chat where
+        // they first appeared, so a resumed run takes the earlier run's place
+        // in that chat's message, never a second row in another.
+        const chatId = (old ?? watched.get(key))?.chatId
         watched.delete(key)
         const a: Agent = 'task_id' in ev
           ? { id: ev.task_id, key, kind: 'shell', type: 'shell', description: ev.description, output: ev.output,
-            started: ev.t, progress: {}, quietSince: ev.t }
+            started: ev.t, progress: {}, quietSince: ev.t, chatId }
           : { id: ev.agent_id, key, type: ev.agent_type || 'agent', base: ev.agent_base,
-            started: ev.t, progress: {}, quietSince: ev.t }
+            started: ev.t, progress: {}, quietSince: ev.t, chatId }
         const stop = earlyStops.get(key)
         if (stop && stop.t >= ev.t) endByHook(a, stop)
         earlyStops.delete(key)
@@ -910,6 +958,7 @@ export function createAgentStream(opts: {
           if (ev.t >= w.started) {
             endByHook(w, ev)
             watched.delete(key)
+            reopenGroup(w)
           }
         } else earlyStops.set(key, ev)
       }
@@ -955,6 +1004,7 @@ export function createAgentStream(opts: {
       }
       if (!batch.numbers.has(a.key)) batch.numbers.set(a.key, ++batch.lastNumber)
       batch.members.set(a.key, a)
+      a.group = batch
     }
   }
 

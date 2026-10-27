@@ -454,8 +454,11 @@ entry for the error into the subagent's transcript. The row closes as failed on
 the first tick after either is read. A row closed from its transcript opens
 again when a newer entry shows the run going on, as after the nudge Claude
 Code sends following a cut refusal, so its group's message ends only once the
-next tick finds the same entry still the newest; a stop hook's ending is final.
-A subagent's failure leaves the turn's [typing](#typing) on.
+next tick finds the same entry still the newest, and a tail with no whole
+entry confirms nothing. A stop hook's ending is final: one that arrives after
+the group ended edits that message once more with it. A subagent resumed after
+such an ending takes its earlier run's place, in the chat where it first
+appeared. A subagent's failure leaves the turn's [typing](#typing) on.
 
 When the server shuts down, it makes one last edit of the live message: each
 row still running reads `🔌 No longer followed after …`, with how long it ran

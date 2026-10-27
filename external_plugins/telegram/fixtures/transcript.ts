@@ -16,6 +16,11 @@ export const toolCall = (uuid: string, t: number, description: string, tokens: n
     content: [{ type: 'tool_use', id: `toolu-${uuid}`, name: 'Bash', input: { command: 'true', description } }],
     usage: { input_tokens: tokens, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } })
 
+export const assistantText = (uuid: string, t: number, text: string) =>
+  ({ ...common(uuid, t), type: 'assistant', message: { role: 'assistant', model: 'claude-test', type: 'message',
+    content: [{ type: 'text', text }],
+    usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } })
+
 export const apiError = (uuid: string, t: number, error?: string) =>
   ({ ...common(uuid, t), type: 'assistant', message: { id: `msg-${uuid}`, container: null, model: '<synthetic>', role: 'assistant',
     stop_reason: 'stop_sequence', stop_sequence: '', type: 'message',

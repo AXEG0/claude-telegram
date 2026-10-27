@@ -30,6 +30,7 @@ import shellHooks from './fixtures/shell-hooks.json'
 import workflowHooks from './fixtures/workflow-hooks.json'
 import failureHooks from './fixtures/failure-hooks.json'
 import { runRegistered } from './fixtures/hooks.ts'
+import { apiError, line, requestBlob, userText } from './fixtures/transcript.ts'
 
 const assistant = (content: unknown[], usage?: Record<string, number>, ts = '2026-10-08T15:00:00.000Z') =>
   JSON.stringify({ type: 'assistant', timestamp: ts, message: { content, usage } })
@@ -1400,6 +1401,82 @@ describe('createAgentStream', () => {
     held.failEditWith(undefined)
     await held.stream.close(held.now() + CHAT_GAP_MS)
     expect(held.attempts).toHaveLength(1)
+  })
+
+  test('a start that replaces a transcript-closed row from another chat keeps it in its own chat\'s message', async () => {
+    const h = harness('1001')
+    await h.tick()
+    h.events.push(start(h))
+    h.write('/s/agent-a1.jsonl', line(userText('u1', h.now(), 'Long job')))
+    await h.tick()
+    h.advance(CHAT_GAP_MS)
+    h.write('/s/agent-a1.jsonl', line(userText('u1', h.now() - 3000, 'Long job')) + line(apiError('e1', h.now(), 'overloaded')))
+    await h.tick()
+    expect(h.edits.at(-1)!.text).toBe('🤖 Subagents\n1. ❌ Failed after 3s (overloaded) · general-purpose')
+    // Another chat writes, and the run resumes before the failure is confirmed.
+    h.setChat('2002')
+    h.advance(CHAT_GAP_MS)
+    h.events.push(start(h))
+    h.write('/s/agent-a1.jsonl', line(apiError('e1', h.now() - 3000, 'overloaded')) + line(userText('u2', h.now(), 'Resume')))
+    await h.tick()
+    expect(h.edits.at(-1)!.text).toBe('🤖 Subagents\n1. ⏳ general-purpose · Starting… · 0s')
+    for (let i = 0; i < 40; i++) { h.advance(CLOCK_REFRESH_MS); await h.tick() }
+    expect(h.sent.map(m => m.chat)).toEqual(['1001'])
+    expect(h.attempts.filter(a => a.text === '')).toEqual([])
+    expect(new Set(h.edits.map(e => e.id))).toEqual(new Set([7]))
+  })
+
+  test('a group reopened for a late stop leaves a row a later start replaced where it was', async () => {
+    const h = harness('1001')
+    await h.tick()
+    h.events.push(start(h, 'a1'), start(h, 'a3'))
+    for (const id of ['a1', 'a3']) h.write(`/s/agent-${id}.jsonl`, line(userText(`u-${id}`, h.now(), 'Job')))
+    await h.tick()
+    h.advance(CHAT_GAP_MS)
+    for (const id of ['a1', 'a3']) h.write(`/s/agent-${id}.jsonl`, line(apiError(`e-${id}`, h.now(), 'overloaded')))
+    await h.tick()
+    expect(h.edits.at(-1)!.text).toBe('🤖 Subagents\n1. ❌ Failed after 3s (overloaded) · general-purpose\n2. ❌ Failed after 3s (overloaded) · general-purpose')
+    // The next tick confirms both failures and ends the group.
+    h.advance(CHAT_GAP_MS); await h.tick()
+    // a3 resumes and finishes in a new message.
+    h.advance(CHAT_GAP_MS)
+    h.write('/s/agent-a3.jsonl', line(apiError('e-a3', h.now() - 3000, 'overloaded')) + line(userText('r-a3', h.now(), 'Resume')))
+    h.events.push(start(h, 'a3'))
+    await h.tick()
+    expect(h.sent.at(-1)).toEqual({ chat: '1001', text: '🤖 Subagents\n1. ⏳ general-purpose · Starting… · 0s' })
+    h.advance(CHAT_GAP_MS)
+    h.events.push({ t: h.now(), event: 'stop', agent_id: 'a3' })
+    await h.tick()
+    h.advance(CHAT_GAP_MS); await h.tick()
+    // a1's late stop edits its message; the replaced a3 stays as it was there.
+    h.events.push({ t: h.now(), event: 'stop', agent_id: 'a1' })
+    await h.tick()
+    expect(h.edits.at(-1)).toEqual({ id: 7, text: '🤖 Subagents\n1. ✅ Done in 15s · general-purpose\n2. ❌ Failed after 3s (overloaded) · general-purpose' })
+    h.write('/s/agent-a3.jsonl', line(userText('r-a3', h.now() - 6000, 'Resume')) + line(userText('n-a3', h.now(), 'More')))
+    for (let i = 0; i < 4; i++) { h.advance(CHAT_GAP_MS); await h.tick() }
+    expect(h.sent).toHaveLength(2)
+  })
+
+  test('a group whose rows have all left the message ends without an edit', async () => {
+    const h = harness('1001')
+    await h.tick()
+    h.events.push(start(h))
+    h.write('/s/agent-a1.jsonl', line(userText('u1', h.now(), 'Long job')))
+    await h.tick()
+    h.advance(CHAT_GAP_MS)
+    h.write('/s/agent-a1.jsonl', line(userText('u1', h.now() - 3000, 'Long job')) + line(apiError('e1', h.now(), 'overloaded')))
+    await h.tick()
+    const shown = h.attempts.length
+    // From here on each read of the tail holds only request records.
+    for (let i = 0; i < 40; i++) {
+      h.advance(CLOCK_REFRESH_MS)
+      h.write('/s/agent-a1.jsonl', line(requestBlob(100 + i)))
+      await h.tick()
+    }
+    expect(h.attempts.slice(shown)).toEqual([])
+    h.events.push(start(h, 'a2'))
+    await h.tick()
+    expect(h.sent.at(-1)).toEqual({ chat: '1001', text: '🤖 Subagents\n1. ⏳ general-purpose · Starting… · 0s' })
   })
 
   describe('the records of open messages', () => {
