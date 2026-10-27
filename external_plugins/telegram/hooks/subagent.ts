@@ -1,8 +1,11 @@
 #!/usr/bin/env bun
-// SubagentStart, SubagentStop and PostToolUse (Bash, TaskStop) hook: appends
-// the subagent or background shell event to a file named for this Claude Code
-// process, which the server follows to stream them to Telegram. See agents.ts.
-// Always exits 0; a hook failure must never block Claude.
+// SubagentStart, SubagentStop, StopFailure and PostToolUse (Bash, TaskStop)
+// hook: appends the subagent or background shell event to a file named for
+// this Claude Code process, which the server follows to stream them to
+// Telegram; a StopFailure counts only when it names a subagent, and is stamped
+// with the time of the newest API-error entry in that subagent's transcript
+// when one has landed. See agents.ts. Always exits 0; a hook failure must
+// never block Claude.
 
 import { readdirSync, readFileSync, rmSync, statSync } from 'fs'
 import { join } from 'path'

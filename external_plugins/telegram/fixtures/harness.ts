@@ -5,6 +5,11 @@ import { spawn, type ChildProcess } from 'child_process'
 import { chmodSync, existsSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { CHAT_GAP_MS, CLOSING_EDIT_MS } from '../agents.ts'
+
+// The longest a server takes to exit once its input closes: its closing edit
+// of the subagents message may wait for the chat's next slot first.
+export const EXIT_MS = CHAT_GAP_MS + CLOSING_EDIT_MS + 1000
 
 export const children: ChildProcess[] = []
 const dirs: string[] = []
@@ -105,10 +110,26 @@ export function start(dir: string, argv: string[], env: Record<string, string> =
       await request('initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'test', version: '1' } })
       child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n')
     },
-    async close() { child.stdin.end(); await until(() => child.exitCode !== null) },
+    async close() { child.stdin.end(); await until(() => child.exitCode !== null, EXIT_MS) },
+    // The production server's own pid: the one child of the process named claude.
+    serverPid: () => Number(readFileSync(`/proc/${child.pid}/task/${child.pid}/children`, 'utf8').trim().split(' ')[0]),
+    exited: () => child.exitCode !== null || child.signalCode !== null,
   }
 }
 export type Server = ReturnType<typeof start>
+
+// Ends with SIGKILL every production server a test left running on its state
+// folder, read from the fake's log and checked by that folder in its
+// environment: a server whose broken output kept it from exiting would
+// otherwise outlive the test.
+export function killServers(dir: string): void {
+  for (const pid of new Set(calls(dir).map(c => c.pid))) {
+    let env = ''
+    try { env = readFileSync(`/proc/${pid}/environ`, 'utf8') } catch { continue }
+    if (!env.split('\0').includes(`TELEGRAM_STATE_DIR=${dir}`)) continue
+    try { process.kill(pid, 'SIGKILL') } catch {}
+  }
+}
 
 // Each test file runs this after each test: it ends the servers the test
 // started and removes their state folders.
@@ -116,9 +137,14 @@ export async function cleanup(): Promise<void> {
   for (const child of children.splice(0)) {
     if (child.exitCode === null && child.signalCode === null) {
       child.stdin?.end()
-      await until(() => child.exitCode !== null || child.signalCode !== null)
+      try {
+        await until(() => child.exitCode !== null || child.signalCode !== null, EXIT_MS)
+      } catch {
+        child.kill('SIGKILL')
+      }
     }
   }
+  for (const dir of dirs) killServers(dir)
   for (const dir of dirs.splice(0)) {
     // A test may leave its state folder read-only.
     try { chmodSync(dir, 0o700) } catch {}

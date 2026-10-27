@@ -25,7 +25,8 @@ import { execFileSync } from 'child_process'
 import { basename, join, extname, sep } from 'path'
 import { ancestorPids, busyFiles, createTyping, markerFiles, readBusyAt, readTurnEnd, REFRESH_MS, subagentFiles } from './typing.ts'
 import { STT_KINDS, sttConfig, transcribeTelegramFile } from './stt.ts'
-import { AGENT_TICK_MS, agentEventFile, createAgentStream, createEventReader } from './agents.ts'
+import { AGENT_TICK_MS, agentEventFile, CHAT_GAP_MS, CLOSING_EDIT_MS, createAgentStream, createEventReader } from './agents.ts'
+import { createPanelStore } from './panels.ts'
 import { editRichParsed, RICH_FORMAT_HELP, RICH_INSTRUCTIONS, richEditParse, richEnabled, sendRich, type RawApi } from './rich.ts'
 import { replyMeta, richText } from './reply.ts'
 import { heartbeatTransformer } from './heartbeat.ts'
@@ -108,13 +109,27 @@ if (POLLING) {
   writeFileSync(PID_FILE, String(process.pid))
 }
 
+// When Claude Code crashes, the far ends of this server's input, output and
+// error streams go at once, and a write to them fails with EPIPE. Unhandled,
+// that error reaches the uncaughtException handler below, whose own write to
+// stderr fails again, and the loop starves the event loop: no closing edit, no
+// forced exit, a process spinning at full CPU. So each output stream takes its
+// own errors, and the handlers write nothing to a stream that has failed.
+let stderrFailed = false
+process.stdout.on('error', () => {})
+process.stderr.on('error', () => { stderrFailed = true })
+const lastResort = (line: string) => {
+  if (stderrFailed || process.stderr.destroyed) return
+  try { process.stderr.write(line) } catch {}
+}
+
 // Last-resort safety net — without these the process dies silently on any
 // unhandled promise rejection. With them it logs and keeps serving tools.
 process.on('unhandledRejection', err => {
-  process.stderr.write(`telegram channel: unhandled rejection: ${err}\n`)
+  lastResort(`telegram channel: unhandled rejection: ${err}\n`)
 })
 process.on('uncaughtException', err => {
-  process.stderr.write(`telegram channel: uncaught exception: ${err}\n`)
+  lastResort(`telegram channel: uncaught exception: ${err}\n`)
 })
 
 // Permission-reply spec from anthropics/claude-cli-internal
@@ -225,6 +240,9 @@ setInterval(() => {
 
 // Subagents share one live message in the private chat of the last inbound
 // message, or in the owner chat when that chat is another bot's. See agents.ts.
+// Each open message keeps a record of its closing text, and the server that
+// polls the bot closes the messages of servers that are gone. See panels.ts.
+const panels = createPanelStore({ dir: join(STATE_DIR, 'panels') })
 const agentStream = createAgentStream({
   readEvents: createEventReader(ancestors.map(pid => agentEventFile(STATE_DIR, pid)), false),
   chat: () => notice(lastChat),
@@ -233,6 +251,8 @@ const agentStream = createAgentStream({
   edit: async (chat_id, message_id, text) => {
     await bot.api.editMessageText(chat_id, message_id, text)
   },
+  records: panels,
+  sweep: POLLING ? panels.sweep : undefined,
 })
 setInterval(() => agentStream.tick(), AGENT_TICK_MS).unref()
 
@@ -1179,7 +1199,7 @@ let shuttingDown = false
 // The polling loop, which ends once grammY has worked through its batch.
 let pollLoop: Promise<void> = Promise.resolve()
 // Presses being judged, and press answers still on their way, which shutdown
-// waits for within its 2-second limit.
+// waits for within its time limit.
 const pressing = new Set<Promise<unknown>>()
 const tracked = <T>(p: Promise<T>): Promise<T> => {
   pressing.add(p)
@@ -1206,22 +1226,32 @@ const texts = createTextMemory()
 function shutdown(): void {
   if (shuttingDown) return
   shuttingDown = true
+  // Polling stops first, on every trigger: bot.stop() aborts the long poll in
+  // flight, so an update that arrives from here on is never confirmed to
+  // Telegram, which keeps it for the next poller.
+  if (POLLING && bot.isRunning()) void bot.stop().catch(() => {})
   process.stderr.write('telegram channel: shutting down\n')
   if (POLLING) {
     try {
       if (parseInt(readFileSync(PID_FILE, 'utf8'), 10) === process.pid) rmSync(PID_FILE)
     } catch {}
   }
-  // bot.stop() signals the poll loop to end; the current getUpdates request
-  // may take up to its long-poll timeout to return. Force-exit after 2s.
-  setTimeout(() => process.exit(0), 2000)
-  // Messages still waiting in a batch go now: Telegram has counted them delivered.
-  // grammY then works through the batch it fetched, and a press in it gets
-  // the notice to press again, whose answer goes out before the exit.
+  // Force-exit once the subagents message's closing edit has had its time:
+  // the chat's next slot, at most CHAT_GAP_MS away, and then CLOSING_EDIT_MS
+  // to reach Telegram.
+  setTimeout(() => process.exit(0), CHAT_GAP_MS + CLOSING_EDIT_MS)
+  // The subagents message's last edit: a row still running reads as no longer
+  // followed. The server cannot tell why it shuts down, so it says no more.
+  const closing = agentStream.close(Date.now() + CHAT_GAP_MS)
+  // Messages still waiting in a batch go now: Telegram has counted them
+  // delivered. The exit never waits for them, since a write to a Claude Code
+  // that has gone never completes.
   void batcher.flushAll()
-    .then(() => { if (POLLING && bot.isRunning()) bot.stop() })
-    .then(() => pollLoop)
+  // grammY works through the batch it fetched, and a press in it gets the
+  // notice to press again, whose answer goes out before the exit.
+  void pollLoop
     .then(async () => { while (pressing.size > 0) await Promise.allSettled([...pressing]) })
+    .then(() => closing)
     .finally(() => process.exit(0))
 }
 process.stdin.on('end', shutdown)

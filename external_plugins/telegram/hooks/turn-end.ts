@@ -1,6 +1,8 @@
 #!/usr/bin/env bun
 // Stop, StopFailure and SessionEnd hook: records that this session's turn has
-// ended, so the server stops re-sending "typing…". See typing.ts. Always
+// ended, so the server stops re-sending "typing…". See typing.ts. A
+// subagent's StopFailure carries the subagent's agent_id and ends only that
+// subagent, which hooks/subagent.ts records; the session's turn goes on. Always
 // exits 0; a hook failure must never block Claude.
 
 import { readdirSync, readFileSync, rmSync, statSync } from 'fs'
@@ -10,10 +12,13 @@ import { hookClaudePid, markerFiles, stateDir, writeTurnEnd } from '../typing.ts
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000
 
 try {
-  let sessionId: string | undefined
+  let input: { session_id?: string; hook_event_name?: string; agent_id?: unknown } = {}
   try {
-    sessionId = JSON.parse(readFileSync(0, 'utf8')).session_id
+    const parsed = JSON.parse(readFileSync(0, 'utf8'))
+    if (parsed && typeof parsed === 'object') input = parsed
   } catch {}
+  if (input.hook_event_name === 'StopFailure' && input.agent_id) process.exit(0)
+  const sessionId = input.session_id
   const pid = hookClaudePid()
   const dir = stateDir()
   writeTurnEnd(markerFiles(dir, sessionId, pid ? [pid] : []))

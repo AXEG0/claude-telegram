@@ -258,10 +258,10 @@ export function restore(rec: ButtonRecord, chat: string, message: number, was: E
 
 // The flock(2) of the C library, through Bun's FFI; undefined where neither
 // libc loads. LOCK_EX | LOCK_NB, and closing the descriptor releases it.
-const LOCK_EX = 2
-const LOCK_NB = 4
+export const LOCK_EX = 2
+export const LOCK_NB = 4
 let flockFn: ((fd: number, op: number) => number) | null | undefined
-function flock(): ((fd: number, op: number) => number) | undefined {
+export function flock(): ((fd: number, op: number) => number) | undefined {
   if (flockFn !== undefined) return flockFn ?? undefined
   flockFn = null
   try {
