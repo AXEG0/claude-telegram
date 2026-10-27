@@ -1,8 +1,9 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdtempSync, readFileSync, readdirSync } from 'fs'
+import { existsSync, mkdtempSync, readFileSync, readdirSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { ancestorPids, busyFiles, CAP_MS, createTyping, markerFiles, PROMPT_GRACE_MS, readBusyAt, readTurnEnd, subagentFiles, writeTurnEnd } from './typing.ts'
+import failureHooks from './fixtures/failure-hooks.json'
 
 function harness(capMs = 60_000, chat?: string) {
   let t = 1_000
@@ -414,6 +415,22 @@ describe('hooks/turn-end.ts', () => {
     expect(r.exitCode).toBe(0)
     expect(readdirSync(join(dir, 'turns')).sort()).toEqual(['pid-4242', 'session-sess-1'])
     expect(Number(readFileSync(join(dir, 'turns', 'session-sess-1'), 'utf8'))).toBeGreaterThanOrEqual(before)
+  })
+
+  test('a subagent\'s StopFailure writes no turn end; the main session\'s StopFailure still does', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'typing-'))
+    const env = { TELEGRAM_STATE_DIR: dir, CLAUDE_PID: '4242' }
+    expect(runHook(JSON.stringify(failureHooks.subagent_stop_failure), env).exitCode).toBe(0)
+    expect(existsSync(join(dir, 'turns'))).toBe(false)
+    const before = Date.now()
+    expect(runHook(JSON.stringify(failureHooks.main_stop_failure), env).exitCode).toBe(0)
+    expect(readdirSync(join(dir, 'turns')).sort()).toEqual(['pid-4242', `session-${failureHooks.main_stop_failure.session_id}`])
+    expect(Number(readFileSync(join(dir, 'turns', 'pid-4242'), 'utf8'))).toBeGreaterThanOrEqual(before)
+    // Only a StopFailure that names a subagent is skipped.
+    const other = mkdtempSync(join(tmpdir(), 'typing-'))
+    const { agent_id, session_id } = failureHooks.subagent_stop_failure
+    expect(runHook(JSON.stringify({ session_id, agent_id, hook_event_name: 'Stop' }), { TELEGRAM_STATE_DIR: other, CLAUDE_PID: '4242' }).exitCode).toBe(0)
+    expect(readdirSync(join(other, 'turns')).sort()).toEqual(['pid-4242', `session-${session_id}`])
   })
 
   test('exits 0 on input it cannot read', () => {

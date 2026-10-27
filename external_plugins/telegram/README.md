@@ -335,7 +335,9 @@ The plugin's hooks mark the session busy at the start and the end of each of
 Claude's tool calls and on each prompt ([hooks/busy.ts](./hooks/busy.ts)), and
 record the turn's end on `Stop`,
 `StopFailure` and `SessionEnd` ([hooks/turn-end.ts](./hooks/turn-end.ts)), under
-`turns/` in the state directory. A subagent's tool calls start no typing, as the
+`turns/` in the state directory. A `StopFailure` that names a subagent ends only
+that subagent's [row](#subagents-and-shells), so typing goes on for the turn
+that waits on it. A subagent's tool calls start no typing, as the
 subagent's work shows in its [own message](#subagents-and-shells); they count as activity
 for the turn that waits on the subagent.
 
@@ -373,7 +375,7 @@ turn ends.
 Each alert goes once per silence and once per chat, with Telegram's notification. The first
 activity after it sends "✅ Back to normal: Claude is active again." once to each
 chat that got an alert. When the session ends, the server ends with it and sends
-nothing, so a session that dies needs a check outside the machine.
+no alert, so a session that dies needs a check outside the machine.
 
 ### Permission prompts
 
@@ -422,8 +424,10 @@ others:
 4. ❌ Failed after 12s (exit 1) · shell · Run the tests
 ```
 
-An agent's line changes to `✅ Done in …`, or `⏹ Stopped after …` when
-interrupted. A workflow's subagents show like any other subagent, under the
+An agent's line changes to `✅ Done in …`, `⏹ Stopped after …` when
+interrupted, or `❌ Failed after … (rate_limit)` when its model call ends on an
+API error, with the error's class as Claude Code names it, such as `rate_limit`,
+`billing_error` or `model_not_found`. A workflow's subagents show like any other subagent, under the
 label the workflow gave each, and stopping the workflow closes the rows of those
 still running as `⏹ Stopped after …`. A shell's line carries the description
 Claude gave the command, never the command itself, and its running time. It
@@ -440,8 +444,19 @@ and a subagent resumed after its row left comes back under its old number. Once
 the whole group ends, its final message stays intact with the endings of its
 last five minutes, and the next group gets a new one. The header names what the
 message carries: `🤖 Subagents`, `🐚 Shells`, or both.
-The plugin's `SubagentStart`, `SubagentStop` and
-successful `TaskStop` hooks ([hooks/subagent.ts](./hooks/subagent.ts)) record each
+
+When the server shuts down, it makes one last edit of the live message: each
+row still running reads `🔌 No longer followed after …`, with how long it ran
+until then and, for a subagent, its last step and tokens, and every finished
+row stays as it was. The server shuts down when its session ends, when the
+plugin reloads, and when a running workflow moves to a background session, and
+it cannot tell these apart, so the line says only that the row is no longer
+followed. A new server never edits that message. The edit keeps the chat's
+spacing, after any send or edit still on its way, so the server takes up to
+five seconds to exit.
+
+The plugin's `SubagentStart`, `SubagentStop`,
+successful `TaskStop` and `StopFailure` hooks ([hooks/subagent.ts](./hooks/subagent.ts)) record each
 subagent under `agents/` in the state directory, and the server reads the
 subagent's transcript for its current step and context size, and its meta file
 for its description. A workflow's subagent keeps both in the workflow run's

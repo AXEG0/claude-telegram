@@ -5,6 +5,11 @@ import { spawn, type ChildProcess } from 'child_process'
 import { chmodSync, existsSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { CHAT_GAP_MS, CLOSING_EDIT_MS } from '../agents.ts'
+
+// The longest a server takes to exit once its input closes: its closing edit
+// of the subagents message may wait for the chat's next slot first.
+export const EXIT_MS = CHAT_GAP_MS + CLOSING_EDIT_MS + 1000
 
 export const children: ChildProcess[] = []
 const dirs: string[] = []
@@ -105,7 +110,7 @@ export function start(dir: string, argv: string[], env: Record<string, string> =
       await request('initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'test', version: '1' } })
       child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n')
     },
-    async close() { child.stdin.end(); await until(() => child.exitCode !== null) },
+    async close() { child.stdin.end(); await until(() => child.exitCode !== null, EXIT_MS) },
   }
 }
 export type Server = ReturnType<typeof start>
@@ -116,7 +121,7 @@ export async function cleanup(): Promise<void> {
   for (const child of children.splice(0)) {
     if (child.exitCode === null && child.signalCode === null) {
       child.stdin?.end()
-      await until(() => child.exitCode !== null || child.signalCode !== null)
+      await until(() => child.exitCode !== null || child.signalCode !== null, EXIT_MS)
     }
   }
   for (const dir of dirs.splice(0)) {

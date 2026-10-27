@@ -28,6 +28,8 @@ import {
 } from './agents.ts'
 import shellHooks from './fixtures/shell-hooks.json'
 import workflowHooks from './fixtures/workflow-hooks.json'
+import failureHooks from './fixtures/failure-hooks.json'
+import { runRegistered } from './fixtures/hooks.ts'
 
 const assistant = (content: unknown[], usage?: Record<string, number>, ts = '2026-10-08T15:00:00.000Z') =>
   JSON.stringify({ type: 'assistant', timestamp: ts, message: { content, usage } })
@@ -72,6 +74,16 @@ describe('eventFromHook', () => {
     expect(eventFromHook({ ...stopped, tool_input: { task_id: 'other' } })).toBeUndefined()
     expect(eventFromHook({ ...stopped, tool_response: { ...stopped.tool_response, message: 'Failed to stop task' } })).toBeUndefined()
     expect(eventFromHook({ ...stopped, tool_response: 'bad JSON' })).toBeUndefined()
+  })
+
+  test('a subagent\'s StopFailure records a failed stop with its error class; the main session\'s records nothing', () => {
+    expect(eventFromHook(failureHooks.subagent_stop_failure, 5)).toEqual({
+      t: 5, event: 'stop', agent_id: failureHooks.subagent_stop_failure.agent_id, outcome: 'failed', error: 'model_not_found',
+    })
+    expect(eventFromHook(failureHooks.main_stop_failure)).toBeUndefined()
+    expect(eventFromHook({ ...failureHooks.subagent_stop_failure, agent_id: '../x' })).toBeUndefined()
+    expect(eventFromHook({ ...failureHooks.subagent_stop_failure, error: 'Not a class\nof error' }, 5))
+      .toEqual({ t: 5, event: 'stop', agent_id: failureHooks.subagent_stop_failure.agent_id, outcome: 'failed' })
   })
 })
 
@@ -291,6 +303,7 @@ describe('createAgentStream', () => {
         return names.size ? [...names] : undefined
       },
       now: () => t,
+      sleep: async ms => { t += ms },
     })
     const settle = () => new Promise(r => setTimeout(r, 0))
     const tick = async () => { stream.tick(); await settle() }
@@ -1236,6 +1249,151 @@ describe('createAgentStream', () => {
     expect(taken(h).some(e => e.at > answeredAt && e.text.includes('Ending-agent · 1.2k tokens'))).toBe(true)
     expectLeaves(h, 'Ending-agent', answeredAt)
   })
+
+  test('a subagent that fails on an API error closes as failed with its error class on the next tick', async () => {
+    const h = harness()
+    await h.tick()
+    h.write('/s/agent-a1.meta.json', JSON.stringify({ description: 'Review the plan' }))
+    h.events.push(start(h))
+    await h.tick()
+    h.advance(CHAT_GAP_MS)
+    h.events.push({ t: h.now(), event: 'stop', agent_id: 'a1', outcome: 'failed', error: 'rate_limit' })
+    await h.tick()
+    expect(h.edits.at(-1)).toEqual({ id: 7, text: '🤖 Subagents\n1. ❌ Failed after 3s (rate_limit) · general-purpose · Review the plan' })
+    await h.tick()
+    expect(h.stream.agents()).toEqual([])
+  })
+
+  test('a failure read before its start keeps the failed outcome, and one with no error class reads as failed alone', async () => {
+    const h = harness()
+    await h.tick()
+    const early = start(h, 'early')
+    const plain = start(h, 'plain')
+    h.advance(500)
+    h.events.push({ t: h.now(), event: 'stop', agent_id: 'early', outcome: 'failed', error: 'server_error' }, early, plain,
+      { t: h.now(), event: 'stop', agent_id: 'plain', outcome: 'failed' })
+    await h.tick()
+    expect(h.sent.at(-1)?.text).toBe('🤖 Subagents\n1. ❌ Failed after 0s (server_error) · general-purpose\n2. ❌ Failed after 0s · general-purpose')
+  })
+
+  test('the closing edit marks running rows as no longer followed and leaves a finished row as it was, and nothing follows it', async () => {
+    const h = harness()
+    await h.tick()
+    h.write('/s/agent-run.meta.json', JSON.stringify({ description: 'Long job' }))
+    h.write('/s/agent-quiet.meta.json', JSON.stringify({ description: 'Quiet job' }))
+    h.events.push(start(h, 'quiet'))
+    await h.tick()
+    h.advance(AGENT_STALE_MS + 1000)
+    h.events.push(start(h, 'run'), start(h, 'fin'), shell(h, 'b1', 'Wait for CI'))
+    h.write('/s/agent-run.jsonl', toolCall(h.now(), 'Checking gate', 1500))
+    await h.tick()
+    h.advance(5000)
+    h.events.push({ t: h.now(), event: 'stop', agent_id: 'fin' })
+    await h.tick()
+    const before = h.edits.at(-1)!.text.split('\n')
+    expect(before[3]).toBe('3. ✅ Done in 5s · general-purpose')
+    h.advance(1000)
+    const edits = h.attempts.length
+    await h.stream.close(h.now() + CHAT_GAP_MS)
+    expect(h.attempts).toHaveLength(edits + 1)
+    expect(h.edits.at(-1)!.text.split('\n')).toEqual([
+      '🤖 Subagents · 🐚 Shells',
+      '1. 🔌 No longer followed after 30m 7s · general-purpose · Quiet job · last: Starting…',
+      '2. 🔌 No longer followed after 6s · general-purpose · Long job · last: Checking gate · 1.5k tokens',
+      before[3],
+      '4. 🔌 No longer followed after 6s · shell · Wait for CI',
+    ])
+    h.advance(CLOCK_REFRESH_MS); await h.tick()
+    h.events.push({ t: h.now(), event: 'stop', agent_id: 'run' })
+    h.advance(CLOCK_REFRESH_MS); await h.tick()
+    expect(h.attempts).toHaveLength(edits + 1)
+    expect(h.sent).toHaveLength(1)
+  })
+
+  test('an ending that comes after the last tick shows in the closing edit as finished', async () => {
+    const h = harness()
+    await h.tick()
+    h.events.push(start(h, 'run'), start(h, 'fin'))
+    await h.tick()
+    h.advance(CHAT_GAP_MS)
+    h.events.push({ t: h.now(), event: 'stop', agent_id: 'fin' })
+    await h.stream.close(h.now() + CHAT_GAP_MS)
+    expect(h.edits).toEqual([{ id: 7, text: '🤖 Subagents\n1. 🔌 No longer followed after 3s · general-purpose · last: Starting…\n2. ✅ Done in 3s · general-purpose' }])
+  })
+
+  test('the closing edit waits for an edit in flight, then for the chat\'s next slot', async () => {
+    const h = harness()
+    await h.tick()
+    h.events.push(start(h))
+    await h.tick()
+    const release = h.holdEdit()
+    h.advance(CLOCK_REFRESH_MS); await h.tick()
+    const inflight = h.attempts.at(-1)!.at
+    const closed = h.stream.close(h.now() + CHAT_GAP_MS)
+    for (let i = 0; i < 5; i++) await new Promise(r => setTimeout(r, 0))
+    expect(h.attempts).toHaveLength(1)
+    release()
+    await closed
+    expect(h.attempts).toHaveLength(2)
+    expect(h.attempts[1]!.at).toBe(inflight + CHAT_GAP_MS)
+    expect(h.attempts[1]!.text).toBe('🤖 Subagents\n1. 🔌 No longer followed after 10s · general-purpose · last: Starting…')
+  })
+
+  test('the closing edit waits for the first send in flight and edits the message it made', async () => {
+    const h = harness()
+    await h.tick()
+    h.events.push(start(h))
+    const release = h.holdSend()
+    await h.tick()
+    const sentAt = h.now()
+    h.advance(1000)
+    const closed = h.stream.close(h.now() + CHAT_GAP_MS)
+    for (let i = 0; i < 5; i++) await new Promise(r => setTimeout(r, 0))
+    expect(h.attempts).toEqual([])
+    release()
+    await closed
+    expect(h.edits).toEqual([{ id: 7, text: '🤖 Subagents\n1. 🔌 No longer followed after 1s · general-purpose · last: Starting…' }])
+    expect(h.attempts[0]!.at).toBe(sentAt + CHAT_GAP_MS)
+  })
+
+  test('no closing send for a message never sent, no closing edit for a group whose last frame went out or is on its way, nor past the time limit', async () => {
+    const unsent = harness()
+    await unsent.tick()
+    unsent.events.push(start(unsent))
+    await unsent.stream.close(unsent.now() + CHAT_GAP_MS)
+    expect(unsent.sent).toEqual([])
+    expect(unsent.attempts).toEqual([])
+
+    const ended = harness()
+    await ended.tick()
+    ended.events.push(start(ended)); await ended.tick()
+    ended.advance(CHAT_GAP_MS)
+    ended.events.push({ t: ended.now(), event: 'stop', agent_id: 'a1' }); await ended.tick()
+    ended.advance(CHAT_GAP_MS)
+    await ended.stream.close(ended.now() + CHAT_GAP_MS)
+    expect(ended.attempts).toHaveLength(1)
+
+    const final = harness()
+    await final.tick()
+    final.events.push(start(final)); await final.tick()
+    final.advance(CHAT_GAP_MS)
+    final.events.push({ t: final.now(), event: 'stop', agent_id: 'a1' })
+    const release = final.holdEdit()
+    await final.tick()
+    const closed = final.stream.close(final.now() + CHAT_GAP_MS)
+    release()
+    await closed
+    expect(final.attempts).toHaveLength(1)
+
+    const held = harness()
+    await held.tick()
+    held.events.push(start(held)); await held.tick()
+    held.failEditWith({ description: 'Too Many Requests', parameters: { retry_after: 20 } })
+    held.advance(CLOCK_REFRESH_MS); await held.tick()
+    held.failEditWith(undefined)
+    await held.stream.close(held.now() + CHAT_GAP_MS)
+    expect(held.attempts).toHaveLength(1)
+  })
 })
 
 describe('hooks/subagent.ts', () => {
@@ -1373,4 +1531,54 @@ describe('hooks/subagent.ts', () => {
       rmSync(projects, { recursive: true, force: true })
     }
   })
+
+  // The registered hooks with the inputs Claude Code sent for a subagent whose
+  // model call failed, the subagent's files in Claude Code's own layout, and the
+  // stream's own file readers: an Agent call's subagent and a workflow's.
+  for (const kind of ['an Agent call', 'a workflow'] as const) {
+    test(`a subagent of ${kind} that fails on an API error closes as failed on the next tick through the registered hooks`, async () => {
+      const state = mkdtempSync(join(tmpdir(), 'agents-'))
+      const projects = mkdtempSync(join(tmpdir(), 'projects-'))
+      try {
+        const [startInput, failure] = kind === 'a workflow'
+          ? [failureHooks.workflow_subagent_start, failureHooks.workflow_subagent_stop_failure]
+          : [failureHooks.subagent_start, failureHooks.subagent_stop_failure]
+        const transcript = join(projects, `${startInput.session_id}.jsonl`)
+        const folder = kind === 'a workflow'
+          ? join(projects, startInput.session_id, 'subagents', 'workflows', WORKFLOW_RUN)
+          : join(projects, startInput.session_id, 'subagents')
+        mkdirSync(folder, { recursive: true })
+        const env = { TELEGRAM_STATE_DIR: state, CLAUDE_PID: '4242' }
+        expect(runRegistered('SubagentStart', { ...startInput, transcript_path: transcript }, env)).toEqual([0])
+        writeFileSync(join(folder, `agent-${startInput.agent_id}.meta.json`), JSON.stringify({ agentType: 'failing-probe', description: 'Say hello' }))
+        writeFileSync(join(folder, `agent-${startInput.agent_id}.jsonl`), JSON.stringify({ type: 'user', message: { role: 'user', content: 'Say hello.' } }) + '\n')
+
+        let clock = Date.now()
+        const sent: string[] = []
+        const stream = createAgentStream({
+          readEvents: createEventReader([agentEventFile(state, 4242)], false),
+          chat: () => '1001',
+          send: async (_c, text) => { sent.push(text); return 7 },
+          edit: async (_c, _id, text) => { sent.push(text) },
+          now: () => clock,
+        })
+        stream.tick()
+        await new Promise(r => setTimeout(r, 0))
+        expect(sent).toEqual(['🤖 Subagents\n1. ⏳ failing-probe · Say hello · Starting… · 0s'])
+
+        expect(runRegistered('StopFailure', { ...failure, transcript_path: transcript }, env)).toEqual([0, 0])
+        // The session's turn goes on: no turn end is written.
+        expect(existsSync(join(state, 'turns'))).toBe(false)
+        clock += AGENT_TICK_MS
+        stream.tick()
+        await new Promise(r => setTimeout(r, 0))
+        expect(sent).toHaveLength(2)
+        expect(sent[1]).toMatch(/^🤖 Subagents\n1\. ❌ Failed after \d+s \(model_not_found\) · failing-probe · Say hello$/)
+        expect(stream.agents()).toEqual([])
+      } finally {
+        rmSync(state, { recursive: true, force: true })
+        rmSync(projects, { recursive: true, force: true })
+      }
+    })
+  }
 })

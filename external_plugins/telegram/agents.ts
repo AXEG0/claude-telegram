@@ -7,7 +7,9 @@
 //   3. ❌ Failed after 12s (exit 1) · shell · Run the tests
 //
 // A finished row leaves the message five minutes after the message first
-// showed it finished; every row keeps the number it joined with.
+// showed it finished; every row keeps the number it joined with. When the
+// server shuts down, one last edit marks each row still running as no longer
+// followed.
 //
 // The plugin's SubagentStart, SubagentStop and PostToolUse hook
 // (hooks/subagent.ts) appends one line per event to a file named for the
@@ -39,6 +41,9 @@ export const AGENT_DROP_MS = 2 * 60 * 60 * 1000
 // A finished row leaves the message this long after the first send or edit
 // Telegram accepted with its ending, so the rows still running keep their room.
 export const FINISHED_ROW_MS = 5 * 60 * 1000
+// Once the server shuts down, its closing edit waits for the chat's next slot,
+// at most CHAT_GAP_MS away, then has this long to reach Telegram.
+export const CLOSING_EDIT_MS = 2000
 const TAIL_BYTES = 256 * 1024
 
 export type AgentEvent = {
@@ -50,7 +55,11 @@ export type AgentEvent = {
   // A workflow's subagent keeps its files in subagents/workflows/<run id>/
   // instead, where the stream finds them.
   agent_base?: string
-  outcome?: 'stopped'
+  // Stopped by TaskStop, or failed on an API error (StopFailure); a
+  // SubagentStop carries none.
+  outcome?: 'stopped' | 'failed'
+  // The class of a failed stop's API error, such as rate_limit.
+  error?: string
 }
 
 // A background shell. Its own event names and id field keep it out of an
@@ -86,7 +95,15 @@ export function eventFromHook(input: {
   tool_name?: string
   tool_input?: { task_id?: string }
   tool_response?: unknown
+  error?: unknown
 }, now: number = Date.now()): AgentEvent | undefined {
+  // A subagent whose query ends on an API error gets StopFailure, carrying its
+  // id, and no SubagentStop. The main session's StopFailure carries no id.
+  if (input.hook_event_name === 'StopFailure') {
+    if (!input.agent_id || !/^[\w-]+$/.test(input.agent_id)) return undefined
+    const error = typeof input.error === 'string' && /^[a-z_]{1,40}$/.test(input.error) ? input.error : undefined
+    return { t: now, event: 'stop', agent_id: input.agent_id, outcome: 'failed', ...(error ? { error } : {}) }
+  }
   // TaskStop does not run SubagentStop. Only a successful stop of a local
   // agent counts; a failed request or a stopped shell task must not close it.
   if (input.hook_event_name === 'PostToolUse' && input.tool_name === 'TaskStop') {
@@ -352,6 +369,8 @@ type Agent = {
   transcriptMtime?: number
   done?: number
   outcome?: 'stopped' | 'failed'
+  // A failed subagent's error class.
+  error?: string
   // A shell's output file, its last change, and its exit code once it ends.
   output?: string
   outputMtime?: number
@@ -376,15 +395,23 @@ type Batch = {
   gone?: boolean
   failures: number
   sending?: boolean
+  // The send or edit on its way, settled once Telegram answers.
+  inflight?: Promise<void>
   sentKey?: string
   lastEdit: number
 }
 
+// A row the server stopped following while it still ran: the server cannot
+// tell why it shut down, so the line says only that, and for how long the row
+// was followed.
+const unfollowed = (a: Agent, closedAt: number) => `🔌 No longer followed after ${formatDuration(closedAt - a.started)}`
+
 // A shell's line carries its description and clock; it ends as done, failed
 // with its exit code, or stopped. It never goes quiet: a shell can wait in
 // silence for as long as it likes, and Claude Code marks every ending.
-function renderShell(a: Agent, now: number): string {
+function renderShell(a: Agent, now: number, closedAt?: number): string {
   const label = `shell${a.description ? ` · ${oneLine(a.description)}` : ''}`
+  if (a.done === undefined && closedAt !== undefined) return `${unfollowed(a, closedAt)} · ${label}`
   if (a.done === undefined) return `⏳ ${label} · ${formatDuration(now - a.started)}`
   const took = formatDuration(a.done - a.started)
   if (a.outcome === 'stopped') return `⏹ Stopped after ${took} · ${label}`
@@ -394,12 +421,21 @@ function renderShell(a: Agent, now: number): string {
 
 const isQuiet = (a: Agent, now: number) => a.kind !== 'shell' && a.done === undefined && now - a.quietSince > AGENT_STALE_MS
 
-export function render(a: Agent, now: number): string {
-  if (a.kind === 'shell') return renderShell(a, now)
+// With closedAt, the frame is the server's last: a row still running reads as
+// no longer followed, and every other row as it was.
+export function render(a: Agent, now: number, closedAt?: number): string {
+  if (a.kind === 'shell') return renderShell(a, now, closedAt)
   const label = `${oneLine(a.type, 32)}${a.description ? ` · ${oneLine(a.description)}` : ''}`
   const tokens = a.progress.tokens ? ` · ${formatTokens(a.progress.tokens)} tokens` : ''
-  if (a.done !== undefined) return `${a.outcome === 'stopped' ? '⏹ Stopped after' : '✅ Done in'} ${formatDuration(a.done - a.started)} · ${label}${tokens}`
+  if (a.done !== undefined) {
+    const took = formatDuration(a.done - a.started)
+    const ending = a.outcome === 'stopped' ? `⏹ Stopped after ${took}`
+      : a.outcome === 'failed' ? `❌ Failed after ${took}${a.error ? ` (${a.error})` : ''}`
+      : `✅ Done in ${took}`
+    return `${ending} · ${label}${tokens}`
+  }
   const step = oneLine(a.progress.step ?? 'Starting…')
+  if (closedAt !== undefined && !a.dropped) return `${unfollowed(a, closedAt)} · ${label} · last: ${step}${tokens}`
   if (isQuiet(a, now)) {
     return `⚠️ No activity for ${formatDuration(now - a.quietSince)} · ${label} · last: ${step}${tokens}`
   }
@@ -409,7 +445,7 @@ export function render(a: Agent, now: number): string {
 // What the message says apart from its clock.
 function contentKey(a: Agent, now: number): string {
   return JSON.stringify([a.kind, a.type, a.description, a.progress.step, a.progress.tokens, a.done, a.outcome,
-    a.exitCode, isQuiet(a, now), a.dropped])
+    a.error, a.exitCode, isQuiet(a, now), a.dropped])
 }
 
 export const AGENT_MESSAGE_LIMIT = 4096
@@ -418,7 +454,7 @@ const MAX_PANEL_ROWS = 100
 const isEnded = (a: Agent) => a.done !== undefined || !!a.dropped
 const hasLeft = (a: Agent, t: number) => a.endShownAt !== undefined && t - a.endShownAt >= FINISHED_ROW_MS
 
-function panel(batch: Batch, agents: Map<string, Agent>, t: number) {
+function panel(batch: Batch, agents: Map<string, Agent>, t: number, closedAt?: number) {
   // Only the rows still in the message count: for the cap, the count of more
   // rows, the header and each row's width.
   const members = [...batch.members.values()].filter(a => !hasLeft(a, t))
@@ -438,12 +474,20 @@ function panel(batch: Batch, agents: Map<string, Agent>, t: number) {
   const noun = shells && subagents ? 'tasks' : shells ? 'shells' : 'agents'
   const suffix = members.length > shown.length ? `\n… ${members.length - shown.length} more ${noun}` : ''
   const width = Math.floor((AGENT_MESSAGE_LIMIT - header.length - suffix.length - shown.length) / Math.max(1, shown.length))
-  const text = header + shown.map(({ a, ordinal }) => '\n' + oneLine(`${ordinal}. ${render(a, t)}`, width)).join('') + suffix
+  const text = header + shown.map(({ a, ordinal }) => '\n' + oneLine(`${ordinal}. ${render(a, t, closedAt)}`, width)).join('') + suffix
   const key = JSON.stringify([members.map(a => [a.key, contentKey(a, t)]), shown.map(s => s.ordinal)])
   return { text, key, shown }
 }
 
-export type AgentStream = { tick(): void; agents(): Agent[] }
+export type AgentStream = {
+  tick(): void
+  agents(): Agent[]
+  // The server's shutdown: stops the stream, then makes one last edit of each
+  // live message still open, after any send or edit on its way and at the
+  // chat's next slot, if that slot comes by startBy. Resolves once those
+  // edits are answered.
+  close(startBy: number): Promise<void>
+}
 
 type ApiError = { description?: string; parameters?: { retry_after?: number } }
 
@@ -457,17 +501,20 @@ export function createAgentStream(opts: {
   mtime?: (path: string) => number | undefined
   listDir?: (path: string) => string[] | undefined
   now?: () => number
+  sleep?: (ms: number) => Promise<void>
 }): AgentStream {
   const now = opts.now ?? Date.now
   const readFile = opts.readFile ?? tailOf
   const mtime = opts.mtime ?? mtimeOf
   const listDir = opts.listDir ?? listDirOf
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms)))
   const agents = new Map<string, Agent>()
   // Stops whose start has not been read yet: the two hooks run concurrently.
   const earlyStops = new Map<string, StreamEvent>()
   const batches = new Map<string, Batch>()
   const chatNext = new Map<string, number>()
   let first = true
+  let closing: Promise<void> | undefined
 
   // A shell ends with the line Claude Code appends to its output file; the
   // file's time then is when it ended.
@@ -581,76 +628,118 @@ export function createAgentStream(opts: {
       }
     }
     if (batch.msgId === undefined) {
-      Promise.resolve().then(() => opts.send(chatId, frame.text)).then(id => {
+      batch.inflight = Promise.resolve().then(() => opts.send(chatId, frame.text)).then(id => {
         if (id === undefined) { fail(new Error('Telegram send returned no message id')); return }
         batch.msgId = id
         ok()
       }, fail).finally(done)
     } else {
-      Promise.resolve().then(() => opts.edit(chatId, batch.msgId!, frame.text)).then(ok, fail).finally(done)
+      batch.inflight = Promise.resolve().then(() => opts.edit(chatId, batch.msgId!, frame.text)).then(ok, fail).finally(done)
+    }
+  }
+
+  // The server's last edit of one live message. A send or edit still on its
+  // way settles first, so the closing edit never races it, and a first send
+  // gives the message its id. The edit then waits for the chat's next slot,
+  // and is not made when that slot comes after startBy. Rows that finished
+  // keep their lines; rows still running read as no longer followed.
+  async function closeBatch(batch: Batch, closedAt: number, startBy: number) {
+    while (batch.sending) await batch.inflight?.catch(() => {})
+    // A group whose final frame went out in that answer has ended, and its
+    // message stays as it is.
+    if (batch.gone || batch.msgId === undefined || batches.get(batch.chatId) !== batch) return
+    const frame = panel(batch, agents, closedAt, closedAt)
+    const slot = Math.max(now(), chatNext.get(batch.chatId) ?? 0)
+    if (slot > startBy) return
+    if (slot > now()) await sleep(slot - now())
+    chatNext.set(batch.chatId, now() + CHAT_GAP_MS)
+    try { await opts.edit(batch.chatId, batch.msgId, frame.text) } catch {}
+  }
+
+  // Reads new events and each row's files, and places each row in its chat's
+  // message.
+  function update(t: number) {
+    for (const ev of opts.readEvents()) {
+      const key = 'task_id' in ev ? shellKey(ev.task_id) : ev.agent_id
+      if (ev.event === 'start' || ev.event === 'shell_start') {
+        const old = agents.get(key)
+        if (old && old.done === undefined) continue
+        // A shell's output file says whether it still runs, however old.
+        if (ev.event === 'start' && t - ev.t > AGENT_STALE_MS) continue
+        const a: Agent = 'task_id' in ev
+          ? { id: ev.task_id, key, kind: 'shell', type: 'shell', description: ev.description, output: ev.output,
+            started: ev.t, progress: {}, quietSince: ev.t }
+          : { id: ev.agent_id, key, type: ev.agent_type || 'agent', base: ev.agent_base,
+            started: ev.t, progress: {}, quietSince: ev.t }
+        const stop = earlyStops.get(key)
+        if (stop && stop.t >= ev.t) {
+          a.done = stop.t
+          a.outcome = stop.outcome
+          if ('error' in stop) a.error = stop.error
+        }
+        earlyStops.delete(key)
+        agents.set(key, a)
+      } else {
+        const a = agents.get(key)
+        if (a && ev.t >= a.started) {
+          a.done ??= ev.t
+          if (a.outcome === undefined && ev.outcome !== undefined) {
+            a.outcome = ev.outcome
+            if ('error' in ev) a.error = ev.error
+          }
+        } else if (!a) earlyStops.set(key, ev)
+      }
+    }
+    // The first read is the backlog from before this server started: only
+    // subagents and shells still running are of interest. A shell whose
+    // output file is gone can no longer show its ending.
+    if (first) {
+      first = false
+      for (const a of agents.values()) {
+        refresh(a)
+        if (a.done !== undefined || (a.output && mtime(a.output) === undefined)) agents.delete(a.key)
+      }
+      earlyStops.clear()
+    }
+    for (const [id, ev] of earlyStops) if (t - ev.t > 10 * 60 * 1000) earlyStops.delete(id)
+
+    for (const a of agents.values()) {
+      a.chatId ??= opts.chat()
+      refresh(a)
+      if (a.kind !== 'shell' && a.done === undefined && t - a.quietSince > AGENT_DROP_MS) a.dropped = true
+      if (!a.chatId) {
+        if (a.done !== undefined || a.dropped) agents.delete(a.key)
+        continue
+      }
+      let batch = batches.get(a.chatId)
+      if (!batch) {
+        batch = { chatId: a.chatId, members: new Map(), numbers: new Map(), lastNumber: 0, failures: 0, lastEdit: 0 }
+        batches.set(a.chatId, batch)
+      }
+      if (!batch.numbers.has(a.key)) batch.numbers.set(a.key, ++batch.lastNumber)
+      batch.members.set(a.key, a)
     }
   }
 
   return {
     tick() {
+      if (closing) return
       const t = now()
-      for (const ev of opts.readEvents()) {
-        const key = 'task_id' in ev ? shellKey(ev.task_id) : ev.agent_id
-        if (ev.event === 'start' || ev.event === 'shell_start') {
-          const old = agents.get(key)
-          if (old && old.done === undefined) continue
-          // A shell's output file says whether it still runs, however old.
-          if (ev.event === 'start' && t - ev.t > AGENT_STALE_MS) continue
-          const a: Agent = 'task_id' in ev
-            ? { id: ev.task_id, key, kind: 'shell', type: 'shell', description: ev.description, output: ev.output,
-              started: ev.t, progress: {}, quietSince: ev.t }
-            : { id: ev.agent_id, key, type: ev.agent_type || 'agent', base: ev.agent_base,
-              started: ev.t, progress: {}, quietSince: ev.t }
-          const stop = earlyStops.get(key)
-          if (stop && stop.t >= ev.t) { a.done = stop.t; a.outcome = stop.outcome }
-          earlyStops.delete(key)
-          agents.set(key, a)
-        } else {
-          const a = agents.get(key)
-          if (a && ev.t >= a.started) {
-            a.done ??= ev.t
-            a.outcome ??= ev.outcome
-          } else if (!a) earlyStops.set(key, ev)
-        }
-      }
-      // The first read is the backlog from before this server started: only
-      // subagents and shells still running are of interest. A shell whose
-      // output file is gone can no longer show its ending.
-      if (first) {
-        first = false
-        for (const a of agents.values()) {
-          refresh(a)
-          if (a.done !== undefined || (a.output && mtime(a.output) === undefined)) agents.delete(a.key)
-        }
-        earlyStops.clear()
-      }
-      for (const [id, ev] of earlyStops) if (t - ev.t > 10 * 60 * 1000) earlyStops.delete(id)
-
-      for (const a of agents.values()) {
-        a.chatId ??= opts.chat()
-        refresh(a)
-        if (a.kind !== 'shell' && a.done === undefined && t - a.quietSince > AGENT_DROP_MS) a.dropped = true
-        if (!a.chatId) {
-          if (a.done !== undefined || a.dropped) agents.delete(a.key)
-          continue
-        }
-        let batch = batches.get(a.chatId)
-        if (!batch) {
-          batch = { chatId: a.chatId, members: new Map(), numbers: new Map(), lastNumber: 0, failures: 0, lastEdit: 0 }
-          batches.set(a.chatId, batch)
-        }
-        if (!batch.numbers.has(a.key)) batch.numbers.set(a.key, ++batch.lastNumber)
-        batch.members.set(a.key, a)
-      }
+      update(t)
       for (const batch of batches.values()) flush(batch, t)
     },
     agents() {
       return [...agents.values()]
+    },
+    close(startBy: number) {
+      if (closing) return closing
+      // Nothing flushes from here on: the closing edit is the last.
+      const closedAt = now()
+      closing = Promise.resolve().then(() => {
+        update(closedAt)
+        return Promise.all([...batches.values()].map(b => closeBatch(b, closedAt, startBy).catch(() => {})))
+      }).then(() => {}, () => {})
+      return closing
     },
   }
 }

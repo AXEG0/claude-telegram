@@ -1,0 +1,58 @@
+{
+  "source": "Claude Code 2.1.311: the SubagentStart and StopFailure inputs recorded from a session whose subagent's model does not exist, once from an Agent call and once from a workflow's agent; no SubagentStop came for either. The main session's StopFailure is the same input without the subagent's fields, as the binary builds it. Paths, ids and the agent's name are neutral.",
+  "subagent_start": {
+    "session_id": "sess0003-test-4000-8000-000000000a03",
+    "transcript_path": "/Users/someone/.claude/projects/-srv-probe-failure-probe-work/sess0003-test-4000-8000-000000000a03.jsonl",
+    "cwd": "/srv/probe/failure-probe/work",
+    "prompt_id": "prompt03-test-4000-8000-000000000b03",
+    "agent_id": "a3c5e7f9b1d2c4e60",
+    "agent_type": "failing-probe",
+    "hook_event_name": "SubagentStart"
+  },
+  "subagent_stop_failure": {
+    "session_id": "sess0003-test-4000-8000-000000000a03",
+    "transcript_path": "/Users/someone/.claude/projects/-srv-probe-failure-probe-work/sess0003-test-4000-8000-000000000a03.jsonl",
+    "cwd": "/srv/probe/failure-probe/work",
+    "prompt_id": "prompt03-test-4000-8000-000000000b03",
+    "agent_id": "a3c5e7f9b1d2c4e60",
+    "agent_type": "failing-probe",
+    "effort": {
+      "level": "xhigh"
+    },
+    "hook_event_name": "StopFailure",
+    "error": "model_not_found",
+    "last_assistant_message": "There's an issue with the selected model (claude-probe-nonexistent-model). It may not exist or you may not have access to it. Run --model to pick a different model."
+  },
+  "workflow_subagent_start": {
+    "session_id": "sess0004-test-4000-8000-000000000a04",
+    "transcript_path": "/Users/someone/.claude/projects/-srv-probe-failure-probe-work/sess0004-test-4000-8000-000000000a04.jsonl",
+    "cwd": "/srv/probe/failure-probe/work",
+    "prompt_id": "prompt04-test-4000-8000-000000000b04",
+    "agent_id": "a4d6f8b0c2e3d5f71",
+    "agent_type": "failing-probe",
+    "hook_event_name": "SubagentStart"
+  },
+  "workflow_subagent_stop_failure": {
+    "session_id": "sess0004-test-4000-8000-000000000a04",
+    "transcript_path": "/Users/someone/.claude/projects/-srv-probe-failure-probe-work/sess0004-test-4000-8000-000000000a04.jsonl",
+    "cwd": "/srv/probe/failure-probe/work",
+    "prompt_id": "prompt04-test-4000-8000-000000000b04",
+    "agent_id": "a4d6f8b0c2e3d5f71",
+    "agent_type": "failing-probe",
+    "effort": {
+      "level": "xhigh"
+    },
+    "hook_event_name": "StopFailure",
+    "error": "model_not_found",
+    "last_assistant_message": "There's an issue with the selected model (claude-probe-nonexistent-model). It may not exist or you may not have access to it. Run --model to pick a different model."
+  },
+  "main_stop_failure": {
+    "session_id": "sess0003-test-4000-8000-000000000a03",
+    "transcript_path": "/Users/someone/.claude/projects/-srv-probe-failure-probe-work/sess0003-test-4000-8000-000000000a03.jsonl",
+    "cwd": "/srv/probe/failure-probe/work",
+    "prompt_id": "prompt03-test-4000-8000-000000000b03",
+    "hook_event_name": "StopFailure",
+    "error": "model_not_found",
+    "last_assistant_message": "There's an issue with the selected model (claude-probe-nonexistent-model). It may not exist or you may not have access to it. Run --model to pick a different model."
+  }
+}

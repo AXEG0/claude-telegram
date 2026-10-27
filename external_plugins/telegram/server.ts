@@ -25,7 +25,7 @@ import { execFileSync } from 'child_process'
 import { basename, join, extname, sep } from 'path'
 import { ancestorPids, busyFiles, createTyping, markerFiles, readBusyAt, readTurnEnd, REFRESH_MS, subagentFiles } from './typing.ts'
 import { STT_KINDS, sttConfig, transcribeTelegramFile } from './stt.ts'
-import { AGENT_TICK_MS, agentEventFile, createAgentStream, createEventReader } from './agents.ts'
+import { AGENT_TICK_MS, agentEventFile, CHAT_GAP_MS, CLOSING_EDIT_MS, createAgentStream, createEventReader } from './agents.ts'
 import { editRichParsed, RICH_FORMAT_HELP, RICH_INSTRUCTIONS, richEditParse, richEnabled, sendRich, type RawApi } from './rich.ts'
 import { replyMeta, richText } from './reply.ts'
 import { heartbeatTransformer } from './heartbeat.ts'
@@ -1179,7 +1179,7 @@ let shuttingDown = false
 // The polling loop, which ends once grammY has worked through its batch.
 let pollLoop: Promise<void> = Promise.resolve()
 // Presses being judged, and press answers still on their way, which shutdown
-// waits for within its 2-second limit.
+// waits for within its time limit.
 const pressing = new Set<Promise<unknown>>()
 const tracked = <T>(p: Promise<T>): Promise<T> => {
   pressing.add(p)
@@ -1213,8 +1213,13 @@ function shutdown(): void {
     } catch {}
   }
   // bot.stop() signals the poll loop to end; the current getUpdates request
-  // may take up to its long-poll timeout to return. Force-exit after 2s.
-  setTimeout(() => process.exit(0), 2000)
+  // may take up to its long-poll timeout to return. Force-exit once the
+  // subagents message's closing edit has had its time: the chat's next slot,
+  // at most CHAT_GAP_MS away, and then CLOSING_EDIT_MS to reach Telegram.
+  setTimeout(() => process.exit(0), CHAT_GAP_MS + CLOSING_EDIT_MS)
+  // The subagents message's last edit: a row still running reads as no longer
+  // followed. The server cannot tell why it shuts down, so it says no more.
+  const closing = agentStream.close(Date.now() + CHAT_GAP_MS)
   // Messages still waiting in a batch go now: Telegram has counted them delivered.
   // grammY then works through the batch it fetched, and a press in it gets
   // the notice to press again, whose answer goes out before the exit.
@@ -1222,6 +1227,7 @@ function shutdown(): void {
     .then(() => { if (POLLING && bot.isRunning()) bot.stop() })
     .then(() => pollLoop)
     .then(async () => { while (pressing.size > 0) await Promise.allSettled([...pressing]) })
+    .then(() => closing)
     .finally(() => process.exit(0))
 }
 process.stdin.on('end', shutdown)

@@ -1,5 +1,5 @@
 {
-  "description": "Marks when this session is busy, when each tool call ends, when each turn ends, when each subagent starts and stops, and when each background shell starts or is stopped, for the Telegram server's typing indicator, its stuck and idle alerts, and its subagent and shell stream, and answers a Bash permission ask in a bypass-mode channel session, telling Telegram what it allowed",
+  "description": "Marks when this session is busy, when each tool call ends, when each turn ends, when each subagent starts, stops or fails on an API error, and when each background shell starts or is stopped, for the Telegram server's typing indicator, its stuck and idle alerts, and its subagent and shell stream, and answers a Bash permission ask in a bypass-mode channel session, telling Telegram what it allowed",
   "hooks": {
     "Stop": [
       {
@@ -19,6 +19,12 @@
           {
             "type": "command",
             "command": "bun \"${CLAUDE_PLUGIN_ROOT}/hooks/turn-end.ts\"",
+            "async": true,
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "bun \"${CLAUDE_PLUGIN_ROOT}/hooks/subagent.ts\"",
             "async": true,
             "timeout": 10
           }
