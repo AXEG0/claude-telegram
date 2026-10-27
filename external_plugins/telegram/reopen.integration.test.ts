@@ -2,7 +2,7 @@
 // leaves such a row as it is, in the running server with the offline Telegram
 // fake.
 import { afterEach, describe, expect, test } from 'bun:test'
-import { AGENT_TICK_MS } from './agents.ts'
+import { AGENT_TICK_MS, CHAT_GAP_MS } from './agents.ts'
 import { cleanup, conflicts } from './fixtures/harness.ts'
 import { row, session } from './fixtures/session.ts'
 import { apiError, attachment, requestBlob, userText } from './fixtures/transcript.ts'
@@ -91,6 +91,9 @@ describe.skipIf(process.platform !== 'linux')('a row its transcript closed', () 
     s.begin('a1', 'Long job')
     s.write('a1', userText('u1', Date.now(), 'Long job'))
     const sent = await s.next(t => row(t, 1).startsWith('1. ⏳'))
+    // Past the chat's spacing, so the tick that reads the error also shows it,
+    // and the next tick is the one that would confirm it.
+    await Bun.sleep(Math.max(0, sent.at + CHAT_GAP_MS + 500 - Date.now()))
     s.write('a1', apiError('e1', Date.now(), 'overloaded'))
     const failed = await s.next(t => row(t, 1).startsWith('1. ❌'), sent.index + 1)
     // The nudge Claude Code sends after a cut refusal, before the next tick.

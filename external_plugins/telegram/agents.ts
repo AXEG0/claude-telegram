@@ -640,6 +640,8 @@ export function createAgentStream(opts: {
   const chatNext = new Map<string, number>()
   let first = true
   let ticks = 0
+  // The current tick's time, which the sweep's slots share with the flush.
+  let tickAt = 0
   let closing: Promise<void> | undefined
   // The close-time frame's text of each message, once the stream closes.
   const closeTexts = new Map<Batch, string>()
@@ -959,7 +961,9 @@ export function createAgentStream(opts: {
   const slots: SweepSlots = {
     now,
     take(chatId) {
-      const t = now()
+      // The tick's own time, as the flush uses: a slot taken a few
+      // milliseconds into the tick must not cost the next tick's send.
+      const t = tickAt
       if (closing || t < (chatNext.get(chatId) ?? 0)) return false
       chatNext.set(chatId, t + CHAT_GAP_MS)
       return true
@@ -975,6 +979,7 @@ export function createAgentStream(opts: {
       if (closing) return
       ticks++
       const t = now()
+      tickAt = t
       update(t)
       // The sweep goes first: a live message that changes on every tick would
       // otherwise take each of the chat's slots, and a message of a server

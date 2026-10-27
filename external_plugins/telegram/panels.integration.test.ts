@@ -52,7 +52,8 @@ async function nextServer(dir: string, env: Record<string, string> = {}) {
 }
 const swept = async (dir: string, rec: { message: number; text: string }, pid?: number): Promise<Call> => {
   let found: Call | undefined
-  await until(() => !!(found = edits(dir, rec.message).find(c => c.payload.text === rec.text && (pid === undefined || c.pid !== pid))), WAIT_MS)
+  // Records in one chat go one per slot, and a tick can land a little early.
+  await until(() => !!(found = edits(dir, rec.message).find(c => c.payload.text === rec.text && (pid === undefined || c.pid !== pid))), 4 * AGENT_TICK_MS + 2000)
   return found!
 }
 
@@ -266,17 +267,19 @@ describe.skipIf(process.platform !== 'linux')('the polling server\'s sweep', () 
   }, 30000)
 
   test('a swept edit and the live message\'s sends and edits in one chat stay the chat\'s spacing apart', async () => {
-    const dir = state()
-    plant(dir, W(7), 601, '🤖 Subagents\n1. 🔌 swept', { lock: true })
-    const s = await session({}, dir)
+    const s = await session()
+    const dir = s.dir
     s.begin('a1', 'Long job')
-    // The live message wants an edit on each tick, before and after the swept one.
+    await s.next(t => row(t, 1).startsWith('1. ⏳'))
+    // A server that died left a record in the same chat, after the live
+    // message went out; the live message wants an edit on each tick.
+    plant(dir, W(7), 601, '🤖 Subagents\n1. 🔌 swept', { lock: true })
     let step = 0
     const steps = setInterval(() => s.write('a1', toolCall(`c${++step}`, Date.now(), `Step ${step}`, 100 + step)), 1000)
     try {
-      await until(() => edits(dir, 601).length === 1, 3 * AGENT_TICK_MS)
+      await until(() => edits(dir, 601).length === 1, 4 * AGENT_TICK_MS)
       const sweptAt = edits(dir, 601)[0]!.at
-      await until(() => s.panels().some(c => c.method === 'editMessageText' && c.at > sweptAt), 3 * AGENT_TICK_MS)
+      await until(() => s.panels().some(c => c.at > sweptAt && c.payload.message_id !== 601), 4 * AGENT_TICK_MS)
     } finally {
       clearInterval(steps)
     }
