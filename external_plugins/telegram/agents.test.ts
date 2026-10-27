@@ -15,7 +15,7 @@ import {
   eventFromHook,
   formatDuration,
   formatTokens,
-  interruptionFromTranscript,
+  newestEntry,
   progressFromTranscript,
   shellEndFromOutput,
   shellEventFromHook,
@@ -184,16 +184,17 @@ const workflowMeta = (label: string, agentType = 'workflow-subagent') =>
 const toolCall = (t: number, description: string, tokens: number) =>
   assistant([{ type: 'tool_use', name: 'Bash', input: { command: 'true', description } }], { input_tokens: tokens }, new Date(t).toISOString())
 
-describe('interruptionFromTranscript', () => {
+describe('newestEntry', () => {
+  const kind = (text: string) => newestEntry(text)?.kind
   test('reads an explicit terminal interruption, ignoring a partial line and trailing metadata', () => {
-    expect(interruptionFromTranscript(interrupted(5000) + '\n' + JSON.stringify({ type: 'attachment' }) + '\n{"type":'))
-      .toBe(5000)
+    expect(newestEntry(interrupted(5000) + '\n' + JSON.stringify({ type: 'attachment' }) + '\n{"type":'))
+      .toMatchObject({ kind: 'interruption', at: 5000 })
   })
   test('ignores an interruption followed by resumed work or quoted in an answer', () => {
-    expect(interruptionFromTranscript(interrupted(5000) + '\n' + assistant([{ type: 'text', text: 'Working again' }]))).toBeUndefined()
-    expect(interruptionFromTranscript(interrupted(5000) + '\n' + JSON.stringify({ type: 'user', message: { content: 'Continue' } }))).toBeUndefined()
-    expect(interruptionFromTranscript(assistant([{ type: 'text', text: '[Request interrupted by user]' }]))).toBeUndefined()
-    expect(interruptionFromTranscript(JSON.stringify({ type: 'user', message: { content: [{ type: 'text', text: '[Request interrupted by user]' }] } }))).toBeUndefined()
+    expect(kind(interrupted(5000) + '\n' + assistant([{ type: 'text', text: 'Working again' }]))).toBe('other')
+    expect(kind(interrupted(5000) + '\n' + JSON.stringify({ type: 'user', message: { content: 'Continue' } }))).toBe('other')
+    expect(kind(assistant([{ type: 'text', text: '[Request interrupted by user]' }]))).toBe('other')
+    expect(kind(JSON.stringify({ type: 'user', message: { content: [{ type: 'text', text: '[Request interrupted by user]' }] } }))).toBe('interruption')
   })
 })
 
@@ -285,6 +286,8 @@ describe('createAgentStream', () => {
     let sendWait: Promise<void> | undefined
     let editWait: Promise<void> | undefined
     let current = chat
+    // Each record write and deletion, with the clock when it happened.
+    const records: { at: number; op: 'write' | 'remove'; chat: string; id: number; text?: string }[] = []
     const stream = createAgentStream({
       readEvents: () => events.splice(0),
       chat: () => current ?? undefined,
@@ -304,13 +307,17 @@ describe('createAgentStream', () => {
       },
       now: () => t,
       sleep: async ms => { t += ms },
+      records: {
+        write: (c, id, text) => { records.push({ at: t, op: 'write', chat: c, id, text }) },
+        remove: (c, id) => { records.push({ at: t, op: 'remove', chat: c, id }) },
+      },
     })
     const settle = () => new Promise(r => setTimeout(r, 0))
     const tick = async () => { stream.tick(); await settle() }
     const write = (path: string, text: string) => { files.set(path, text); mtimes.set(path, t) }
     return {
       stream, events, sent, edits, tick, write,
-      attempts,
+      attempts, records,
       advance: (ms: number) => { t += ms },
       now: () => t,
       setChat: (c: string | null) => { current = c },
@@ -1393,6 +1400,94 @@ describe('createAgentStream', () => {
     held.failEditWith(undefined)
     await held.stream.close(held.now() + CHAT_GAP_MS)
     expect(held.attempts).toHaveLength(1)
+  })
+
+  describe('the records of open messages', () => {
+
+    test('a record is written right after the first send and before each edit, with that frame\'s closing text, and deleted once the group\'s final frame is accepted', async () => {
+      const h = harness('1001')
+      await h.tick()
+      h.events.push(start(h, 'run'), start(h, 'fin'))
+      await h.tick()
+      expect(h.records).toEqual([{ at: h.now(), op: 'write', chat: '1001', id: 7,
+        text: '🤖 Subagents\n1. 🔌 No longer followed after 0s · general-purpose · last: Starting…\n2. 🔌 No longer followed after 0s · general-purpose · last: Starting…' }])
+      h.advance(CHAT_GAP_MS)
+      h.events.push({ t: h.now(), event: 'stop', agent_id: 'fin' })
+      await h.tick()
+      expect(h.records.at(-1)).toEqual({ at: h.now(), op: 'write', chat: '1001', id: 7,
+        text: '🤖 Subagents\n1. 🔌 No longer followed after 3s · general-purpose · last: Starting…\n2. ✅ Done in 3s · general-purpose' })
+      expect(h.attempts.at(-1)!.at).toBe(h.records.at(-1)!.at)
+      h.advance(CHAT_GAP_MS)
+      h.events.push({ t: h.now(), event: 'stop', agent_id: 'run' })
+      await h.tick()
+      expect(h.records.slice(-2).map(r => r.op)).toEqual(['write', 'remove'])
+      expect(h.records.at(-1)).toMatchObject({ op: 'remove', chat: '1001', id: 7 })
+    })
+
+    test('the close rewrites the record with the close-time frame, and deletes it once the closing edit is accepted or not modified, never when refused', async () => {
+      for (const answer of ['accepted', 'not modified', 'refused'] as const) {
+        const h = harness('1001')
+        await h.tick()
+        h.events.push(start(h))
+        await h.tick()
+        h.advance(CHAT_GAP_MS + 2000)
+        if (answer === 'not modified') h.failEditWith({ description: 'Bad Request: message is not modified' })
+        if (answer === 'refused') h.failEditWith({ description: 'Too Many Requests: retry after 9', parameters: { retry_after: 9 } })
+        const before = h.records.length
+        await h.stream.close(h.now() + CHAT_GAP_MS)
+        const after = h.records.slice(before)
+        expect(after[0]).toEqual({ at: h.now(), op: 'write', chat: '1001', id: 7,
+          text: '🤖 Subagents\n1. 🔌 No longer followed after 5s · general-purpose · last: Starting…' })
+        expect(after.slice(1).map(r => r.op)).toEqual(answer === 'refused' ? [] : ['remove'])
+      }
+    })
+
+    test('a replaced message\'s record is deleted, and the new message writes its own', async () => {
+      const h = harness('1001')
+      await h.tick()
+      h.events.push(start(h))
+      await h.tick()
+      h.failEditWith({ description: 'Bad Request: message to edit not found' })
+      h.advance(CLOCK_REFRESH_MS); await h.tick()
+      h.failEditWith(undefined)
+      expect(h.records.at(-1)).toMatchObject({ op: 'remove', id: 7 })
+      h.advance(CHAT_GAP_MS); await h.tick()
+      expect(h.records.at(-1)).toMatchObject({ op: 'write', id: 8 })
+    })
+
+    test('a gone group\'s record takes its final frame when the group is dropped', async () => {
+      const h = harness('1001')
+      await h.tick()
+      h.events.push(start(h, 'run'), start(h, 'fin'))
+      await h.tick()
+      h.failEditWith({ description: 'Bad Request: message thread not found' })
+      for (let i = 0; i < 5; i++) { h.advance(CLOCK_REFRESH_MS); await h.tick() }
+      h.failEditWith(undefined)
+      const tried = h.attempts.length
+      h.advance(CHAT_GAP_MS)
+      h.events.push({ t: h.now(), event: 'stop', agent_id: 'fin' }, { t: h.now(), event: 'stop', agent_id: 'run' })
+      await h.tick()
+      expect(h.attempts).toHaveLength(tried)
+      expect(h.records.at(-1)).toEqual({ at: h.now(), op: 'write', chat: '1001', id: 7,
+        text: '🤖 Subagents\n1. ✅ Done in 53s · general-purpose\n2. ✅ Done in 53s · general-purpose' })
+    })
+
+    test('a row dropped after two hours of quiet keeps its dropped line in the record, with its clock read to the close', async () => {
+      const h = harness('1001')
+      await h.tick()
+      h.events.push(start(h, 'quiet'), start(h, 'run'))
+      await h.tick()
+      h.advance(AGENT_DROP_MS + 1000)
+      h.write('/s/agent-run.jsonl', toolCall(h.now(), 'Checking gate', 1500))
+      await h.tick()
+      expect(h.edits.at(-1)!.text).toContain('1. ⚠️ No activity for 2h 0m')
+      h.advance(60_000)
+      const before = h.records.length
+      await h.stream.close(h.now() + CHAT_GAP_MS)
+      expect(h.records[before]).toEqual({ at: h.now(), op: 'write', chat: '1001', id: 7, text: '🤖 Subagents\n'
+        + '1. ⚠️ No activity for 2h 1m · general-purpose · last: Starting…\n'
+        + '2. 🔌 No longer followed after 2h 1m · general-purpose · last: Checking gate · 1.5k tokens' })
+    })
   })
 })
 

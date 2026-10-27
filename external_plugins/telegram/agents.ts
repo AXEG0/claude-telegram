@@ -9,7 +9,9 @@
 // A finished row leaves the message five minutes after the message first
 // showed it finished; every row keeps the number it joined with. When the
 // server shuts down, one last edit marks each row still running as no longer
-// followed.
+// followed, and the server keeps a record of each open message's closing text,
+// so the next server that polls the bot closes a message whose server died
+// before it could.
 //
 // The plugin's SubagentStart, SubagentStop and PostToolUse hook
 // (hooks/subagent.ts) appends one line per event to a file named for the
@@ -96,13 +98,21 @@ export function eventFromHook(input: {
   tool_input?: { task_id?: string }
   tool_response?: unknown
   error?: unknown
-}, now: number = Date.now()): AgentEvent | undefined {
+}, now: number = Date.now(), files: TranscriptFiles = {}): AgentEvent | undefined {
   // A subagent whose query ends on an API error gets StopFailure, carrying its
   // id, and no SubagentStop. The main session's StopFailure carries no id.
+  // The stop is stamped with Claude Code's own time for the error: its newest
+  // API-error entry in the subagent's transcript, once that has landed, else
+  // the hook's clock. So an earlier run's late StopFailure never counts
+  // against a resumed run that started after that error.
   if (input.hook_event_name === 'StopFailure') {
     if (!input.agent_id || !/^[\w-]+$/.test(input.agent_id)) return undefined
-    const error = typeof input.error === 'string' && /^[a-z_]{1,40}$/.test(input.error) ? input.error : undefined
-    return { t: now, event: 'stop', agent_id: input.agent_id, outcome: 'failed', ...(error ? { error } : {}) }
+    const error = errorClass(input.error)
+    const base = subagentBase(input.transcript_path, input.agent_id)
+    const found = base === undefined ? undefined : locateBase(base, input.agent_id, files.mtime ?? mtimeOf, files.listDir ?? listDirOf)
+    const tail = found === undefined ? undefined : (files.readFile ?? tailOf)(`${found}.jsonl`)
+    const stamped = tail === undefined ? undefined : newestApiError(tail)
+    return { t: stamped ?? now, event: 'stop', agent_id: input.agent_id, outcome: 'failed', ...(error ? { error } : {}) }
   }
   // TaskStop does not run SubagentStop. Only a successful stop of a local
   // agent counts; a failed request or a stopped shell task must not close it.
@@ -121,13 +131,44 @@ export function eventFromHook(input: {
   const event = input.hook_event_name === 'SubagentStart' ? 'start'
     : input.hook_event_name === 'SubagentStop' ? 'stop' : undefined
   if (!event || !input.agent_id || !/^[\w-]+$/.test(input.agent_id)) return undefined
-  const tp = input.transcript_path
-  // A nested subagent's hook may name its parent subagent's transcript, which
-  // already sits in the session's flat subagents directory.
-  const base = !tp?.endsWith('.jsonl') ? undefined
-    : /[\\/]subagents[\\/]agent-[^\\/]+\.jsonl$/.test(tp) ? join(tp, '..', `agent-${input.agent_id}`)
-    : join(tp.slice(0, -'.jsonl'.length), 'subagents', `agent-${input.agent_id}`)
-  return { t: now, event, agent_id: input.agent_id, agent_type: input.agent_type, agent_base: base }
+  return { t: now, event, agent_id: input.agent_id, agent_type: input.agent_type, agent_base: subagentBase(input.transcript_path, input.agent_id) }
+}
+
+// An API error's class as Claude Code names it, such as rate_limit; unknown
+// is no class, whichever signal carries it.
+function errorClass(error: unknown): string | undefined {
+  return typeof error === 'string' && /^[a-z_]{1,40}$/.test(error) && error !== 'unknown' ? error : undefined
+}
+
+// The subagent's files sit beside the session transcript, in a directory named
+// for the session. A nested subagent's hook may name its parent subagent's
+// transcript, which already sits in the session's flat subagents directory.
+function subagentBase(tp: string | undefined, agentId: string): string | undefined {
+  if (!tp?.endsWith('.jsonl')) return undefined
+  return /[\\/]subagents[\\/]agent-[^\\/]+\.jsonl$/.test(tp) ? join(tp, '..', `agent-${agentId}`)
+    : join(tp.slice(0, -'.jsonl'.length), 'subagents', `agent-${agentId}`)
+}
+
+export type TranscriptFiles = {
+  readFile?: (path: string) => string | undefined
+  mtime?: (path: string) => number | undefined
+  listDir?: (path: string) => string[] | undefined
+}
+
+// A workflow's agent, whatever its type, keeps its files in
+// <session>/subagents/workflows/<run id>/, not beside the session's other
+// subagents, and they can appear after its start hook ran: while none sit
+// where the row looks, look in each run folder.
+function locateBase(base: string, agentId: string, mtime: (path: string) => number | undefined,
+  listDir: (path: string) => string[] | undefined): string | undefined {
+  const has = (b: string) => mtime(`${b}.jsonl`) !== undefined || mtime(`${b}.meta.json`) !== undefined
+  if (has(base)) return base
+  const runs = join(base, '..', 'workflows')
+  for (const run of listDir(runs) ?? []) {
+    const b = join(runs, run, `agent-${agentId}`)
+    if (has(b)) return b
+  }
+  return undefined
 }
 
 function parsedResponse(response: unknown): Record<string, unknown> | undefined {
@@ -261,22 +302,61 @@ export type Progress = { step?: string; tokens?: number; updatedAt?: number }
 export const THINKING = '💭 Thinking…'
 export const WRITING = '✍️ Writing…'
 
-// Claude records an interruption in the agent's own transcript even when no
-// stop hook ran. Inspect the latest conversation entry, not quoted text in an
-// earlier message: an agent can be resumed after an interruption.
-export function interruptionFromTranscript(text: string): number | undefined {
+// The newest conversation entry of a subagent's transcript, which says whether
+// its run ended: an assistant entry Claude Code wrote for an API error, or the
+// marker of an interruption. Claude Code ends a subagent's query on several
+// API errors without any stop hook, and records an interruption even when no
+// stop hook ran. Only the latest user or assistant entry counts, never quoted
+// text in an earlier one: an agent can be resumed after either. Its other
+// lines (attachments, request records) are skipped, and so is a line cut off
+// at either end of the tail.
+export type TranscriptEntry = {
+  // The entry's own id, which tells a later read whether it is still the newest.
+  id: string
+  at?: number
+  kind: 'error' | 'interruption' | 'other'
+  error?: string
+  // An interruption Claude Code writes when its own process shuts down, which
+  // is no ending of the run.
+  shutdown?: boolean
+}
+
+export function newestEntry(text: string): TranscriptEntry | undefined {
   const lines = text.split('\n')
   for (let i = lines.length - 1; i >= 0; i--) {
-    let e: { type?: string; timestamp?: string; message?: { content?: unknown } }
+    let e: { type?: string; uuid?: unknown; timestamp?: string; isApiErrorMessage?: unknown; error?: unknown
+      interruptedByShutdown?: unknown; message?: { content?: unknown } }
     try { e = JSON.parse(lines[i]!) } catch { continue }
-    if (e.type !== 'user' && e.type !== 'assistant') continue
-    if (e.type !== 'user' || !Array.isArray(e.message?.content)) return undefined
-    const content = e.message.content as { type?: string; text?: string }[]
-    if (content.length !== 1 || content[0]?.type !== 'text'
-      || !/^\[Request interrupted by user(?: for tool use)?\]$/.test(content[0].text ?? '')) return undefined
+    if (!e || typeof e !== 'object' || (e.type !== 'user' && e.type !== 'assistant')) continue
     const t = Date.parse(e.timestamp ?? '')
-    return Number.isFinite(t) ? t : undefined
+    const at = Number.isFinite(t) ? t : undefined
+    const id = typeof e.uuid === 'string' ? e.uuid : `${e.type}@${e.timestamp ?? i}`
+    if (e.type === 'assistant' && e.isApiErrorMessage === true) {
+      const error = errorClass(e.error)
+      return { id, at, kind: 'error', ...(error ? { error } : {}) }
+    }
+    const content = e.type === 'user' && Array.isArray(e.message?.content) ? e.message!.content as { type?: string; text?: string }[] : []
+    if (content.length === 1 && content[0]?.type === 'text'
+      && /^\[Request interrupted by user(?: for tool use)?\]$/.test(content[0].text ?? '')) {
+      return { id, at, kind: 'interruption', ...(e.interruptedByShutdown === true ? { shutdown: true } : {}) }
+    }
+    return { id, at, kind: 'other' }
   }
+  return undefined
+}
+
+// The time of the newest assistant entry Claude Code wrote for an API error.
+export function newestApiError(text: string): number | undefined {
+  const lines = text.split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (!lines[i]!.includes('"isApiErrorMessage"')) continue
+    let e: { type?: string; timestamp?: string; isApiErrorMessage?: unknown }
+    try { e = JSON.parse(lines[i]!) } catch { continue }
+    if (e?.type !== 'assistant' || e.isApiErrorMessage !== true) continue
+    const t = Date.parse(e.timestamp ?? '')
+    if (Number.isFinite(t)) return t
+  }
+  return undefined
 }
 
 // The current step and context size from the end of a subagent transcript.
@@ -291,8 +371,11 @@ export function progressFromTranscript(text: string): Progress {
     const line = lines[i]!
     const isResult = line.includes('"tool_result"')
     if (!line.includes('"assistant"') && !isResult) continue
-    let e: { type?: string; timestamp?: string; message?: { usage?: Record<string, number>; content?: unknown[] } }
+    let e: { type?: string; timestamp?: string; isApiErrorMessage?: unknown; message?: { usage?: Record<string, number>; content?: unknown[] } }
     try { e = JSON.parse(line) } catch { continue }
+    // Claude Code's entry for an API error is no step, and its usage is zero:
+    // a failed row keeps its last real step and token count.
+    if (e.isApiErrorMessage === true) continue
     if (e.type === 'user' && isResult) {
       if (p.step === undefined) p.step = THINKING
       continue
@@ -380,6 +463,17 @@ type Agent = {
   // When Telegram first accepted a send or edit carrying this run's ending,
   // or a dropped subagent's line after its drop.
   endShownAt?: number
+  // Where the row's ending came from: a stop hook, which is final, or the
+  // subagent's own transcript, which a newer entry can take back.
+  endedBy?: 'hook' | 'transcript'
+  // Set once an ending came from the transcript, and kept when the row opens
+  // again: a start for its id then replaces the row.
+  fromTranscript?: boolean
+  // The transcript entry that closed the row, the tick that read it, and
+  // whether a later tick found it still the newest.
+  endEntry?: string
+  endTick?: number
+  confirmed?: boolean
 }
 
 const shellKey = (taskId: string) => `shell:${taskId}`
@@ -482,11 +576,34 @@ function panel(batch: Batch, agents: Map<string, Agent>, t: number, closedAt?: n
 export type AgentStream = {
   tick(): void
   agents(): Agent[]
-  // The server's shutdown: stops the stream, then makes one last edit of each
-  // live message still open, after any send or edit on its way and at the
-  // chat's next slot, if that slot comes by startBy. Resolves once those
-  // edits are answered.
+  // The server's shutdown: stops the stream, rewrites each open message's
+  // record with the close-time frame, then makes one last edit of each live
+  // message still open, after any send or edit on its way and at the chat's
+  // next slot, if that slot comes by startBy. Resolves once those edits are
+  // answered.
   close(startBy: number): Promise<void>
+}
+
+// The record of each open message: the text it should read once its writer is
+// gone. A server writes one before each edit, with the closing text of the
+// frame that edit sends, and right after a first send is answered, and
+// deletes it once the message needs no closing: the group's final frame or
+// the closing edit was accepted, or the message was replaced. See panels.ts.
+export type PanelRecords = {
+  write(chatId: string, msgId: number, text: string): void
+  remove(chatId: string, msgId: number): void
+}
+
+// What the polling server's sweep of the records of servers that are gone
+// gets from the stream: the per-chat clock the stream's own sends and edits
+// keep, so a swept edit and a live one in the same chat keep its spacing.
+export type SweepSlots = {
+  now(): number
+  // Takes the chat's next slot when it has come; false while it has not.
+  take(chatId: string): boolean
+  // Holds the chat until then, after Telegram asked to wait.
+  holdUntil(chatId: string, t: number): void
+  edit(chatId: string, msgId: number, text: string): Promise<void>
 }
 
 type ApiError = { description?: string; parameters?: { retry_after?: number } }
@@ -502,19 +619,84 @@ export function createAgentStream(opts: {
   listDir?: (path: string) => string[] | undefined
   now?: () => number
   sleep?: (ms: number) => Promise<void>
+  records?: PanelRecords
+  // The polling server's sweep, run on each tick until the stream closes.
+  sweep?: (slots: SweepSlots) => void
 }): AgentStream {
   const now = opts.now ?? Date.now
   const readFile = opts.readFile ?? tailOf
   const mtime = opts.mtime ?? mtimeOf
   const listDir = opts.listDir ?? listDirOf
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms)))
+  const records = opts.records
   const agents = new Map<string, Agent>()
+  // Rows whose transcript closed them after the message showed it: they are
+  // out of the rows, and their transcript is still read, so a run that goes
+  // on opens its row again.
+  const watched = new Map<string, Agent>()
   // Stops whose start has not been read yet: the two hooks run concurrently.
   const earlyStops = new Map<string, StreamEvent>()
   const batches = new Map<string, Batch>()
   const chatNext = new Map<string, number>()
   let first = true
+  let ticks = 0
   let closing: Promise<void> | undefined
+  // The close-time frame's text of each message, once the stream closes.
+  const closeTexts = new Map<Batch, string>()
+
+  // A row out of the rows: one its transcript closed stays watched.
+  function retire(a: Agent) {
+    if (agents.get(a.key) === a) agents.delete(a.key)
+    if (a.kind !== 'shell' && a.endedBy === 'transcript' && a.done !== undefined) watched.set(a.key, a)
+  }
+
+  // A stop hook's ending, which replaces an ending read from the transcript:
+  // a SubagentStop that follows a transcript failure means the run went on
+  // and finished.
+  function endByHook(a: Agent, ev: StreamEvent) {
+    const changed = a.endedBy === 'transcript'
+    a.done = ev.t
+    a.outcome = ev.outcome
+    a.error = 'error' in ev ? ev.error : undefined
+    a.endedBy = 'hook'
+    a.endEntry = undefined
+    a.confirmed = undefined
+    if (changed) a.endShownAt = undefined
+  }
+
+  // The transcript rule: the newest entry closes the row as failed or
+  // stopped, or, for a row the transcript closed, opens it again. A row a
+  // stop hook closed stays closed. A tail with no whole entry changes nothing.
+  function applyEntry(a: Agent, e: TranscriptEntry | undefined) {
+    if (!e || a.endedBy === 'hook') return
+    if (a.endedBy === 'transcript' && e.id === a.endEntry) {
+      if (ticks > (a.endTick ?? ticks)) a.confirmed = true
+      return
+    }
+    // A clock read in the hook guards an interruption, never an error.
+    const failed = e.kind === 'error'
+    const stopped = e.kind === 'interruption' && !e.shutdown && e.at !== undefined && e.at >= a.started
+    if (failed || stopped) {
+      a.done = failed ? Math.max(a.started, e.at ?? a.started) : e.at
+      a.outcome = failed ? 'failed' : 'stopped'
+      a.error = failed ? e.error : undefined
+      a.endedBy = 'transcript'
+      a.fromTranscript = true
+      a.endEntry = e.id
+      a.endTick = ticks
+      a.confirmed = false
+      a.endShownAt = undefined
+    } else if (a.endedBy === 'transcript') {
+      a.done = undefined
+      a.outcome = undefined
+      a.error = undefined
+      a.endShownAt = undefined
+      a.endedBy = undefined
+      a.endEntry = undefined
+      a.endTick = undefined
+      a.confirmed = undefined
+    }
+  }
 
   // A shell ends with the line Claude Code appends to its output file; the
   // file's time then is when it ended.
@@ -530,19 +712,10 @@ export function createAgentStream(opts: {
     a.exitCode = end.exitCode
   }
 
-  // A workflow's agent, whatever its type, keeps its files in
-  // <session>/subagents/workflows/<run id>/, not beside the session's other
-  // subagents, and they can appear after its start hook ran: while none sit
-  // where the row looks, look in each run folder.
   function locate(a: Agent) {
     if (!a.base) return
-    const has = (b: string) => mtime(`${b}.jsonl`) !== undefined || mtime(`${b}.meta.json`) !== undefined
-    if (has(a.base)) return
-    const runs = join(a.base, '..', 'workflows')
-    for (const run of listDir(runs) ?? []) {
-      const b = join(runs, run, `agent-${a.id}`)
-      if (has(b)) { a.base = b; return }
-    }
+    const found = locateBase(a.base, a.id, mtime, listDir)
+    if (found) a.base = found
   }
 
   function refresh(a: Agent) {
@@ -563,22 +736,51 @@ export function createAgentStream(opts: {
       const tail = readFile(`${a.base}.jsonl`)
       if (tail) {
         a.progress = { ...a.progress, ...definedOnly(progressFromTranscript(tail)) }
-        const interrupted = interruptionFromTranscript(tail)
-        if (interrupted !== undefined && interrupted >= a.started) {
-          a.done = interrupted
-          a.outcome = 'stopped'
-        }
+        applyEntry(a, newestEntry(tail))
       }
+    } else if (a.endedBy === 'transcript' && ticks > (a.endTick ?? ticks)) {
+      // An unchanged transcript still has the same newest entry.
+      a.confirmed = true
     }
+  }
+
+  // Whether a row's ending ends its group: one read only from the transcript
+  // counts once a later tick found the same newest entry, so a frame that
+  // shows it for one tick never closes the message on a run that goes on.
+  const settled = (a: Agent) => !!a.dropped || (a.done !== undefined && (a.endedBy !== 'transcript' || !!a.confirmed))
+
+  // The closing text of a frame: every row still running reads as no longer
+  // followed, every other row as it was.
+  const closingText = (batch: Batch, t: number) => panel(batch, agents, t, t).text
+
+  // A group whose rows have all ended, and whose final frame Telegram has
+  // accepted or whose message is gone, ends: its message stays as it is, and
+  // the next overlapping group gets a new one.
+  function endIfFinished(batch: Batch) {
+    if (batches.get(batch.chatId) !== batch || batch.sending) return
+    const finished = [...batch.members.values()].every(settled)
+    if (!finished || !(batch.gone || batch.sentKey === panel(batch, agents, now()).key)) return
+    batches.delete(batch.chatId)
+    for (const a of batch.members.values()) retire(a)
+    if (batch.msgId === undefined) return
+    // A gone message keeps its record, with the final frame, for the next
+    // server; a message whose final frame went out needs no closing.
+    if (batch.gone) records?.write(batch.chatId, batch.msgId, closingText(batch, now()))
+    else records?.remove(batch.chatId, batch.msgId)
   }
 
   function flush(batch: Batch, t: number) {
     if (batch.sending) return
     if (batch.gone) {
       for (const a of batch.members.values()) {
-        if ((a.done !== undefined || a.dropped) && agents.get(a.key) === a) agents.delete(a.key)
+        if (a.done !== undefined || a.dropped) retire(a)
       }
-      if (![...batch.members.values()].some(a => a.done === undefined && !a.dropped)) batches.delete(batch.chatId)
+      if (![...batch.members.values()].some(a => a.done === undefined && !a.dropped)) {
+        // The gone message's record first takes this final frame, so rows this
+        // server saw finish keep their lines when the next server closes it.
+        if (batch.msgId !== undefined) records?.write(batch.chatId, batch.msgId, closingText(batch, t))
+        batches.delete(batch.chatId)
+      }
       return
     }
     // A row that left with its ending acknowledged is done with; its number
@@ -586,7 +788,12 @@ export function createAgentStream(opts: {
     for (const [key, a] of batch.members) if (hasLeft(a, t) && agents.get(key) !== a) batch.members.delete(key)
     const frame = panel(batch, agents, t)
     const running = [...batch.members.values()].some(a => a.done === undefined && !a.dropped)
-    if (frame.key === batch.sentKey && (!running || t - batch.lastEdit < CLOCK_REFRESH_MS)) return
+    if (frame.key === batch.sentKey && (!running || t - batch.lastEdit < CLOCK_REFRESH_MS)) {
+      // The tick that confirms a transcript ending has nothing new to show,
+      // so it ends the group here.
+      endIfFinished(batch)
+      return
+    }
     const chatId = batch.chatId
     if (t < (chatNext.get(chatId) ?? 0)) return
     chatNext.set(chatId, t + CHAT_GAP_MS)
@@ -603,7 +810,7 @@ export function createAgentStream(opts: {
         // An ending received while this send/edit was in flight still needs
         // its own acknowledgement. A resumed run is a different Agent object.
         if (contentKey(a, now()) === key && (a.done !== undefined || a.dropped)
-          && agents.get(a.key) === a) agents.delete(a.key)
+          && agents.get(a.key) === a) retire(a)
       }
     }
     const fail = (err: unknown) => {
@@ -614,26 +821,27 @@ export function createAgentStream(opts: {
       const retry = e.parameters?.retry_after
       if (retry) { chatNext.set(chatId, now() + retry * 1000); return }
       if (/message to edit not found|message can't be edited/i.test(desc)) {
-        batch.msgId = undefined // replace a deleted panel on the next chat slot
+        // Replace a deleted panel on the next chat slot; the old one's record
+        // would only spend the next server a call.
+        if (batch.msgId !== undefined) records?.remove(chatId, batch.msgId)
+        batch.msgId = undefined
       } else if (++batch.failures >= 5) batch.gone = true
     }
     const done = () => {
       batch.sending = false
-      const finished = [...batch.members.values()].every(a => a.done !== undefined || a.dropped)
-      if (finished && (batch.gone || batch.sentKey === panel(batch, agents, now()).key)) {
-        // Leave the final message intact. The next overlapping group gets a
-        // new panel, without rewriting the previous group's completed rows.
-        if (batches.get(chatId) === batch) batches.delete(chatId)
-        for (const a of batch.members.values()) if (agents.get(a.key) === a) agents.delete(a.key)
-      }
+      endIfFinished(batch)
     }
     if (batch.msgId === undefined) {
+      const closeText = closingText(batch, t)
       batch.inflight = Promise.resolve().then(() => opts.send(chatId, frame.text)).then(id => {
         if (id === undefined) { fail(new Error('Telegram send returned no message id')); return }
         batch.msgId = id
+        // Once the stream is closing, the record takes the close-time frame.
+        records?.write(chatId, id, closeTexts.get(batch) ?? closeText)
         ok()
       }, fail).finally(done)
     } else {
+      records?.write(chatId, batch.msgId, closingText(batch, t))
       batch.inflight = Promise.resolve().then(() => opts.edit(chatId, batch.msgId!, frame.text)).then(ok, fail).finally(done)
     }
   }
@@ -648,12 +856,19 @@ export function createAgentStream(opts: {
     // A group whose final frame went out in that answer has ended, and its
     // message stays as it is.
     if (batch.gone || batch.msgId === undefined || batches.get(batch.chatId) !== batch) return
-    const frame = panel(batch, agents, closedAt, closedAt)
+    const text = closeTexts.get(batch) ?? panel(batch, agents, closedAt, closedAt).text
     const slot = Math.max(now(), chatNext.get(batch.chatId) ?? 0)
     if (slot > startBy) return
     if (slot > now()) await sleep(slot - now())
     chatNext.set(batch.chatId, now() + CHAT_GAP_MS)
-    try { await opts.edit(batch.chatId, batch.msgId, frame.text) } catch {}
+    const msgId = batch.msgId
+    try {
+      await opts.edit(batch.chatId, msgId, text)
+    } catch (err) {
+      // Any other answer leaves the record for the next server that polls.
+      if (!/message is not modified/i.test(String((err as ApiError | undefined)?.description ?? err))) return
+    }
+    records?.remove(batch.chatId, msgId)
   }
 
   // Reads new events and each row's files, and places each row in its chat's
@@ -663,31 +878,38 @@ export function createAgentStream(opts: {
       const key = 'task_id' in ev ? shellKey(ev.task_id) : ev.agent_id
       if (ev.event === 'start' || ev.event === 'shell_start') {
         const old = agents.get(key)
-        if (old && old.done === undefined) continue
+        // A start replaces a row whose last ending came from its transcript,
+        // even one that has opened again since: a resumed run's prompt can
+        // reach the transcript before its start hook writes.
+        if (old && old.done === undefined && !old.fromTranscript) continue
         // A shell's output file says whether it still runs, however old.
         if (ev.event === 'start' && t - ev.t > AGENT_STALE_MS) continue
+        watched.delete(key)
         const a: Agent = 'task_id' in ev
           ? { id: ev.task_id, key, kind: 'shell', type: 'shell', description: ev.description, output: ev.output,
             started: ev.t, progress: {}, quietSince: ev.t }
           : { id: ev.agent_id, key, type: ev.agent_type || 'agent', base: ev.agent_base,
             started: ev.t, progress: {}, quietSince: ev.t }
         const stop = earlyStops.get(key)
-        if (stop && stop.t >= ev.t) {
-          a.done = stop.t
-          a.outcome = stop.outcome
-          if ('error' in stop) a.error = stop.error
-        }
+        if (stop && stop.t >= ev.t) endByHook(a, stop)
         earlyStops.delete(key)
         agents.set(key, a)
       } else {
+        // The clock guards decide whether a stop counts: it must be stamped no
+        // earlier than the row's start, so an earlier run's late stop stays
+        // off a resumed run.
         const a = agents.get(key)
-        if (a && ev.t >= a.started) {
-          a.done ??= ev.t
-          if (a.outcome === undefined && ev.outcome !== undefined) {
-            a.outcome = ev.outcome
-            if ('error' in ev) a.error = ev.error
+        const w = a ? undefined : watched.get(key)
+        if (a) {
+          if (ev.t >= a.started && a.endedBy !== 'hook') endByHook(a, ev)
+        } else if (w) {
+          // A watched row's own stop is taken there, never kept as an early
+          // stop, and its ending is final.
+          if (ev.t >= w.started) {
+            endByHook(w, ev)
+            watched.delete(key)
           }
-        } else if (!a) earlyStops.set(key, ev)
+        } else earlyStops.set(key, ev)
       }
     }
     // The first read is the backlog from before this server started: only
@@ -697,18 +919,31 @@ export function createAgentStream(opts: {
       first = false
       for (const a of agents.values()) {
         refresh(a)
-        if (a.done !== undefined || (a.output && mtime(a.output) === undefined)) agents.delete(a.key)
+        if (a.done !== undefined) retire(a)
+        else if (a.output && mtime(a.output) === undefined) agents.delete(a.key)
       }
       earlyStops.clear()
     }
     for (const [id, ev] of earlyStops) if (t - ev.t > 10 * 60 * 1000) earlyStops.delete(id)
+
+    // A watched row whose transcript shows the run going on returns to the
+    // rows as running, under its first start: in its group's message under
+    // its old number while that group is open, else in a new message. One
+    // whose transcript has been quiet as long as a running row may be leaves.
+    for (const [key, a] of watched) {
+      refresh(a)
+      if (a.done === undefined) {
+        watched.delete(key)
+        agents.set(key, a)
+      } else if (t - a.quietSince > AGENT_DROP_MS) watched.delete(key)
+    }
 
     for (const a of agents.values()) {
       a.chatId ??= opts.chat()
       refresh(a)
       if (a.kind !== 'shell' && a.done === undefined && t - a.quietSince > AGENT_DROP_MS) a.dropped = true
       if (!a.chatId) {
-        if (a.done !== undefined || a.dropped) agents.delete(a.key)
+        if (a.done !== undefined || a.dropped) retire(a)
         continue
       }
       let batch = batches.get(a.chatId)
@@ -721,11 +956,30 @@ export function createAgentStream(opts: {
     }
   }
 
+  const slots: SweepSlots = {
+    now,
+    take(chatId) {
+      const t = now()
+      if (closing || t < (chatNext.get(chatId) ?? 0)) return false
+      chatNext.set(chatId, t + CHAT_GAP_MS)
+      return true
+    },
+    holdUntil(chatId, t) {
+      chatNext.set(chatId, Math.max(chatNext.get(chatId) ?? 0, t))
+    },
+    edit: (chatId, msgId, text) => opts.edit(chatId, msgId, text),
+  }
+
   return {
     tick() {
       if (closing) return
+      ticks++
       const t = now()
       update(t)
+      // The sweep goes first: a live message that changes on every tick would
+      // otherwise take each of the chat's slots, and a message of a server
+      // that is gone would never be closed.
+      opts.sweep?.(slots)
       for (const batch of batches.values()) flush(batch, t)
     },
     agents() {
@@ -737,6 +991,15 @@ export function createAgentStream(opts: {
       const closedAt = now()
       closing = Promise.resolve().then(() => {
         update(closedAt)
+        // Every open message's record takes the close-time frame before
+        // anything in flight is waited for, so an answer that lands late
+        // never puts an older frame back, whether or not the closing edit
+        // then goes out.
+        for (const b of batches.values()) {
+          const text = panel(b, agents, closedAt, closedAt).text
+          closeTexts.set(b, text)
+          if (b.msgId !== undefined) records?.write(b.chatId, b.msgId, text)
+        }
         return Promise.all([...batches.values()].map(b => closeBatch(b, closedAt, startBy).catch(() => {})))
       }).then(() => {}, () => {})
       return closing

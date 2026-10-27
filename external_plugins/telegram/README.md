@@ -425,9 +425,11 @@ others:
 ```
 
 An agent's line changes to `✅ Done in …`, `⏹ Stopped after …` when
-interrupted, or `❌ Failed after … (rate_limit)` when its model call ends on an
-API error, with the error's class as Claude Code names it, such as `rate_limit`,
-`billing_error` or `model_not_found`. A workflow's subagents show like any other subagent, under the
+interrupted, or `❌ Failed after … (rate_limit) · general-purpose · Review the plan · 85.4k tokens`
+when its run ends on an API error, with the error's class as Claude Code names
+it, such as `rate_limit`, `billing_error` or `model_not_found`, no class when
+Claude Code gives none or calls it `unknown`, and the token count of its last
+real request. A workflow's subagents show like any other subagent, under the
 label the workflow gave each, and stopping the workflow closes the rows of those
 still running as `⏹ Stopped after …`. A shell's line carries the description
 Claude gave the command, never the command itself, and its running time. It
@@ -445,15 +447,36 @@ the whole group ends, its final message stays intact with the endings of its
 last five minutes, and the next group gets a new one. The header names what the
 message carries: `🤖 Subagents`, `🐚 Shells`, or both.
 
+Claude Code ends a subagent's run on an API error in two ways: it runs
+`StopFailure` with the subagent's id and the error's class, or, for errors
+such as a refusal at the context limit, it runs no hook at all and writes an
+entry for the error into the subagent's transcript. The row closes as failed on
+the first tick after either is read. A row closed from its transcript opens
+again when a newer entry shows the run going on, as after the nudge Claude
+Code sends following a cut refusal, so its group's message ends only once the
+next tick finds the same entry still the newest; a stop hook's ending is final.
+A subagent's failure leaves the turn's [typing](#typing) on.
+
 When the server shuts down, it makes one last edit of the live message: each
 row still running reads `🔌 No longer followed after …`, with how long it ran
 until then and, for a subagent, its last step and tokens, and every finished
 row stays as it was. The server shuts down when its session ends, when the
 plugin reloads, and when a running workflow moves to a background session, and
 it cannot tell these apart, so the line says only that the row is no longer
-followed. A new server never edits that message. The edit keeps the chat's
-spacing, after any send or edit still on its way, so the server takes up to
-five seconds to exit.
+followed. The edit keeps the chat's spacing, after any send or edit still on
+its way, so the server takes up to five seconds to exit.
+
+A server can die before that edit goes out: killed, or with the edit refused,
+lost or out of time. So each open message keeps a record under `panels/` in
+the state directory, holding the text it should read once its server is gone,
+rewritten before each edit; and each server holds a lock file there for as long
+as it lives, which the system releases however it dies. The server that polls
+the bot checks those locks on each tick, edits each message of a server that is
+gone to its stored text at the chat's next slot, and deletes its records, then
+its lock file. A message whose server was killed is closed that way once the
+next server polls the bot. After a plugin reload, the new server shows the rows
+still running in a new message once a chat writes to the bot, for subagents
+started in the last 30 minutes.
 
 The plugin's `SubagentStart`, `SubagentStop`,
 successful `TaskStop` and `StopFailure` hooks ([hooks/subagent.ts](./hooks/subagent.ts)) record each
@@ -482,7 +505,8 @@ fit Telegram's message limit; a group too large for shortened rows shows a
 count of the additional agents, prioritizing new rows and unreported endings
 over finished history. An explicit interruption in the subagent's transcript
 also ends its row on the next stream tick, even when no stop
-hook ran. That is how a stopped workflow's rows close: Claude Code runs no stop
+hook ran; the interruption Claude Code writes when its own process shuts down
+does not. That is how a stopped workflow's rows close: Claude Code runs no stop
 hook for the subagents the stop ends, and writes the interruption into each
 one's transcript. Inactivity alone never counts as completion: a subagent whose
 transcript stays unchanged for 30 minutes shows as quiet until its stop

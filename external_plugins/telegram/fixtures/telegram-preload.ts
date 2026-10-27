@@ -171,6 +171,28 @@ function remember(updates: unknown[]): void {
 
 const json = (body: object) => new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } })
 
+// TELEGRAM_TEST_LONG_POLL=1 holds each long poll (a getUpdates carrying a
+// timeout, which grammY's own closing getUpdates lacks) the way Telegram
+// does: until the test writes a round of updates, or the poll's timeout. The
+// hold races the request's abort signal, as a real fetch would: an aborted
+// poll rejects, is logged as aborted and reads no round.
+const LONG_POLL = process.env.TELEGRAM_TEST_LONG_POLL === '1'
+async function holdPoll(payload: Record<string, unknown>, signal: AbortSignal | null | undefined): Promise<void> {
+  const inbound = process.env.TELEGRAM_TEST_INBOUND
+  const end = Date.now() + Number(payload.timeout) * 1000
+  while (!(inbound && existsSync(inbound)) && Date.now() < end) {
+    if (signal?.aborted) break
+    await new Promise<void>(resolve => {
+      const timer = setTimeout(resolve, 10)
+      signal?.addEventListener('abort', () => { clearTimeout(timer); resolve() }, { once: true })
+    })
+  }
+  if (signal?.aborted) {
+    appendFileSync(process.env.TELEGRAM_TEST_API_LOG!, JSON.stringify({ pid: process.pid, method: 'getUpdates', payload, at: Date.now(), aborted: true }) + '\n')
+    throw signal.reason ?? new DOMException('The operation was aborted.', 'AbortError')
+  }
+}
+
 const SENDS = ['sendMessage', 'sendPhoto', 'sendDocument', 'sendRichMessage']
 
 const fakeFetch = (async (url: string | URL | Request, options?: RequestInit) => {
@@ -201,7 +223,8 @@ const fakeFetch = (async (url: string | URL | Request, options?: RequestInit) =>
   if (method === 'getChatMember') return json(member(Number(payload.user_id)))
   if (method === 'getChat') return json(chat(payload.chat_id))
   if (method === 'getUpdates') {
-    await Bun.sleep(25)
+    if (LONG_POLL && payload.timeout !== undefined) await holdPoll(payload, options?.signal)
+    else await Bun.sleep(25)
     result = []
     // Each round of updates the test writes is delivered once, then moved
     // aside, so the test can write the next.
