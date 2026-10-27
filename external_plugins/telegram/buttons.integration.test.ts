@@ -418,6 +418,15 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     await srv.close()
   }, 15000)
 
+  test('an edit to an empty text fails with Telegram\'s refusal', async () => {
+    const dir = state()
+    const srv = await channel(dir)
+    const m = Number(/\(id: (\d+)\)/.exec(ok(await tool(srv, 'reply', { chat_id: '1', text: 'Question' })))![1])
+    expect(failed(await tool(srv, 'edit_message', { chat_id: '1', message_id: String(m), text: '' }))).toMatch(/message text is empty/)
+    expect(calls(dir).filter(c => c.method === 'editMessageText').map(c => c.refused)).toEqual(['Bad Request: message text is empty'])
+    await srv.close()
+  }, 15000)
+
   // Criterion 2: presses.
 
   test('a press is answered, reaches Claude once after the batch waiting in the chat, with the label, message, presser, time and opening words, and the keyboard becomes one disabled button', async () => {

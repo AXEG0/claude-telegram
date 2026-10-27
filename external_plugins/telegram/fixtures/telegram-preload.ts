@@ -195,23 +195,29 @@ async function holdPoll(payload: Record<string, unknown>, signal: AbortSignal | 
 
 const SENDS = ['sendMessage', 'sendPhoto', 'sendDocument', 'sendRichMessage']
 
+// Telegram refuses a text message, or a text edit, whose text is empty.
+const EMPTY_TEXT = { error_code: 400, description: 'Bad Request: message text is empty' }
+const emptyText = (method: string, payload: Record<string, unknown>) =>
+  (method === 'sendMessage' || method === 'editMessageText') && payload.text === ''
+
 const fakeFetch = (async (url: string | URL | Request, options?: RequestInit) => {
   const method = String(url).split('/').pop()!
   const payload = await payloadOf(options)
-  // A send is logged with the id it gets, unless a rule refuses it, and every
+  // A send is logged with the id it gets, unless it is refused, and every
   // call with when it came.
   const n = SENDS.includes(method) ? ++sends : 0
   const rule = ruleFor(method, payload)
+  const refusal = emptyText(method, payload) ? EMPTY_TEXT : rule?.error
   if (rule?.preMs) await Bun.sleep(rule.preMs)
-  const to = n && !rule?.error ? recipient(payload.chat_id) : undefined
+  const to = n && !refusal ? recipient(payload.chat_id) : undefined
   if (to && nextId !== undefined && !String(payload.chat_id).startsWith('@')) to.message_id = nextId++
   appendFileSync(process.env.TELEGRAM_TEST_API_LOG!, JSON.stringify({
     pid: process.pid, method, payload, at: Date.now(),
     ...(to ? { message_id: to.message_id } : {}),
-    ...(rule?.error ? { refused: rule.error.description } : {}),
+    ...(refusal ? { refused: refusal.description } : {}),
   }) + '\n')
   if (rule?.holdMs) await Bun.sleep(rule.holdMs)
-  if (rule?.error) return json({ ok: false, ...rule.error })
+  if (refusal) return json({ ok: false, ...refusal })
   if (rule?.drop) throw new TypeError('fetch failed: the connection was reset')
   let result: unknown = true
   if (method === 'getMe') result = { id: 123, is_bot: true, first_name: 'Test', username: 'test_bot' }

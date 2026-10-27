@@ -1628,6 +1628,36 @@ describe('createAgentStream', () => {
     expect(h.sent.at(-1)).toEqual({ chat: '1001', text: '🤖 Subagents\n1. ⏳ general-purpose · Starting… · 0s' })
   })
 
+  test('a late stop for a row of a group whose rows all left at once edits that message to done, with no empty frame', async () => {
+    const h = harness('1001')
+    await h.tick()
+    h.events.push(start(h))
+    h.write('/s/agent-a1.jsonl', line(userText('u1', h.now(), 'Long job')))
+    await h.tick()
+    h.advance(CHAT_GAP_MS)
+    h.write('/s/agent-a1.jsonl', line(userText('u1', h.now() - 3000, 'Long job')) + line(apiError('e1', h.now(), 'overloaded')))
+    await h.tick()
+    const shown = h.attempts.length
+    const recorded = h.records.length
+    // From here on each read of the tail holds only request records, so the
+    // failure is never confirmed, and the row leaves after five minutes.
+    for (let i = 0; i < 40; i++) {
+      h.advance(CLOCK_REFRESH_MS)
+      h.write('/s/agent-a1.jsonl', line(requestBlob(100 + i)))
+      await h.tick()
+    }
+    expect(h.attempts.slice(shown)).toEqual([])
+    h.events.push({ t: h.now(), event: 'stop', agent_id: 'a1' })
+    for (let i = 0; i < 6; i++) { await h.tick(); h.advance(CHAT_GAP_MS) }
+    const late = h.attempts.slice(shown)
+    expect(late).toHaveLength(1)
+    expect(late[0]!.text).toMatch(/^🤖 Subagents\n1\. ✅ Done in /)
+    expect(late[0]!.error).toBeUndefined()
+    expect(h.edits.at(-1)!.id).toBe(7)
+    expect(h.records.slice(recorded).filter(r => r.text === '')).toEqual([])
+    expect(h.records.at(-1)).toMatchObject({ op: 'remove', chat: '1001', id: 7 })
+  })
+
   describe('the records of open messages', () => {
 
     test('a record is written right after the first send and before each edit, with that frame\'s closing text, and deleted once the group\'s final frame is accepted', async () => {

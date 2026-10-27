@@ -839,13 +839,12 @@ export function createAgentStream(opts: {
   // A group whose rows have all ended, and whose final frame Telegram has
   // accepted or whose message is gone, ends: its message stays as it is, and
   // the next overlapping group gets a new one.
-  function endIfFinished(batch: Batch) {
+  function endIfFinished(batch: Batch, allLeft = false) {
     if (batches.get(batch.chatId) !== batch || batch.sending) return
     // A group whose rows have all left the message ends with no edit: its
     // last frame already shows their endings, and a frame of no rows is empty.
-    const empty = batch.members.size === 0
     const finished = [...batch.members.values()].every(settled)
-    if (!empty && (!finished || !(batch.gone || batch.sentKey === panel(batch, agents, now()).key))) return
+    if (!allLeft && (!finished || !(batch.gone || batch.sentKey === panel(batch, agents, now()).key))) return
     batches.delete(batch.chatId)
     for (const a of batch.members.values()) retire(a)
     if (batch.msgId === undefined) return
@@ -870,9 +869,12 @@ export function createAgentStream(opts: {
       return
     }
     // A row that left with its ending acknowledged is done with; its number
-    // stays taken, so a resumed subagent comes back under it.
-    for (const [key, a] of batch.members) if (hasLeft(a, t) && agents.get(key) !== a) batch.members.delete(key)
-    if (batch.members.size === 0) return endIfFinished(batch)
+    // stays taken, so a resumed subagent comes back under it. When every row
+    // leaves at once, the group ends with its rows kept: the message still
+    // shows them, and a late stop for one of them edits that message.
+    const leaving = [...batch.members].filter(([key, a]) => hasLeft(a, t) && agents.get(key) !== a)
+    if (leaving.length === batch.members.size) return endIfFinished(batch, true)
+    for (const [key] of leaving) batch.members.delete(key)
     const frame = panel(batch, agents, t)
     const running = [...batch.members.values()].some(a => a.done === undefined && !a.dropped)
     if (frame.key === batch.sentKey && (!running || t - batch.lastEdit < CLOCK_REFRESH_MS)) {
