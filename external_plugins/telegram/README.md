@@ -456,9 +456,13 @@ again when a newer entry shows the run going on, as after the nudge Claude
 Code sends following a cut refusal, so its group's message ends only once the
 next tick finds the same entry still the newest, and a tail with no whole
 entry confirms nothing. A stop hook's ending is final: one that arrives after
-the group ended edits that message once more with it. A subagent resumed after
-such an ending takes its earlier run's place, in the chat where it first
-appeared. A subagent's failure leaves the turn's [typing](#typing) on.
+the group ended edits that message once more with it, at the chat's next slot,
+unless the row has already left the message, and the rest of the message stays
+as its last frame showed it. A newer group in that chat keeps its own message,
+and a row that went on in a newer message keeps its earlier line in the first.
+A subagent resumed after such an ending takes its earlier run's place, in the
+chat where it first appeared. A subagent's failure leaves the turn's
+[typing](#typing) on.
 
 When the server shuts down, it makes one last edit of the live message: each
 row still running reads `🔌 No longer followed after …`, with how long it ran

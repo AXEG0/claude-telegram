@@ -497,6 +497,9 @@ type Batch = {
   // The send or edit on its way, settled once Telegram answers.
   inflight?: Promise<void>
   sentKey?: string
+  // The clock of the frame Telegram last accepted. A late edit renders at it,
+  // so the rest of an ended group's message stays as that frame showed it.
+  frameAt?: number
   lastEdit: number
 }
 
@@ -642,6 +645,11 @@ export function createAgentStream(opts: {
   // Stops whose start has not been read yet: the two hooks run concurrently.
   const earlyStops = new Map<string, StreamEvent>()
   const batches = new Map<string, Batch>()
+  // Ended groups whose message owes one more edit: a stop hook gave one of
+  // their rows its final ending after the group ended. Each takes its chat's
+  // next slot without becoming that chat's group, so a newer group there keeps
+  // its own message.
+  const late = new Set<Batch>()
   const chatNext = new Map<string, number>()
   let first = true
   let ticks = 0
@@ -694,13 +702,46 @@ export function createAgentStream(opts: {
     if (changed) a.endShownAt = undefined
   }
 
-  // A watched row's final ending, from a stop hook after its group ended: the
-  // group's message takes one more edit with that ending, unless a newer group
-  // holds the chat or the row has left the message.
-  function reopenGroup(a: Agent) {
+  // A watched row's final ending, from a stop hook: an open group shows it in
+  // its next frame; an ended group's message owes one more edit. The record
+  // takes that final frame first, so a server that stops before the edit
+  // leaves it to the next one.
+  function reopenGroup(a: Agent, t: number) {
     const b = a.group
-    if (!b || b.gone || b.msgId === undefined || batches.has(b.chatId) || b.members.get(a.key) !== a) return
-    batches.set(b.chatId, b)
+    if (!b || b.gone || b.msgId === undefined || batches.get(b.chatId) === b) return
+    if (!late.has(b)) b.failures = 0
+    late.add(b)
+    records?.write(b.chatId, b.msgId, closingText(b, b.frameAt ?? t))
+  }
+
+  // The one more edit an ended group's message owes, at its chat's next slot:
+  // its last frame with the endings that came since, a row that has left the
+  // message staying out. Once Telegram has the frame, or the message is gone,
+  // the group is done with; a message that keeps refusing keeps its record
+  // for the next server.
+  function flushLate(b: Batch, t: number) {
+    if (b.sending) return
+    const msgId = b.msgId!
+    const at = b.frameAt ?? t
+    const frame = panel(b, agents, at)
+    const finish = () => { late.delete(b); records?.remove(b.chatId, msgId) }
+    if (frame.key === b.sentKey) return finish()
+    if (t < (chatNext.get(b.chatId) ?? 0)) return
+    chatNext.set(b.chatId, t + CHAT_GAP_MS)
+    b.sending = true
+    records?.write(b.chatId, msgId, closingText(b, at))
+    b.inflight = Promise.resolve().then(() => opts.edit(b.chatId, msgId, frame.text)).then(() => { b.sentKey = frame.key }, (err: unknown) => {
+      const e = (err ?? {}) as ApiError
+      const desc = String(e.description ?? err)
+      const retry = e.parameters?.retry_after
+      if (/message is not modified/i.test(desc)) b.sentKey = frame.key
+      else if (retry) chatNext.set(b.chatId, now() + retry * 1000)
+      else if (/message to edit not found|message can't be edited/i.test(desc)) finish()
+      else if (++b.failures >= 5) late.delete(b)
+    }).finally(() => {
+      b.sending = false
+      if (late.has(b) && b.sentKey === panel(b, agents, at).key) finish()
+    })
   }
 
   // The transcript rule: the newest entry closes the row as failed or
@@ -847,6 +888,7 @@ export function createAgentStream(opts: {
     batch.lastEdit = t
     const ok = () => {
       batch.sentKey = frame.key
+      batch.frameAt = t
       batch.failures = 0
       for (const { a, key, ended } of frame.shown) {
         a.shown = true
@@ -958,7 +1000,7 @@ export function createAgentStream(opts: {
           if (ev.t >= w.started) {
             endByHook(w, ev)
             watched.delete(key)
-            reopenGroup(w)
+            reopenGroup(w, t)
           }
         } else earlyStops.set(key, ev)
       }
@@ -982,10 +1024,16 @@ export function createAgentStream(opts: {
     // its old number while that group is open, else in a new message. One
     // whose transcript has been quiet as long as a running row may be leaves.
     for (const [key, a] of watched) {
+      const before: Agent = { ...a, progress: { ...a.progress } }
       refresh(a)
       if (a.done === undefined) {
         watched.delete(key)
         agents.set(key, a)
+        // A row that goes on in a new message leaves its line in its ended
+        // group's message as it was, for a late stop that edits that message
+        // once more.
+        const g = a.group
+        if (g && batches.get(g.chatId) !== g && g.members.get(key) === a) g.members.set(key, before)
       } else if (t - a.quietSince > AGENT_DROP_MS) watched.delete(key)
     }
 
@@ -1035,6 +1083,9 @@ export function createAgentStream(opts: {
       // otherwise take each of the chat's slots, and a message of a server
       // that is gone would never be closed.
       opts.sweep?.(slots)
+      // A late edit goes next, for the same reason: it is one edit, and the
+      // live message would otherwise take its slot.
+      for (const b of late) flushLate(b, t)
       for (const batch of batches.values()) flush(batch, t)
     },
     agents() {

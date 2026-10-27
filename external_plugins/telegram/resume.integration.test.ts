@@ -114,6 +114,32 @@ describe.skipIf(process.platform !== 'linux')('a failure read from the transcrip
     expect(done.payload.text).toMatch(/^🤖 Subagents\n1\. ✅ Done in \d+s · general-purpose · Long job$/)
   }, 30000)
 
+  test('a SubagentStop after its group ended edits that message to done while a newer group runs in its own message', async () => {
+    const s = await session({ TELEGRAM_TEST_CHATS: JSON.stringify({ ids: 7 }) })
+    s.begin('a1', 'Long job')
+    s.write('a1', userText('u1', Date.now(), 'Long job'))
+    const sent = await s.next(t => row(t, 1).startsWith('1. ⏳'))
+    await Bun.sleep(Math.max(0, sent.at + CHAT_GAP_MS + 500 - Date.now()))
+    s.write('a1', apiError('e1', Date.now(), 'overloaded'))
+    const failed = await s.next(t => row(t, 1).startsWith('1. ❌'), sent.index + 1)
+    // The next tick confirms the failure and ends the group.
+    await Bun.sleep(2 * AGENT_TICK_MS + 500)
+    s.begin('a2', 'Second job')
+    const second = await s.next(t => row(t, 1).includes('Second job'), failed.index + 1)
+    expect(second.method).toBe('sendMessage')
+    expect(second.message_id).not.toBe(sent.message_id)
+    s.stop('a1')
+    const done = await s.next(t => row(t, 1).startsWith('1. ✅') && t.includes('Long job'), second.index + 1)
+    expect(done.method).toBe('editMessageText')
+    expect(done.payload.message_id).toBe(sent.message_id)
+    expect(done.payload.text).toMatch(/^🤖 Subagents\n1\. ✅ Done in \d+s · general-purpose · Long job$/)
+    s.stop('a2')
+    const doneB = await s.next(t => row(t, 1).startsWith('1. ✅') && t.includes('Second job'), done.index + 1)
+    expect(doneB.payload.message_id).toBe(second.message_id)
+    expect(doneB.payload.text).toMatch(/^🤖 Subagents\n1\. ✅ Done in \d+s · general-purpose · Second job$/)
+    expect(s.panels().filter(isSend)).toHaveLength(2)
+  }, 30000)
+
   test('a tail with no whole entry after the failure confirms nothing, so the answer that follows reopens the row in the same message', async () => {
     const s = await session()
     s.begin('a1', 'Long job')
