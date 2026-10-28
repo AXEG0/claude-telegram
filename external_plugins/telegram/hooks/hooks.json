@@ -1,5 +1,5 @@
 {
-  "description": "Marks when this session is busy, when each tool call ends, when each turn ends, when each subagent starts, stops or fails on an API error, and when each background shell starts or is stopped, for the Telegram server's typing indicator, its stuck and idle alerts, and its subagent and shell stream, and answers a Bash permission ask in a bypass-mode channel session, telling Telegram what it allowed",
+  "description": "Marks when this session is busy, when each tool call ends, when each turn ends and whether it ended on an error, when each subagent starts, stops or fails on an API error, and when each background shell starts or is stopped, for the Telegram server's typing indicator, its stuck and idle alerts, its failure notice, and its subagent and shell stream, and answers a Bash permission ask in a bypass-mode channel session, telling Telegram what it allowed",
   "hooks": {
     "Stop": [
       {

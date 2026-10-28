@@ -20,6 +20,7 @@ through it.
 | --- | --- |
 | ⌨️ **Typing for the whole turn** | "typing…" stays on while Claude works, whoever started the turn. Running the typing hooks by hand in the session, with nothing or junk on stdin, neither stops nor starts it. |
 | 🚨 **Stuck alerts** | The bot tells you when a turn shows no activity for 10 minutes, or, with an alert chat set, the whole session for 45, and again when Claude is back. |
+| ⚠️ **Failed turns** | When a turn your message started ends on an error, such as the model's provider refusing every call, the bot tells you once, with the error's type and Claude Code's text, and again when turns end without an error. |
 | 🤖 **Live subagents and shells** | Concurrent subagents and background shells share one live message: one row each with step, time and tokens, or a shell's description and time. A row ends as Done, Failed (with a shell's exit code, or the class of the API error a subagent's model call ended on), Stopped, or No longer followed once its server stops. A workflow's subagents show under the labels the workflow gave them, and stopping the workflow closes their rows still running as Stopped. A finished row leaves the message five minutes after it first shows finished. When a server dies before it can close its message, the next server that polls the bot closes it. |
 | 📝 **Rich messages** | Headings, tables, task lists, code and collapsible sections render natively in Telegram. |
 | 🎙️ **Voice messages** | Voice notes, audio and video notes reach Claude as text, transcribed by OpenAI. |

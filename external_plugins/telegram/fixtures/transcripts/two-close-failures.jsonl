@@ -1,0 +1,10 @@
+{"type":"mode"}
+{"type":"permission-mode"}
+{"type":"atis-latch"}
+{"type":"tools-used"}
+{"type":"queue-operation","timestamp":"2026-10-27T15:33:36.066Z","operation":"enqueue"}
+{"type":"queue-operation","timestamp":"2026-10-27T15:33:36.082Z","operation":"dequeue"}
+{"type":"user","uuid":"entry-0001","parentUuid":null,"isSidechain":false,"timestamp":"2026-10-27T15:33:36.108Z","isMeta":true,"turnPosition":{"promptIndex":0,"turnIndex":1},"turnOrigin":"peer","origin":{"kind":"channel","server":"telegram"},"promptId":"prompt-0001","message":{"role":"user","content":"<channel source=\"telegram\" chat_id=\"1\" message_id=\"1\" user=\"probe\" user_id=\"1\" ts=\"2026-10-27T15:33:36.000Z\">\nT1 SLOW start\n</channel>"}}
+{"type":"assistant","uuid":"entry-0002","parentUuid":"entry-0003","isSidechain":false,"timestamp":"2026-10-27T15:33:36.158Z","isApiErrorMessage":true,"error":"unknown","message":{"role":"assistant","model":"<synthetic>","type":"message","stop_reason":"stop_sequence","stop_sequence":"","id":"msg-0001","content":[{"type":"text","text":"API Error: 402 Insufficient credits. Add more credits to continue."}]}}
+{"type":"user","uuid":"entry-0003","parentUuid":"entry-0004","isSidechain":false,"timestamp":"2026-10-27T15:33:36.178Z","isMeta":true,"turnPosition":{"promptIndex":0,"turnIndex":2},"turnOrigin":"peer","origin":{"kind":"channel","server":"telegram"},"promptId":"prompt-0002","message":{"role":"user","content":"<channel source=\"telegram\" chat_id=\"3\" message_id=\"3\" user=\"probe\" user_id=\"3\" ts=\"2026-10-27T15:33:39.000Z\">\nT1 FAILME from c\n</channel>"}}
+{"type":"assistant","uuid":"entry-0005","parentUuid":"entry-0003","isSidechain":false,"timestamp":"2026-10-27T15:33:36.218Z","isApiErrorMessage":true,"error":"unknown","message":{"role":"assistant","model":"<synthetic>","type":"message","stop_reason":"stop_sequence","stop_sequence":"","id":"msg-0001","content":[{"type":"text","text":"API Error: 402 Insufficient credits. Add more credits to continue."}]}}

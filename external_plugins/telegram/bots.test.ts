@@ -602,3 +602,63 @@ describe('a lookup that started before a forget', () => {
     expect(await p.target('7')).toBe('@b_seven_bot')
   })
 })
+
+describe('a lookup the caller bounds', () => {
+  // Telegram as fetch sees it once the call's signal aborts: the call fails at
+  // once. Each call holds until then, and records the signal it got.
+  function hanging() {
+    const signals: { call: string; signal?: AbortSignal }[] = []
+    const hold = (call: string, signal?: AbortSignal) => new Promise<never>((_, reject) => {
+      signals.push({ call, signal })
+      if (signal?.aborted) return reject(signal.reason)
+      signal?.addEventListener('abort', () => reject(signal.reason), { once: true })
+    })
+    return { signals, hold }
+  }
+  // The lookup's outcome within a second: its error's message, or that it is
+  // still waiting, as a lookup that drops the signal would be.
+  const within = (lookup: Promise<unknown>) => Promise.race([
+    lookup.then(() => 'answered', (err: Error) => err.message),
+    Bun.sleep(1000).then(() => 'still waiting after a second'),
+  ])
+
+  test('an aborted signal ends botChat at once, and reaches getChatMember and, for a bot added by its username, getChat', async () => {
+    const { signals, hold } = hanging()
+    const p = createPeers(createBotLookup({
+      getChatMember: (id, signal) => hold(`getChatMember ${id}`, signal),
+      getChat: (chatId, signal) => hold(`getChat ${chatId}`, signal),
+      access: () => ({ allowFrom: ['7'], botUsernames: {} }),
+      log: () => {},
+    }))
+    const began = Date.now()
+    expect(await within(p.botChat('6', AbortSignal.abort()))).toMatch(/^could not tell whether chat 6 is a bot/)
+    expect(Date.now() - began).toBeLessThan(500)
+    expect(signals.map(s => [s.call, s.signal?.aborted])).toEqual([['getChatMember 6', true]])
+
+    // A bot the owner added with its username: getChatMember refuses, and the
+    // chat opens by the username, with the same signal.
+    const refused = Object.assign(new Error('Bad Request: chat not found'), { error_code: 400, description: 'Bad Request: chat not found' })
+    const opened = hanging()
+    const q = createPeers(createBotLookup({
+      getChatMember: async (id, signal) => { opened.signals.push({ call: `getChatMember ${id}`, signal }); throw refused },
+      getChat: (chatId, signal) => opened.hold(`getChat ${chatId}`, signal),
+      access: () => ({ allowFrom: ['7'], botUsernames: { '7': SEVEN } }),
+      log: () => {},
+    }))
+    const bound = AbortSignal.timeout(50)
+    expect(await within(q.botChat('7', bound))).toMatch(`could not open chat 7 by @${SEVEN}`)
+    expect(opened.signals.map(s => [s.call, s.signal === bound])).toEqual([['getChatMember 7', true], [`getChat @${SEVEN}`, true]])
+  })
+
+  test('without a signal, botChat asks Telegram as before, with no signal on the call', async () => {
+    const signals: (AbortSignal | undefined)[] = []
+    const p = createPeers(createBotLookup({
+      getChatMember: async (_id, signal) => { signals.push(signal); return { is_bot: false } },
+      getChat: async () => { throw new Error('not called') },
+      access: () => ({ allowFrom: [], botUsernames: {} }),
+      log: () => {},
+    }))
+    expect(await p.botChat('6')).toBe(false)
+    expect(signals).toEqual([undefined])
+  })
+})

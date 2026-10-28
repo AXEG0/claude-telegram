@@ -30,9 +30,13 @@ export async function until(check: () => boolean, timeout = 4000): Promise<void>
 }
 
 export type Call = { pid: number; method: string; payload: any; at: number; message_id?: number; refused?: string }
+// Each call the fake logged. A line not yet ended is still being written,
+// and is read once it is.
 export function calls(dir: string): Call[] {
   const file = join(dir, 'api.jsonl')
-  return existsSync(file) ? readFileSync(file, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) : []
+  if (!existsSync(file)) return []
+  const text = readFileSync(file, 'utf8')
+  return text.slice(0, text.lastIndexOf('\n') + 1).split('\n').filter(Boolean).map(line => JSON.parse(line))
 }
 
 // Telegram's answer to a poll while another poller holds the bot, and the

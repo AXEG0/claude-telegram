@@ -1,0 +1,65 @@
+{"type":"mode"}
+{"type":"permission-mode"}
+{"type":"atis-latch"}
+{"type":"tools-used"}
+{"type":"queue-operation","timestamp":"2026-10-27T15:33:36.066Z","operation":"enqueue"}
+{"type":"queue-operation","timestamp":"2026-10-27T15:33:36.082Z","operation":"dequeue"}
+{"type":"user","uuid":"entry-0001","parentUuid":null,"isSidechain":false,"timestamp":"2026-10-27T15:33:36.108Z","isMeta":true,"turnPosition":{"promptIndex":0,"turnIndex":1},"turnOrigin":"peer","origin":{"kind":"channel","server":"telegram"},"promptId":"prompt-0001","message":{"role":"user","content":"<channel source=\"telegram\" chat_id=\"1\" message_id=\"1\" user=\"probe\" user_id=\"1\" ts=\"2026-10-27T15:33:36.000Z\">\nT1 SLOW start\n</channel>"}}
+{"type":"attachment","uuid":"entry-0002","parentUuid":"entry-0001","isSidechain":false,"timestamp":"2026-10-27T15:33:36.160Z","attachment":{"type":"session_context"}}
+{"type":"attachment","uuid":"entry-0003","parentUuid":"entry-0002","isSidechain":false,"timestamp":"2026-10-27T15:33:36.160Z","attachment":{"type":"date"}}
+{"type":"attachment","uuid":"entry-0004","parentUuid":"entry-0003","isSidechain":false,"timestamp":"2026-10-27T15:33:36.165Z","attachment":{"type":"remote_session_change"}}
+{"type":"attachment","uuid":"entry-0005","parentUuid":"entry-0004","isSidechain":false,"timestamp":"2026-10-27T15:33:36.167Z","attachment":{"type":"prompt_snapshot"}}
+{"type":"api-request-shape","timestamp":"2026-10-27T15:33:36.205Z"}
+{"type":"api-request-blob"}
+{"type":"api-request","timestamp":"2026-10-27T15:33:36.205Z"}
+{"type":"last-prompt"}
+{"type":"mode"}
+{"type":"permission-mode"}
+{"type":"atis-latch"}
+{"type":"queue-operation","timestamp":"2026-10-27T15:33:38.668Z","operation":"enqueue"}
+{"type":"queue-operation","timestamp":"2026-10-27T15:33:39.269Z","operation":"enqueue"}
+{"type":"queue-operation","timestamp":"2026-10-27T15:33:44.283Z","operation":"dequeue"}
+{"type":"queue-operation","timestamp":"2026-10-27T15:33:44.283Z","operation":"dequeue"}
+{"type":"assistant","uuid":"entry-0006","parentUuid":"entry-0005","isSidechain":false,"timestamp":"2026-10-27T15:33:44.224Z","message":{"role":"assistant","model":"claude-test","type":"message","stop_reason":"end_turn","stop_sequence":null,"id":"msg-0001","content":[{"type":"text","text":"OK-answer-1"}]}}
+{"type":"attachment","uuid":"entry-0007","parentUuid":"entry-0006","isSidechain":false,"timestamp":"2026-10-27T15:33:44.235Z","attachment":{"type":"prompt_snapshot"}}
+{"type":"system","uuid":"entry-0008","parentUuid":"entry-0007","isSidechain":false,"timestamp":"2026-10-27T15:33:44.248Z","subtype":"stop_hook_summary"}
+{"type":"system","uuid":"entry-0009","parentUuid":"entry-0008","isSidechain":false,"timestamp":"2026-10-27T15:33:44.254Z","isMeta":false,"subtype":"turn_duration"}
+{"type":"user","uuid":"entry-0010","parentUuid":"entry-0009","isSidechain":false,"timestamp":"2026-10-27T15:33:44.302Z","isMeta":true,"turnPosition":{"promptIndex":0,"turnIndex":2},"turnOrigin":"peer","origin":{"kind":"channel","server":"telegram"},"promptId":"prompt-0002","message":{"role":"user","content":"<channel source=\"telegram\" chat_id=\"2\" message_id=\"2\" user=\"probe\" user_id=\"2\" ts=\"2026-10-27T15:33:38.000Z\">\nT1 FAILME from b\n</channel>"}}
+{"type":"user","uuid":"entry-0011","parentUuid":"entry-0010","isSidechain":false,"timestamp":"2026-10-27T15:33:44.310Z","isMeta":true,"turnPosition":{"promptIndex":0,"turnIndex":2},"turnOrigin":"peer","origin":{"kind":"channel","server":"telegram"},"promptId":"prompt-0003","message":{"role":"user","content":"<channel source=\"telegram\" chat_id=\"3\" message_id=\"3\" user=\"probe\" user_id=\"3\" ts=\"2026-10-27T15:33:39.000Z\">\nT1 FAILME from c\n</channel>"}}
+{"type":"api-request-blob"}
+{"type":"api-request","timestamp":"2026-10-27T15:33:44.350Z"}
+{"type":"assistant","uuid":"entry-0012","parentUuid":"entry-0011","isSidechain":false,"timestamp":"2026-10-27T15:33:44.361Z","isApiErrorMessage":true,"error":"unknown","message":{"role":"assistant","model":"<synthetic>","type":"message","stop_reason":"stop_sequence","stop_sequence":"","id":"msg-0002","content":[{"type":"text","text":"API Error: 402 Insufficient credits. Add more credits to continue."}]}}
+{"type":"system","uuid":"entry-0013","parentUuid":"entry-0012","isSidechain":false,"timestamp":"2026-10-27T15:33:44.370Z","isMeta":false,"subtype":"turn_duration"}
+{"type":"last-prompt"}
+{"type":"mode"}
+{"type":"permission-mode"}
+{"type":"atis-latch"}
+{"type":"queue-operation","timestamp":"2026-10-27T15:36:57.941Z","operation":"enqueue"}
+{"type":"queue-operation","timestamp":"2026-10-27T15:36:57.977Z","operation":"dequeue"}
+{"type":"api-request-blob"}
+{"type":"api-request","timestamp":"2026-10-27T15:36:58.076Z"}
+{"type":"tools-used"}
+{"type":"user","uuid":"entry-0014","parentUuid":"entry-0013","isSidechain":false,"timestamp":"2026-10-27T15:36:58.022Z","isMeta":true,"turnPosition":{"promptIndex":0,"turnIndex":3},"turnOrigin":"peer","origin":{"kind":"channel","server":"telegram"},"promptId":"prompt-0004","message":{"role":"user","content":"<channel source=\"telegram\" chat_id=\"1\" message_id=\"11\" user=\"probe\" user_id=\"1\" ts=\"2026-10-27T15:36:57.000Z\">\nBIGCTX go\n</channel>"}}
+{"type":"assistant","uuid":"entry-0015","parentUuid":"entry-0014","isSidechain":false,"timestamp":"2026-10-27T15:36:58.088Z","message":{"role":"assistant","model":"claude-test","type":"message","stop_reason":"tool_use","stop_sequence":null,"id":"msg-0003","content":[{"type":"tool_use","id":"tool-0001","name":"Bash","input":{}}]}}
+{"type":"queue-operation","timestamp":"2026-10-27T15:37:00.944Z","operation":"enqueue"}
+{"type":"user","uuid":"entry-0016","parentUuid":"entry-0015","isSidechain":false,"timestamp":"2026-10-27T15:37:04.357Z","promptId":"prompt-0004","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-0001","content":"done"}]}}
+{"type":"queue-operation","timestamp":"2026-10-27T15:37:04.409Z","operation":"remove","reason":"absorbed_mid_turn"}
+{"type":"attachment","uuid":"entry-0017","parentUuid":"entry-0016","isSidechain":false,"timestamp":"2026-10-27T15:37:00.943Z","attachment":{"type":"queued_command","prompt":"<channel source=\"telegram\" chat_id=\"5\" message_id=\"12\" user=\"probe\" user_id=\"5\" ts=\"2026-10-27T15:37:00.000Z\">\nabsorbed during the tool\n</channel>","commandMode":"prompt","origin":{"kind":"channel","server":"telegram"},"timestamp":"2026-10-27T15:37:00.943Z","isMeta":true}}
+{"type":"attachment","uuid":"entry-0018","parentUuid":"entry-0017","isSidechain":false,"timestamp":"2026-10-27T15:37:04.405Z","attachment":{"type":"environment"}}
+{"type":"attachment","uuid":"entry-0019","parentUuid":"entry-0018","isSidechain":false,"timestamp":"2026-10-27T15:37:04.406Z","attachment":{"type":"model"}}
+{"type":"attachment","uuid":"entry-0020","parentUuid":"entry-0019","isSidechain":false,"timestamp":"2026-10-27T15:37:04.407Z","attachment":{"type":"deferred_tools_delta"}}
+{"type":"attachment","uuid":"entry-0021","parentUuid":"entry-0020","isSidechain":false,"timestamp":"2026-10-27T15:37:04.408Z","attachment":{"type":"agent_listing_delta"}}
+{"type":"attachment","uuid":"entry-0022","parentUuid":"entry-0021","isSidechain":false,"timestamp":"2026-10-27T15:37:04.408Z","attachment":{"type":"mcp_instructions_delta"}}
+{"type":"attachment","uuid":"entry-0023","parentUuid":"entry-0022","isSidechain":false,"timestamp":"2026-10-27T15:37:04.409Z","attachment":{"type":"skill_listing"}}
+{"type":"api-request-blob"}
+{"type":"api-request","timestamp":"2026-10-27T15:37:04.442Z"}
+{"type":"assistant","uuid":"entry-0024","parentUuid":"entry-0023","isSidechain":false,"timestamp":"2026-10-27T15:37:04.449Z","message":{"role":"assistant","model":"claude-test","type":"message","stop_reason":"end_turn","stop_sequence":null,"id":"msg-0001","content":[{"type":"text","text":"OK-answer-2"}]}}
+{"type":"system","uuid":"entry-0025","parentUuid":"entry-0024","isSidechain":false,"timestamp":"2026-10-27T15:37:04.475Z","subtype":"stop_hook_summary"}
+{"type":"system","uuid":"entry-0026","parentUuid":"entry-0025","isSidechain":false,"timestamp":"2026-10-27T15:37:04.500Z","isMeta":false,"subtype":"turn_duration"}
+{"type":"last-prompt"}
+{"type":"mode"}
+{"type":"permission-mode"}
+{"type":"atis-latch"}
+{"type":"cost-state"}
+{"type":"file-history-snapshot"}
+{"type":"cost-state"}

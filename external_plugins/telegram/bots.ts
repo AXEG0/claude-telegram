@@ -42,8 +42,9 @@ export type Peers = {
   // Where a message to the chat goes: a bot's @username, or else the chat id.
   target(chatId: string): Promise<string>
   // Whether the chat is a bot's, asking Telegram about a private chat not
-  // heard from.
-  botChat(chatId: string): Promise<boolean>
+  // heard from. The signal, when given, ends Telegram's calls; without it
+  // they wait as long as grammY does.
+  botChat(chatId: string, signal?: AbortSignal): Promise<boolean>
   // A message to the chat went elsewhere. isBot and botChat keep answering
   // from the entry kept, and the next target asks Telegram again and keeps
   // the answer only once confirm vouches for its username.
@@ -84,16 +85,16 @@ function failure(method: string, err: unknown): string {
   return `${method} failed: ${err instanceof Error ? err.message : String(err)}`
 }
 
-export type Confirm = (chatId: string, username: string) => Promise<void>
+export type Confirm = (chatId: string, username: string, signal?: AbortSignal) => Promise<void>
 
 // Checks that a username Telegram gave for a chat leads back to that chat:
 // getChat("@username") must return the chat's id. An error names the id
 // Telegram returned and never the username.
-export function createConfirm(getChat: (chatId: string) => Promise<{ id: number | string }>): Confirm {
-  return async (chatId, username) => {
+export function createConfirm(getChat: (chatId: string, signal?: AbortSignal) => Promise<{ id: number | string }>): Confirm {
+  return async (chatId, username, signal) => {
     let chat: { id: number | string }
     try {
-      chat = await getChat(`@${username}`)
+      chat = await getChat(`@${username}`, signal)
     } catch (err) {
       throw new PeerError(`could not check the username Telegram gives for ${chatId}: ${failure('getChat', err)}`)
     }
@@ -106,13 +107,14 @@ export function createConfirm(getChat: (chatId: string) => Promise<{ id: number 
 // The lookup createPeers takes: getChatMember(id, id), and, when Telegram
 // refuses it for a bot the owner added with its username, the chat opened by
 // that username. access returns allowFrom and botUsernames as access.json
-// holds them at that moment.
+// holds them at that moment. A signal given to the lookup goes to each of its
+// Telegram calls.
 export function createBotLookup(opts: {
-  getChatMember: (userId: string) => Promise<Peer>
-  getChat: (chatId: string) => Promise<{ id: number | string }>
+  getChatMember: (userId: string, signal?: AbortSignal) => Promise<Peer>
+  getChat: (chatId: string, signal?: AbortSignal) => Promise<{ id: number | string }>
   access: () => { allowFrom: unknown; botUsernames: unknown }
   log: (line: string) => void
-}): (userId: string) => Promise<Peer> {
+}): (userId: string, signal?: AbortSignal) => Promise<Peer> {
   const confirm = createConfirm(opts.getChat)
 
   // The username the owner stored for the bot, or else the refusal itself.
@@ -130,17 +132,17 @@ export function createBotLookup(opts: {
     return name
   }
 
-  return async userId => {
+  return async (userId, signal) => {
     let refused: unknown
     try {
-      return await opts.getChatMember(userId)
+      return await opts.getChatMember(userId, signal)
     } catch (err) {
       refused = err
     }
     const name = stored(userId, refused)
     let chat: { id: number | string }
     try {
-      chat = await opts.getChat(`@${name}`)
+      chat = await opts.getChat(`@${name}`, signal)
     } catch (err) {
       throw new PeerError(`could not open chat ${userId} by @${name}: ${failure('getChat', err)}`)
     }
@@ -148,22 +150,23 @@ export function createBotLookup(opts: {
     opts.log(`opened chat ${userId} by @${name}`)
     let user: Peer
     try {
-      user = await opts.getChatMember(userId)
+      user = await opts.getChatMember(userId, signal)
     } catch (err) {
       throw new PeerError(`chat ${userId} opened by @${name}, but ${failure('getChatMember', err)}`)
     }
     if (user.is_bot !== true) throw new PeerError(`chat ${userId} is not a bot, so nothing goes to @${name}`)
     if (!user.username) throw new PeerError(`bot ${userId} has no username to send to`)
     // The send goes to the username Telegram gives, so it must lead back too.
-    if (user.username.toLowerCase() !== name.toLowerCase()) await confirm(userId, user.username)
+    if (user.username.toLowerCase() !== name.toLowerCase()) await confirm(userId, user.username, signal)
     return user
   }
 }
 
 // lookup asks Telegram about a private chat's user, such as with
-// getChatMember(id, id); confirm checks the username a lookup gives for a
-// forgotten chat before the answer is kept.
-export function createPeers(lookup: (userId: string) => Promise<Peer>, confirm?: Confirm): Peers {
+// getChatMember(id, id), passing on the signal botChat was given; confirm
+// checks the username a lookup gives for a forgotten chat before the answer
+// is kept.
+export function createPeers(lookup: (userId: string, signal?: AbortSignal) => Promise<Peer>, confirm?: Confirm): Peers {
   const known = new Map<string, Peer>()
   // Chats whose message went elsewhere since the entry was kept.
   const forgotten = new Set<string>()
@@ -174,9 +177,9 @@ export function createPeers(lookup: (userId: string) => Promise<Peer>, confirm?:
   const peer = (user: { is_bot: boolean; username?: string }): Peer =>
     ({ is_bot: user.is_bot === true, ...(user.username ? { username: user.username } : {}) })
 
-  async function ask(chatId: string): Promise<Peer> {
+  async function ask(chatId: string, signal?: AbortSignal): Promise<Peer> {
     try {
-      return peer(await lookup(chatId))
+      return peer(await lookup(chatId, signal))
     } catch (err) {
       if (err instanceof PeerError) throw err
       throw new Error(`could not tell whether chat ${chatId} is a bot: ${err instanceof Error ? err.message : err}`)
@@ -212,7 +215,7 @@ export function createPeers(lookup: (userId: string) => Promise<Peer>, confirm?:
   }
 
   // The private chat's user, or undefined for a group.
-  async function peerOf(chatId: string): Promise<Peer | undefined> {
+  async function peerOf(chatId: string, signal?: AbortSignal): Promise<Peer | undefined> {
     // A user's private chat has the user's id, a positive number; a group's
     // id is negative.
     if (!/^\d+$/.test(chatId)) return undefined
@@ -220,7 +223,7 @@ export function createPeers(lookup: (userId: string) => Promise<Peer>, confirm?:
     if (entry && !forgotten.has(chatId)) return entry
     const started = clock
     const startedForgotten = forgotten.has(chatId)
-    return keep(chatId, await ask(chatId), started, startedForgotten)
+    return keep(chatId, await ask(chatId, signal), started, startedForgotten)
   }
 
   return {
@@ -239,11 +242,11 @@ export function createPeers(lookup: (userId: string) => Promise<Peer>, confirm?:
       if (!p.username) throw new Error(`bot ${chatId} has no username to send to`)
       return `@${p.username}`
     },
-    async botChat(chatId) {
+    async botChat(chatId, signal) {
       // A forgotten entry still answers, with no call.
       const entry = known.get(chatId)
       if (entry) return entry.is_bot
-      return (await peerOf(chatId))?.is_bot === true
+      return (await peerOf(chatId, signal))?.is_bot === true
     },
     forget(chatId) {
       forgotten.add(chatId)

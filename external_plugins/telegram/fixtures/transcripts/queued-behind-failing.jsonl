@@ -1,0 +1,32 @@
+{"type":"mode"}
+{"type":"file-history-snapshot"}
+{"type":"user","uuid":"entry-0001","parentUuid":null,"isSidechain":false,"timestamp":"2026-10-27T15:46:00.060Z","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>The command below was run directly in Claude Code, not sent to you as a request, and its output goes straight to the user. It's recorded here as context for later messages.</local-command-caveat>"}}
+{"type":"user","uuid":"entry-0002","parentUuid":"entry-0001","isSidechain":false,"timestamp":"2026-10-27T15:46:00.043Z","message":{"role":"user","content":"<command-name>/clear</command-name>\n            <command-message>clear</command-message>\n            <command-args></command-args>"}}
+{"type":"system","uuid":"entry-0003","parentUuid":"entry-0002","isSidechain":false,"timestamp":"2026-10-27T15:46:00.056Z","isMeta":false,"subtype":"local_command"}
+{"type":"queue-operation","timestamp":"2026-10-27T15:46:03.041Z","operation":"enqueue"}
+{"type":"queue-operation","timestamp":"2026-10-27T15:46:03.050Z","operation":"dequeue"}
+{"type":"tools-used"}
+{"type":"user","uuid":"entry-0004","parentUuid":"entry-0003","isSidechain":false,"timestamp":"2026-10-27T15:46:03.067Z","isMeta":true,"turnPosition":{"promptIndex":0,"turnIndex":1},"turnOrigin":"peer","origin":{"kind":"channel","server":"telegram"},"promptId":"prompt-0001","message":{"role":"user","content":"<channel source=\"telegram\" chat_id=\"1\" message_id=\"41\" user=\"probe\" user_id=\"1\" ts=\"2026-10-27T15:46:03.000Z\">\nSLOWFAIL first\n</channel>"}}
+{"type":"atis-latch"}
+{"type":"attachment","uuid":"entry-0005","parentUuid":"entry-0004","isSidechain":false,"timestamp":"2026-10-27T15:46:03.129Z","attachment":{"type":"session_context"}}
+{"type":"attachment","uuid":"entry-0006","parentUuid":"entry-0005","isSidechain":false,"timestamp":"2026-10-27T15:46:03.129Z","attachment":{"type":"date"}}
+{"type":"attachment","uuid":"entry-0007","parentUuid":"entry-0006","isSidechain":false,"timestamp":"2026-10-27T15:46:03.132Z","attachment":{"type":"remote_session_change"}}
+{"type":"attachment","uuid":"entry-0008","parentUuid":"entry-0007","isSidechain":false,"timestamp":"2026-10-27T15:46:03.134Z","attachment":{"type":"prompt_snapshot"}}
+{"type":"last-prompt"}
+{"type":"mode"}
+{"type":"atis-latch"}
+{"type":"api-request-shape","timestamp":"2026-10-27T15:46:03.160Z"}
+{"type":"api-request-blob"}
+{"type":"api-request","timestamp":"2026-10-27T15:46:03.160Z"}
+{"type":"last-prompt"}
+{"type":"mode"}
+{"type":"atis-latch"}
+{"type":"queue-operation","timestamp":"2026-10-27T15:46:06.045Z","operation":"enqueue"}
+{"type":"queue-operation","timestamp":"2026-10-27T15:46:15.197Z","operation":"dequeue"}
+{"type":"assistant","uuid":"entry-0009","parentUuid":"entry-0008","isSidechain":false,"timestamp":"2026-10-27T15:46:15.171Z","isApiErrorMessage":true,"error":"unknown","message":{"role":"assistant","model":"<synthetic>","type":"message","stop_reason":"stop_sequence","stop_sequence":"","id":"msg-0001","content":[{"type":"text","text":"API Error: 402 Insufficient credits. Add more credits to continue."}]}}
+{"type":"system","uuid":"entry-0010","parentUuid":"entry-0009","isSidechain":false,"timestamp":"2026-10-27T15:46:15.178Z","isMeta":false,"subtype":"turn_duration"}
+{"type":"api-request-blob"}
+{"type":"api-request","timestamp":"2026-10-27T15:46:15.240Z"}
+{"type":"user","uuid":"entry-0011","parentUuid":"entry-0010","isSidechain":false,"timestamp":"2026-10-27T15:46:15.214Z","isMeta":true,"turnPosition":{"promptIndex":0,"turnIndex":2},"turnOrigin":"peer","origin":{"kind":"channel","server":"telegram"},"promptId":"prompt-0002","message":{"role":"user","content":"<channel source=\"telegram\" chat_id=\"2\" message_id=\"43\" user=\"probe\" user_id=\"2\" ts=\"2026-10-27T15:46:06.000Z\">\nqueued behind a failing turn\n</channel>"}}
+{"type":"assistant","uuid":"entry-0012","parentUuid":"entry-0011","isSidechain":false,"timestamp":"2026-10-27T15:46:27.257Z","isApiErrorMessage":true,"error":"unknown","message":{"role":"assistant","model":"<synthetic>","type":"message","stop_reason":"stop_sequence","stop_sequence":"","id":"msg-0002","content":[{"type":"text","text":"API Error: 402 Insufficient credits. Add more credits to continue."}]}}
+{"type":"system","uuid":"entry-0013","parentUuid":"entry-0012","isSidechain":false,"timestamp":"2026-10-27T15:46:27.264Z","isMeta":false,"subtype":"turn_duration"}

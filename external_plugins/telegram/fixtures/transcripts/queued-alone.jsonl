@@ -1,0 +1,38 @@
+{"type":"mode"}
+{"type":"file-history-snapshot"}
+{"type":"user","uuid":"entry-0001","parentUuid":null,"isSidechain":false,"timestamp":"2026-10-27T15:00:38.727Z","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>The command below was run directly in Claude Code, not sent to you as a request, and its output goes straight to the user. It's recorded here as context for later messages.</local-command-caveat>"}}
+{"type":"user","uuid":"entry-0002","parentUuid":"entry-0001","isSidechain":false,"timestamp":"2026-10-27T15:00:38.711Z","message":{"role":"user","content":"<command-name>/clear</command-name>\n            <command-message>clear</command-message>\n            <command-args></command-args>"}}
+{"type":"system","uuid":"entry-0003","parentUuid":"entry-0002","isSidechain":false,"timestamp":"2026-10-27T15:00:38.723Z","isMeta":false,"subtype":"local_command"}
+{"type":"queue-operation","timestamp":"2026-10-27T15:00:41.738Z","operation":"enqueue"}
+{"type":"queue-operation","timestamp":"2026-10-27T15:00:41.747Z","operation":"dequeue"}
+{"type":"tools-used"}
+{"type":"user","uuid":"entry-0004","parentUuid":"entry-0003","isSidechain":false,"timestamp":"2026-10-27T15:00:41.764Z","isMeta":true,"turnPosition":{"promptIndex":0,"turnIndex":1},"turnOrigin":"peer","origin":{"kind":"channel","server":"telegram"},"promptId":"prompt-0001","message":{"role":"user","content":"<channel source=\"telegram\" chat_id=\"1\" message_id=\"4\" user=\"probe\" user_id=\"1\" ts=\"2026-10-27T15:00:41.000Z\">\ncase three SLOW\n</channel>"}}
+{"type":"atis-latch"}
+{"type":"attachment","uuid":"entry-0005","parentUuid":"entry-0004","isSidechain":false,"timestamp":"2026-10-27T15:00:41.823Z","attachment":{"type":"session_context"}}
+{"type":"attachment","uuid":"entry-0006","parentUuid":"entry-0005","isSidechain":false,"timestamp":"2026-10-27T15:00:41.823Z","attachment":{"type":"date"}}
+{"type":"attachment","uuid":"entry-0007","parentUuid":"entry-0006","isSidechain":false,"timestamp":"2026-10-27T15:00:41.827Z","attachment":{"type":"remote_session_change"}}
+{"type":"attachment","uuid":"entry-0008","parentUuid":"entry-0007","isSidechain":false,"timestamp":"2026-10-27T15:00:41.828Z","attachment":{"type":"prompt_snapshot"}}
+{"type":"last-prompt"}
+{"type":"mode"}
+{"type":"atis-latch"}
+{"type":"api-request-shape","timestamp":"2026-10-27T15:00:41.853Z"}
+{"type":"api-request-blob"}
+{"type":"api-request","timestamp":"2026-10-27T15:00:41.853Z"}
+{"type":"last-prompt"}
+{"type":"mode"}
+{"type":"atis-latch"}
+{"type":"queue-operation","timestamp":"2026-10-27T15:00:44.742Z","operation":"enqueue"}
+{"type":"queue-operation","timestamp":"2026-10-27T15:00:49.917Z","operation":"dequeue"}
+{"type":"assistant","uuid":"entry-0009","parentUuid":"entry-0008","isSidechain":false,"timestamp":"2026-10-27T15:00:49.870Z","message":{"role":"assistant","model":"claude-test","type":"message","stop_reason":"end_turn","stop_sequence":null,"id":"msg-0001","content":[{"type":"text","text":"OK-answer-1"}]}}
+{"type":"attachment","uuid":"entry-0010","parentUuid":"entry-0009","isSidechain":false,"timestamp":"2026-10-27T15:00:49.879Z","attachment":{"type":"prompt_snapshot"}}
+{"type":"system","uuid":"entry-0011","parentUuid":"entry-0010","isSidechain":false,"timestamp":"2026-10-27T15:00:49.891Z","subtype":"stop_hook_summary"}
+{"type":"system","uuid":"entry-0012","parentUuid":"entry-0011","isSidechain":false,"timestamp":"2026-10-27T15:00:49.894Z","isMeta":false,"subtype":"turn_duration"}
+{"type":"api-request-blob"}
+{"type":"api-request","timestamp":"2026-10-27T15:00:49.960Z"}
+{"type":"user","uuid":"entry-0013","parentUuid":"entry-0012","isSidechain":false,"timestamp":"2026-10-27T15:00:49.934Z","isMeta":true,"turnPosition":{"promptIndex":0,"turnIndex":2},"turnOrigin":"peer","origin":{"kind":"channel","server":"telegram"},"promptId":"prompt-0002","message":{"role":"user","content":"<channel source=\"telegram\" chat_id=\"3\" message_id=\"5\" user=\"probe\" user_id=\"3\" ts=\"2026-10-27T15:00:44.000Z\">\nqueued FAILME\n</channel>"}}
+{"type":"assistant","uuid":"entry-0014","parentUuid":"entry-0013","isSidechain":false,"timestamp":"2026-10-27T15:00:49.972Z","isApiErrorMessage":true,"error":"unknown","message":{"role":"assistant","model":"<synthetic>","type":"message","stop_reason":"stop_sequence","stop_sequence":"","id":"msg-0002","content":[{"type":"text","text":"API Error: 402 Insufficient credits. Add more credits to continue."}]}}
+{"type":"system","uuid":"entry-0015","parentUuid":"entry-0014","isSidechain":false,"timestamp":"2026-10-27T15:00:49.977Z","isMeta":false,"subtype":"turn_duration"}
+{"type":"last-prompt"}
+{"type":"mode"}
+{"type":"atis-latch"}
+{"type":"cost-state"}
