@@ -722,7 +722,8 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     await until(() => !existsSync(join(dir, 'inbound.json')))
     await wait(200)
     first.child.stdin.end()
-    await wait(300)
+    // The press is judged once the server has seen its input close.
+    await until(() => first.stderr().includes('telegram channel: shutting down'))
     release()
     await until(() => first.child.exitCode !== null, 4000)
     expect(answers(dir)[p.id]).toBe(PRESS_AGAIN)

@@ -1,5 +1,9 @@
 name: Telegram plugin tests
 
+# Throwaway, not for merge: sixteen runners each run the press and held-edit
+# tests in six processes at once, half with the press released after a fixed
+# wait and half once the server has said it is shutting down.
+
 # Runs the Telegram plugin's own suite on every pull request and on main, so a
 # merge into main rests on it. Required on main by the branch ruleset, so it
 # runs without a path filter: a required check that never reports would block
@@ -20,7 +24,12 @@ concurrency:
 jobs:
   bun-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        arm: [wait300, shutdownline]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     defaults:
       run:
         working-directory: external_plugins/telegram
@@ -30,22 +39,41 @@ jobs:
         with:
           bun-version: 1.3.13
       - run: bun install --frozen-lockfile
-      # The running-server tests drive their servers' clock (fixtures/clock.ts)
-      # instead of waiting out real timers. The suite's bound is 3 minutes: a
-      # run that reaches it fails this step. Every run prints its time and the
-      # runner's processors, and a failing test still fails the step.
-      - name: bun run test, within 3 minutes
+      - name: the press and held-edit tests, six at once
+        env:
+          ARM: ${{ matrix.arm }}
         run: |
-          lscpu
-          bound_ms=180000
-          start=$(date +%s%N)
-          status=0
-          bun run test || status=$?
-          took_ms=$(( ($(date +%s%N) - start) / 1000000 ))
-          took="$((took_ms / 1000)).$(printf '%03d' $((took_ms % 1000)))"
-          if [ "$took_ms" -ge "$bound_ms" ]; then
-            echo "::error title=Test suite over its bound::The suite took ${took} s on $(nproc) cores; its bound is $((bound_ms / 1000)) s."
-            exit 1
+          lscpu | grep -E '^(Model name|CPU\(s\)):'
+          if [ "$ARM" = wait300 ]; then
+            python3 - <<'PY'
+          p = 'buttons.integration.test.ts'
+          s = open(p).read()
+          b = """    // The press is judged once the server has seen its input close.
+              await until(() => first.stderr().includes('telegram channel: shutting down'))
+          """
+          a = """    await wait(300)
+          """
+          assert s.count(b) == 1
+          open(p, 'w').write(s.replace(b, a))
+          PY
           fi
-          echo "The suite took ${took} s on $(nproc) cores, within its $((bound_ms / 1000)) s bound."
-          exit "$status"
+          git diff --stat
+          for i in 1 2 3 4 5 6; do
+            mkdir -p "$RUNNER_TEMP/p$i"
+            TMPDIR="$RUNNER_TEMP/p$i" bun test buttons.integration.test.ts -t 'press being judged|held keyboard edit' --rerun-each 40 > "press-$i.log" 2>&1 &
+          done
+          wait
+          failed=0
+          for f in press-*.log; do
+            echo "$f: $(grep -c '^(pass)' "$f") passed, $(grep -c '^(fail)' "$f") failed"
+            grep '^(fail)' "$f" | cut -c1-110 | sort | uniq -c
+            grep -E '^error' "$f" | cut -c1-110 | sort | uniq -c
+            grep -q '^(fail)' "$f" && failed=1
+          done
+          exit $failed
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ matrix.arm }}-${{ matrix.shard }}
+          path: external_plugins/telegram/press-*.log
+          retention-days: 1
