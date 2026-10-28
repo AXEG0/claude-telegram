@@ -1,5 +1,5 @@
 {
-  "source": "Claude Code 2.1.311: the inputs of the events hooks/busy.ts and hooks/turn-end.ts run on and the two subagent events beside them, recorded from one session that ran a Bash call, a failing Bash call and a subagent with one Bash call, and the main session StopFailure from a session started on a model that does not exist. Paths, ids, the prompt and the first command are neutral; each tool call keeps one id from its start to its end.",
+  "source": "Claude Code 2.1.311: the inputs of the events hooks/busy.ts and hooks/turn-end.ts run on and the two subagent events beside them, recorded from one session that ran a Bash call, a failing Bash call and a subagent with one Bash call, and the main session StopFailure from a session started on a model that does not exist. Paths, ids, the prompt and the first command are neutral; each tool call keeps one id from its start to its end. The main_stop_failure_402 and stop_after_402 inputs come from a channel session whose model server answered a turn's call with 402, and the next turn's clean end. The helper's StopFailure is the subagent's recorded input in failure-hooks.json without agent_type, as a forked helper's comes.",
   "user_prompt_submit": {
     "session_id": "sess0005-test-4000-8000-000000000a05",
     "transcript_path": "/Users/someone/.claude/projects/-srv-probe-hook-probe-work/sess0005-test-4000-8000-000000000a05.jsonl",
@@ -169,6 +169,40 @@
     "prompt_id": "prompt05-test-4000-8000-000000000b05",
     "effort": {
       "level": "high"
+    },
+    "hook_event_name": "StopFailure",
+    "error": "model_not_found",
+    "last_assistant_message": "There's an issue with the selected model (claude-probe-nonexistent-model). It may not exist or you may not have access to it. Run --model to pick a different model."
+  },
+  "main_stop_failure_402": {
+    "session_id": "sess0005-test-4000-8000-000000000a05",
+    "transcript_path": "/srv/probe/channel-probe/projects/sess0005-test-4000-8000-000000000a05.jsonl",
+    "cwd": "/srv/probe/channel-probe/work",
+    "prompt_id": "prompt05-test-4000-8000-000000000b05",
+    "hook_event_name": "StopFailure",
+    "error": "unknown",
+    "last_assistant_message": "API Error: 402 Insufficient credits. Add more credits to continue."
+  },
+  "stop_after_402": {
+    "session_id": "sess0005-test-4000-8000-000000000a05",
+    "transcript_path": "/srv/probe/channel-probe/projects/sess0005-test-4000-8000-000000000a05.jsonl",
+    "cwd": "/srv/probe/channel-probe/work",
+    "prompt_id": "prompt06-test-4000-8000-000000000b06",
+    "permission_mode": "bypassPermissions",
+    "hook_event_name": "Stop",
+    "stop_hook_active": false,
+    "last_assistant_message": "OK-answer-1",
+    "background_tasks": [],
+    "session_crons": []
+  },
+  "helper_stop_failure": {
+    "session_id": "sess0003-test-4000-8000-000000000a03",
+    "transcript_path": "/Users/someone/.claude/projects/-srv-probe-failure-probe-work/sess0003-test-4000-8000-000000000a03.jsonl",
+    "cwd": "/srv/probe/failure-probe/work",
+    "prompt_id": "prompt03-test-4000-8000-000000000b03",
+    "agent_id": "a3c5e7f9b1d2c4e60",
+    "effort": {
+      "level": "xhigh"
     },
     "hook_event_name": "StopFailure",
     "error": "model_not_found",

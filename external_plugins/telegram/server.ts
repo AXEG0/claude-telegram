@@ -36,6 +36,7 @@ import { opening, reactionEvent } from './reaction.ts'
 import { channelMode } from './polling.ts'
 import { alertConfig, createIdleAlarm, idleText, NO_OWNER, RECOVERED_TEXT, stuckText } from './alerts.ts'
 import { CHAT_ID, createBotLookup, createConfirm, createPeers, listed, noticeChat, plainObject, sendStyle } from './bots.ts'
+import { cleanFiles, createFailureWatch, failureFiles, HOLD_MS } from './failures.ts'
 import { askOwner, NO_ASKS, ownerAnswers } from './asks.ts'
 import { createPermitReader, permitDetail, permitFile, permitText, type PermitEvent } from './permit.ts'
 import {
@@ -188,10 +189,10 @@ if (POLLING && OWNER && !ASKER) {
 // never written opened by the username the owner stored for it. access.json
 // is read at each lookup: as a value here it would be read before BOOT_ACCESS
 // is set, and frozen until a restart. See bots.ts.
-const getChat = async (chat_id: string) => await bot.api.getChat(chat_id)
+const getChat = async (chat_id: string, signal?: AbortSignal) => await bot.api.getChat(chat_id, signal)
 const confirmUsername = createConfirm(getChat)
 const peers = createPeers(createBotLookup({
-  getChatMember: async id => (await bot.api.getChatMember(id, Number(id))).user,
+  getChatMember: async (id, signal) => (await bot.api.getChatMember(id, Number(id), signal)).user,
   getChat,
   access: () => {
     const { allowFrom, botUsernames } = loadAccess()
@@ -229,11 +230,36 @@ const idle = POLLING && OWNER ? createIdleAlarm({
   onIdle: () => alert(OWNER, idleText(ALERTS.idleMs)),
   onRecover: () => recovered.add(OWNER),
 }) : undefined
+// A turn that ends on an error: one notice to the chats whose messages started
+// it, per run of failures, and back to normal when a turn ends without one.
+// Only the server that polls sends them, from failure-run.json, which it alone
+// writes. See failures.ts.
+const failures = POLLING ? createFailureWatch({
+  file: join(STATE_DIR, 'failure-run.json'),
+  failures: failureFiles(STATE_DIR, ancestors),
+  cleans: cleanFiles(STATE_DIR, process.env.CLAUDE_CODE_SESSION_ID, ancestors),
+  botChat: (chat_id, signal) => peers.botChat(chat_id, signal),
+  owner: OWNER,
+  send: (chat_id, text, signal) => bot.api.sendMessage(chat_id, text, undefined, signal),
+  log: line => process.stderr.write(`telegram channel: ${line}\n`),
+}) : undefined
+// Since when the recovery has waited on an unfinished failure record.
+let heldSince = 0
 setInterval(() => {
   typing.tick()
   idle?.tick()
   for (const chat_id of stuck) alert(chat_id, stuckText(ALERTS.capMs))
   stuck.clear()
+  void failures?.tick()
+  // A chat whose turn failed hears of the failure, and back to normal once
+  // turns end without an error, instead of "Claude is active again". So the
+  // recovery waits, a minute at most, while a failure record is unfinished.
+  if (recovered.size && failures?.unfinished()) {
+    heldSince ||= Date.now()
+    if (Date.now() - heldSince < HOLD_MS) return
+  }
+  heldSince = 0
+  for (const chat_id of failures?.told() ?? []) recovered.delete(chat_id)
   for (const chat_id of recovered) alert(chat_id, RECOVERED_TEXT)
   recovered.clear()
 }, REFRESH_MS).unref()

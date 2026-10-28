@@ -1,0 +1,99 @@
+{"type":"mode"}
+{"type":"permission-mode"}
+{"type":"atis-latch"}
+{"type":"tools-used"}
+{"type":"queue-operation","timestamp":"2026-10-27T16:35:58.952Z","operation":"enqueue"}
+{"type":"queue-operation","timestamp":"2026-10-27T16:35:58.968Z","operation":"dequeue"}
+{"type":"user","uuid":"entry-0001","parentUuid":null,"isSidechain":false,"timestamp":"2026-10-27T16:35:58.993Z","isMeta":true,"turnPosition":{"promptIndex":0,"turnIndex":1},"turnOrigin":"peer","origin":{"kind":"channel","server":"telegram"},"promptId":"prompt-0001","message":{"role":"user","content":"<channel source=\"telegram\" chat_id=\"1\" message_id=\"1\" user=\"probe\" user_id=\"1\" ts=\"2026-10-27T16:35:58.000Z\">\nR1 hello\n</channel>"}}
+{"type":"assistant","uuid":"entry-0002","parentUuid":"entry-0003","isSidechain":false,"timestamp":"2026-10-27T16:35:59.157Z","message":{"role":"assistant","model":"claude-test","type":"message","stop_reason":"refusal","stop_sequence":null,"id":"msg-0001","content":[{"type":"text","text":"Partial answer that the classifier"}]}}
+{"type":"attachment","uuid":"entry-0004","parentUuid":"entry-0001","isSidechain":false,"timestamp":"2026-10-27T16:35:59.040Z","attachment":{"type":"session_context"}}
+{"type":"system","uuid":"entry-0005","parentUuid":"entry-0002","isSidechain":false,"timestamp":"2026-10-27T16:35:59.160Z","isMeta":false,"subtype":"model_refusal_no_fallback"}
+{"type":"attachment","uuid":"entry-0006","parentUuid":"entry-0004","isSidechain":false,"timestamp":"2026-10-27T16:35:59.040Z","attachment":{"type":"date"}}
+{"type":"assistant","uuid":"entry-0007","parentUuid":"entry-0005","isSidechain":false,"timestamp":"2026-10-27T16:35:59.160Z","isApiErrorMessage":true,"error":"invalid_request","message":{"role":"assistant","model":"<synthetic>","type":"message","stop_reason":"refusal","stop_sequence":"","id":"msg-0002","content":[{"type":"text","text":"API Error: Sonnet 4.5's safeguards flagged this message. Our intentionally broad safeguards allow us to deliver more capabilities faster, but can sometimes flag legitimate cybersecurity work. Send feedback with /feedback or learn more: https://support.claude.com/en/articles/<id>-real-time-cyber-safeguards-on-claude\n\nDetails: `[cyber]`\n\nMessage ID: msg_tw1793118959154"}]}}
+{"type":"attachment","uuid":"entry-0008","parentUuid":"entry-0006","isSidechain":false,"timestamp":"2026-10-27T16:35:59.045Z","attachment":{"type":"remote_session_change"}}
+{"type":"system","uuid":"entry-0009","parentUuid":"entry-0007","isSidechain":false,"timestamp":"2026-10-27T16:35:59.174Z","isMeta":false,"subtype":"turn_duration"}
+{"type":"attachment","uuid":"entry-0010","parentUuid":"entry-0008","isSidechain":false,"timestamp":"2026-10-27T16:35:59.047Z","attachment":{"type":"prompt_snapshot"}}
+{"type":"api-request-shape","timestamp":"2026-10-27T16:35:59.085Z"}
+{"type":"api-request-blob"}
+{"type":"api-request","timestamp":"2026-10-27T16:35:59.085Z"}
+{"type":"assistant","uuid":"entry-0011","parentUuid":"entry-0010","isSidechain":false,"timestamp":"2026-10-27T16:35:59.096Z","message":{"role":"assistant","model":"claude-test","type":"message","stop_reason":"refusal","stop_sequence":null,"id":"msg-0003","content":[{"type":"text","text":"Partial answer that the classifier"}]}}
+{"type":"api-request-blob"}
+{"type":"api-request","timestamp":"2026-10-27T16:35:59.151Z"}
+{"type":"system","uuid":"entry-0012","parentUuid":"entry-0011","isSidechain":false,"timestamp":"2026-10-27T16:35:59.110Z","isMeta":false,"subtype":"informational"}
+{"type":"user","uuid":"entry-0003","parentUuid":"entry-0012","isSidechain":false,"timestamp":"2026-10-27T16:35:59.110Z","isMeta":true,"promptId":"prompt-0001","message":{"role":"user","content":"Your response above was stopped by a safety classifier — this is not a tool or API error. The rest of it was withheld, and tool calls in it that had not finished did not run. Do not produce that content again, even reworded."}}
+{"type":"last-prompt"}
+{"type":"mode"}
+{"type":"permission-mode"}
+{"type":"atis-latch"}
+{"type":"queue-operation","timestamp":"2026-10-27T16:36:37.401Z","operation":"enqueue"}
+{"type":"queue-operation","timestamp":"2026-10-27T16:36:37.413Z","operation":"dequeue"}
+{"type":"api-request-blob"}
+{"type":"api-request","timestamp":"2026-10-27T16:36:37.461Z"}
+{"type":"user","uuid":"entry-0013","parentUuid":"entry-0009","isSidechain":false,"timestamp":"2026-10-27T16:36:37.434Z","isMeta":true,"turnPosition":{"promptIndex":0,"turnIndex":2},"turnOrigin":"peer","origin":{"kind":"channel","server":"telegram"},"promptId":"prompt-0002","message":{"role":"user","content":"<channel source=\"telegram\" chat_id=\"2\" message_id=\"2\" user=\"probe\" user_id=\"2\" ts=\"2026-10-27T16:36:37.000Z\">\nR1b hello again\n</channel>"}}
+{"type":"assistant","uuid":"entry-0014","parentUuid":"entry-0013","isSidechain":false,"timestamp":"2026-10-27T16:36:37.467Z","message":{"role":"assistant","model":"claude-test","type":"message","stop_reason":"refusal","stop_sequence":null,"id":"msg-0004","content":[{"type":"text","text":"Partial answer that the classifier"}]}}
+{"type":"system","uuid":"entry-0015","parentUuid":"entry-0014","isSidechain":false,"timestamp":"2026-10-27T16:36:37.474Z","isMeta":false,"subtype":"informational"}
+{"type":"user","uuid":"entry-0016","parentUuid":"entry-0015","isSidechain":false,"timestamp":"2026-10-27T16:36:37.474Z","isMeta":true,"promptId":"prompt-0002","message":{"role":"user","content":"Your response above was stopped by a safety classifier — this is not a tool or API error. The rest of it was withheld, and tool calls in it that had not finished did not run. Do not produce that content again, even reworded."}}
+{"type":"api-request","timestamp":"2026-10-27T16:36:37.504Z"}
+{"type":"assistant","uuid":"entry-0017","parentUuid":"entry-0016","isSidechain":false,"timestamp":"2026-10-27T16:36:37.509Z","message":{"role":"assistant","model":"claude-test","type":"message","stop_reason":"refusal","stop_sequence":null,"id":"msg-0005","content":[{"type":"text","text":"Partial answer that the classifier"}]}}
+{"type":"system","uuid":"entry-0018","parentUuid":"entry-0017","isSidechain":false,"timestamp":"2026-10-27T16:36:37.512Z","isMeta":false,"subtype":"model_refusal_no_fallback"}
+{"type":"assistant","uuid":"entry-0019","parentUuid":"entry-0018","isSidechain":false,"timestamp":"2026-10-27T16:36:37.511Z","isApiErrorMessage":true,"error":"invalid_request","message":{"role":"assistant","model":"<synthetic>","type":"message","stop_reason":"refusal","stop_sequence":"","id":"msg-0006","content":[{"type":"text","text":"API Error: Sonnet 4.5's safeguards flagged this message. Our intentionally broad safeguards allow us to deliver more capabilities faster, but can sometimes flag legitimate cybersecurity work. Send feedback with /feedback or learn more: https://support.claude.com/en/articles/<id>-real-time-cyber-safeguards-on-claude\n\nDetails: `[cyber]`\n\nMessage ID: msg_tw1793118997507"}]}}
+{"type":"system","uuid":"entry-0020","parentUuid":"entry-0019","isSidechain":false,"timestamp":"2026-10-27T16:36:37.522Z","isMeta":false,"subtype":"turn_duration"}
+{"type":"queue-operation","timestamp":"2026-10-27T16:36:55.424Z","operation":"enqueue"}
+{"type":"queue-operation","timestamp":"2026-10-27T16:36:55.434Z","operation":"dequeue"}
+{"type":"api-request-blob"}
+{"type":"api-request","timestamp":"2026-10-27T16:36:55.479Z"}
+{"type":"user","uuid":"entry-0021","parentUuid":"entry-0020","isSidechain":false,"timestamp":"2026-10-27T16:36:55.453Z","isMeta":true,"turnPosition":{"promptIndex":0,"turnIndex":3},"turnOrigin":"peer","origin":{"kind":"channel","server":"telegram"},"promptId":"prompt-0003","message":{"role":"user","content":"<channel source=\"telegram\" chat_id=\"3\" message_id=\"3\" user=\"probe\" user_id=\"3\" ts=\"2026-10-27T16:36:55.000Z\">\nR2 refuse then recover\n</channel>"}}
+{"type":"assistant","uuid":"entry-0022","parentUuid":"entry-0021","isSidechain":false,"timestamp":"2026-10-27T16:36:55.485Z","message":{"role":"assistant","model":"claude-test","type":"message","stop_reason":"refusal","stop_sequence":null,"id":"msg-0007","content":[{"type":"text","text":"Partial answer that the classifier"}]}}
+{"type":"system","uuid":"entry-0023","parentUuid":"entry-0022","isSidechain":false,"timestamp":"2026-10-27T16:36:55.491Z","isMeta":false,"subtype":"informational"}
+{"type":"user","uuid":"entry-0024","parentUuid":"entry-0023","isSidechain":false,"timestamp":"2026-10-27T16:36:55.491Z","isMeta":true,"promptId":"prompt-0003","message":{"role":"user","content":"Your response above was stopped by a safety classifier — this is not a tool or API error. The rest of it was withheld, and tool calls in it that had not finished did not run. Do not produce that content again, even reworded."}}
+{"type":"api-request","timestamp":"2026-10-27T16:36:55.524Z"}
+{"type":"assistant","uuid":"entry-0025","parentUuid":"entry-0024","isSidechain":false,"timestamp":"2026-10-27T16:36:55.530Z","message":{"role":"assistant","model":"claude-test","type":"message","stop_reason":"end_turn","stop_sequence":null,"id":"msg-0008","content":[{"type":"text","text":"OK-answer-1"}]}}
+{"type":"attachment","uuid":"entry-0026","parentUuid":"entry-0025","isSidechain":false,"timestamp":"2026-10-27T16:36:55.535Z","attachment":{"type":"prompt_snapshot"}}
+{"type":"system","uuid":"entry-0027","parentUuid":"entry-0026","isSidechain":false,"timestamp":"2026-10-27T16:36:55.558Z","subtype":"stop_hook_summary"}
+{"type":"system","uuid":"entry-0028","parentUuid":"entry-0027","isSidechain":false,"timestamp":"2026-10-27T16:36:55.562Z","isMeta":false,"subtype":"turn_duration"}
+{"type":"last-prompt"}
+{"type":"mode"}
+{"type":"permission-mode"}
+{"type":"atis-latch"}
+{"type":"file-history-snapshot"}
+{"type":"api-request-blob"}
+{"type":"api-request","timestamp":"2026-10-27T16:37:09.991Z"}
+{"type":"user","uuid":"entry-0029","parentUuid":"entry-0028","isSidechain":false,"timestamp":"2026-10-27T16:37:09.968Z","turnPosition":{"promptIndex":1,"turnIndex":4},"turnOrigin":"human","origin":{"kind":"human"},"promptId":"prompt-0004","message":{"role":"user","content":"<command-message>probe</command-message>\n<command-name>/probe</command-name>\n<command-args>hi there</command-args>"}}
+{"type":"user","uuid":"entry-0030","parentUuid":"entry-0029","isSidechain":false,"timestamp":"2026-10-27T16:37:09.968Z","isMeta":true,"promptId":"prompt-0004","message":{"role":"user","content":[{"type":"text","text":"Say PROBECMD and nothing else. hi there\n"}]}}
+{"type":"attachment","uuid":"entry-0031","parentUuid":"entry-0030","isSidechain":false,"timestamp":"2026-10-27T16:37:09.967Z","attachment":{"type":"environment"}}
+{"type":"attachment","uuid":"entry-0032","parentUuid":"entry-0031","isSidechain":false,"timestamp":"2026-10-27T16:37:09.967Z","attachment":{"type":"model"}}
+{"type":"attachment","uuid":"entry-0033","parentUuid":"entry-0032","isSidechain":false,"timestamp":"2026-10-27T16:37:09.967Z","attachment":{"type":"deferred_tools_delta"}}
+{"type":"attachment","uuid":"entry-0034","parentUuid":"entry-0033","isSidechain":false,"timestamp":"2026-10-27T16:37:09.967Z","attachment":{"type":"agent_listing_delta"}}
+{"type":"attachment","uuid":"entry-0035","parentUuid":"entry-0034","isSidechain":false,"timestamp":"2026-10-27T16:37:09.968Z","attachment":{"type":"mcp_instructions_delta"}}
+{"type":"attachment","uuid":"entry-0036","parentUuid":"entry-0035","isSidechain":false,"timestamp":"2026-10-27T16:37:09.968Z","attachment":{"type":"skill_listing"}}
+{"type":"attachment","uuid":"entry-0037","parentUuid":"entry-0036","isSidechain":false,"timestamp":"2026-10-27T16:37:09.968Z","attachment":{"type":"command_permissions"}}
+{"type":"assistant","uuid":"entry-0038","parentUuid":"entry-0037","isSidechain":false,"timestamp":"2026-10-27T16:37:10.004Z","isApiErrorMessage":true,"error":"unknown","message":{"role":"assistant","model":"<synthetic>","type":"message","stop_reason":"stop_sequence","stop_sequence":"","id":"msg-0009","content":[{"type":"text","text":"API Error: 402 Insufficient credits. Add more credits to continue."}]}}
+{"type":"system","uuid":"entry-0039","parentUuid":"entry-0038","isSidechain":false,"timestamp":"2026-10-27T16:37:10.011Z","isMeta":false,"subtype":"turn_duration"}
+{"type":"last-prompt"}
+{"type":"mode"}
+{"type":"permission-mode"}
+{"type":"atis-latch"}
+{"type":"cost-state"}
+{"type":"file-history-snapshot"}
+{"type":"cost-state"}
+{"type":"tools-used"}
+{"type":"queue-operation","timestamp":"2026-10-27T16:37:57.982Z","operation":"enqueue"}
+{"type":"queue-operation","timestamp":"2026-10-27T16:37:57.999Z","operation":"dequeue"}
+{"type":"tools-used"}
+{"type":"api-request-blob"}
+{"type":"api-request","timestamp":"2026-10-27T16:37:58.127Z"}
+{"type":"user","uuid":"entry-0040","parentUuid":"entry-0039","isSidechain":false,"timestamp":"2026-10-27T16:37:58.028Z","isMeta":true,"turnPosition":{"promptIndex":1,"turnIndex":5},"turnOrigin":"peer","origin":{"kind":"channel","server":"telegram"},"promptId":"prompt-0005","message":{"role":"user","content":"<channel source=\"telegram\" chat_id=\"5\" message_id=\"5\" user=\"probe\" user_id=\"5\" ts=\"2026-10-27T16:37:57.000Z\">\nTOOLTURN please\n</channel>"}}
+{"type":"assistant","uuid":"entry-0041","parentUuid":"entry-0040","isSidechain":false,"timestamp":"2026-10-27T16:37:58.140Z","message":{"role":"assistant","model":"claude-test","type":"message","stop_reason":"tool_use","stop_sequence":null,"id":"msg-0010","content":[{"type":"tool_use","id":"tool-0001","name":"Bash","input":{}}]}}
+{"type":"queue-operation","timestamp":"2026-10-27T16:38:00.384Z","operation":"enqueue"}
+{"type":"user","uuid":"entry-0042","parentUuid":"entry-0041","isSidechain":false,"timestamp":"2026-10-27T16:38:04.371Z","promptId":"prompt-0005","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-0001","content":"done"}]}}
+{"type":"queue-operation","timestamp":"2026-10-27T16:38:04.413Z","operation":"remove","reason":"absorbed_mid_turn"}
+{"type":"attachment","uuid":"entry-0043","parentUuid":"entry-0042","isSidechain":false,"timestamp":"2026-10-27T16:38:00.384Z","attachment":{"type":"queued_command","prompt":"<channel source=\"telegram\" chat_id=\"6\" message_id=\"6\" user=\"probe\" user_id=\"6\" ts=\"2026-10-27T16:38:00.000Z\">\nabsorbed during tool\n</channel>","commandMode":"prompt","origin":{"kind":"channel","server":"telegram"},"timestamp":"2026-10-27T16:38:00.384Z","isMeta":true}}
+{"type":"attachment","uuid":"entry-0044","parentUuid":"entry-0043","isSidechain":false,"timestamp":"2026-10-27T16:38:04.412Z","attachment":{"type":"task_reminder"}}
+{"type":"api-request-blob"}
+{"type":"api-request","timestamp":"2026-10-27T16:38:04.450Z"}
+{"type":"assistant","uuid":"entry-0045","parentUuid":"entry-0044","isSidechain":false,"timestamp":"2026-10-27T16:38:04.462Z","isApiErrorMessage":true,"error":"unknown","message":{"role":"assistant","model":"<synthetic>","type":"message","stop_reason":"stop_sequence","stop_sequence":"","id":"msg-0011","content":[{"type":"text","text":"API Error: 402 Insufficient credits. Add more credits to continue."}]}}
+{"type":"system","uuid":"entry-0046","parentUuid":"entry-0045","isSidechain":false,"timestamp":"2026-10-27T16:38:04.474Z","isMeta":false,"subtype":"turn_duration"}
+{"type":"cost-state"}
+{"type":"file-history-snapshot"}
+{"type":"last-prompt"}
+{"type":"cost-state"}

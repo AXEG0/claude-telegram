@@ -91,7 +91,7 @@ The server reads `.env` in its state directory when it starts, so a change takes
 | `TELEGRAM_STT_MODEL` | The transcription model, `gpt-transcribe` unless set. |
 | `TELEGRAM_STT_LANGUAGES` | Languages to pin, comma-separated, such as `en,zh`. |
 | `TELEGRAM_STUCK_MINUTES` | Minutes a turn goes without activity before the [stuck notice](#stuck-alerts), `10` unless set. |
-| `TELEGRAM_ALERT_CHAT` | The owner's chat ID, the owner's own user ID. It turns on the [idle alert](#stuck-alerts) and receives it, the [permission prompts](#permission-prompts), which only the owner answers, the notices of what the permission hook allowed, and the notices that would go to [another bot](#other-bots). |
+| `TELEGRAM_ALERT_CHAT` | The owner's chat ID, the owner's own user ID. It turns on the [idle alert](#stuck-alerts) and receives it, the [permission prompts](#permission-prompts), which only the owner answers, the notices of what the permission hook allowed, and the notices that would go to [another bot](#other-bots), the [failure notice](#failed-turns) included. |
 | `TELEGRAM_ALERT_IDLE_MINUTES` | Minutes the session goes without activity before the idle alert, `45` unless set. |
 | `TELEGRAM_ACCESS_MODE` | `static` pins access to `access.json` as it was at start; see [ACCESS.md](./ACCESS.md). |
 | `TELEGRAM_STATE_DIR` | The state directory, set in the shell environment. A directory per instance runs several bots on one machine, each with its own token and allowlist. |
@@ -161,7 +161,8 @@ its edit carries none of them. A person's chat keeps the format Claude passes.
 
 When the private chat that last wrote is a bot's, the [subagent
 message](#subagents-and-shells), the [stuck notice](#stuck-alerts) and "Back to
-normal" go to `TELEGRAM_ALERT_CHAT` instead, and nowhere when it is unset. The
+normal" go to `TELEGRAM_ALERT_CHAT` instead, and nowhere when it is unset. So
+does the [failure notice](#failed-turns) of a turn a bot's message started. The
 [permission prompts](#permission-prompts) and the notices of what the
 permission hook allowed go only to `TELEGRAM_ALERT_CHAT` in any case, and a bot
 can answer no prompt. The typing indicator still goes to the bot's chat.
@@ -335,7 +336,8 @@ The plugin's hooks mark the session busy at the start and the end of each of
 Claude's tool calls and on each prompt ([hooks/busy.ts](./hooks/busy.ts)), and
 record the turn's end on `Stop`,
 `StopFailure` and `SessionEnd` ([hooks/turn-end.ts](./hooks/turn-end.ts)), under
-`turns/` in the state directory. A `StopFailure` that names a subagent ends only
+`turns/` in the state directory, and, for the [failure notice](#failed-turns),
+whether it ended on an error, under `outcomes/`. A `StopFailure` that names a subagent ends only
 that subagent's [row](#subagents-and-shells), so typing goes on for the turn
 that waits on it. A subagent's tool calls start no typing, as the
 subagent's work shows in its [own message](#subagents-and-shells); they count as activity
@@ -381,8 +383,55 @@ turn ends.
 
 Each alert goes once per silence and once per chat, with Telegram's notification. The first
 activity after it sends "✅ Back to normal: Claude is active again." once to each
-chat that got an alert. When the session ends, the server ends with it and sends
+chat that got an alert, unless that chat got a [failure notice](#failed-turns)
+meanwhile, which brings its own back to normal. When the session ends, the server ends with it and sends
 no alert, so a session that dies needs a check outside the machine.
+
+### Failed turns
+
+When a turn that a Telegram message started ends on an error, such as an API
+error from the model's provider, the chat whose message started it gets one
+notice:
+
+```
+⚠️ Claude's turn ended on an error.
+Type: unknown
+API Error: 402 Insufficient credits. Add more credits to continue.
+You will get a message here when a turn ends without an error.
+```
+
+The type is Claude Code's class for the error, such as `rate_limit`,
+`server_error`, `invalid_request` for a refusal, or `unknown`, and the third
+line is Claude Code's own error text. The turns that fail after it send
+nothing more, until a turn ends without an error: that turn sends "✅ Back to
+normal: Claude's turns end without an error again." once to each chat told,
+always after its notice. A notice for [another bot's](#other-bots) chat goes to
+`TELEGRAM_ALERT_CHAT`.
+
+The turn-end hook records each `StopFailure` of the main session, and each
+`Stop`, under `outcomes/` in the state directory. The server that polls the bot
+reads each record a few seconds later, finds the failed turn in the session
+transcript the record names, and tells the chats whose messages started that
+turn. So:
+
+- A message that arrived while a turn was running, and that Claude Code took
+  into that turn, gets no notice of its own when the turn fails.
+- A turn that a scheduled task, a background task's notification or the
+  terminal started tells nobody, and neither does a subagent's or a helper
+  query's failure.
+- When a Claude Code release changes the transcript so the turn's start cannot
+  be found, the failure tells nobody, and the reason goes to the server's
+  stderr and to `failure-run.json` in the state directory.
+
+The notice comes 4 to 8 seconds after the failure, or up to about half a
+minute later while Claude Code finishes writing the turn. A notice or back to
+normal that Telegram refuses or does not answer goes again as soon as Telegram
+allows, unless Telegram refuses that chat for good; when Telegram took a
+message but its answer was lost, the chat can get that message twice.
+`failure-run.json` keeps the run, the chats told and Telegram's answers, so a
+restart loses none of them. A turn that ends on an API error without running
+any hook, which some Claude Code releases do, gets no notice; it ends in the
+stuck notice instead.
 
 ### Permission prompts
 
