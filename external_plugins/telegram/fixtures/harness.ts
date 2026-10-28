@@ -242,6 +242,28 @@ export function deliver(dir: string, updates: object[]): void {
   renameSync(`${file}.tmp`, file)
 }
 
+// What a call past its limit on the test's clock shows: each call that reached
+// the fake Telegram in the test's state folder since the call was sent, with
+// when it came on the clock from then and the server that made it, and each
+// server's polls as a count and when the last came.
+function callsSince(dir: string, from: number, self: number | undefined): string {
+  const who = (pid: number) => `server ${pid}${pid === self ? ' (this call\'s)' : ''}`
+  const lines: string[] = []
+  const polls = new Map<number, { n: number; last: number }>()
+  for (const c of calls(dir)) {
+    if (c.at < from) continue
+    if (c.method === 'getUpdates') {
+      const p = polls.get(c.pid) ?? { n: 0, last: 0 }
+      polls.set(c.pid, { n: p.n + 1, last: c.at - from })
+      continue
+    }
+    const message = c.payload?.message_id !== undefined ? ` message ${c.payload.message_id}` : ''
+    lines.push(`  ${c.at - from} ms: ${who(c.pid)} ${c.method}${message}${c.refused ? `, which the fake refuses: ${c.refused}` : ''}`)
+  }
+  for (const [pid, p] of polls) lines.push(`  ${who(pid)}: ${p.n} polls, the last at ${p.last} ms`)
+  return lines.length ? lines.join('\n') : '  none'
+}
+
 export function start(dir: string, argv: string[], env: Record<string, string> = {}) {
   const child = spawn(process.execPath, [join(import.meta.dir, 'claude-parent.ts'), ...argv.slice(1)], {
     argv0: argv[0],
@@ -314,7 +336,7 @@ export function start(dir: string, argv: string[], env: Record<string, string> =
     if (came && came.real <= timeout && came.clock <= timeout) return response
     leftOver(w)
     if ((came?.real ?? inReal(w)) > timeout) return Promise.reject(new Error(`${method} timed out in real time: ${stderr}`))
-    return Promise.reject(new Error(`${method} timed out on the test's clock: ${stderr}`))
+    return Promise.reject(new Error(`${method} timed out on the test's clock: ${stderr}\nTelegram calls since it was sent, by when each reached the fake on the test's clock:\n${callsSince(dir, w.from, serverPidOf(child))}`))
   }
   return {
     child, request, stderr: () => stderr,
