@@ -3,8 +3,10 @@
 import { spawn } from 'child_process'
 import { join } from 'path'
 
+// A server under a driven clock (clock.ts) also gets the offline fake.
+const preload = process.env.TELEGRAM_TEST_CLOCK_NOW ? 'clock.ts' : 'telegram-preload.ts'
 const child = spawn(process.execPath, [
-  '--preload', join(import.meta.dir, 'telegram-preload.ts'),
+  '--preload', join(import.meta.dir, preload),
   join(import.meta.dir, '..', 'server.ts'),
 ], { stdio: 'inherit' })
 child.on('exit', code => process.exit(code ?? 1))

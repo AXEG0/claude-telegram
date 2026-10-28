@@ -1,14 +1,15 @@
 // What the running server does when it shuts down: with Claude Code gone, the
 // order of its steps and its broken output must not cost an update or the
 // closing edit. Only Telegram's HTTP is fake.
-import { afterEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync } from 'fs'
 import { join } from 'path'
 import { CHAT_GAP_MS, CLOSING_EDIT_MS } from './agents.ts'
 import fixture from './fixtures/channel-argv.json'
-import { calls, cleanup, deliver, EXIT_MS, start, state, until } from './fixtures/harness.ts'
+import { calls, cleanup, deliver, driveClock, EXIT_MS, start, state, until, wait } from './fixtures/harness.ts'
 import { ownerWrites, row, session } from './fixtures/session.ts'
 
+beforeEach(driveClock)
 afterEach(cleanup)
 
 const LONG_POLL = { TELEGRAM_TEST_LONG_POLL: '1' }
@@ -27,7 +28,7 @@ describe.skipIf(process.platform !== 'linux')('the server\'s shutdown', () => {
     // Claude Code is gone: nobody reads the server's output, and its input ends.
     channel.child.stdout.destroy()
     channel.child.stdin.end()
-    await Bun.sleep(500)
+    await wait(500)
     deliver(dir, [{ update_id: 2, message: { message_id: 2, date: Math.floor(Date.now() / 1000), text: 'after shutdown',
       from: { id: 1, is_bot: false, first_name: 'Owner' }, chat: { id: 1, type: 'private' } } }])
     await until(() => channel.exited(), EXIT_MS)

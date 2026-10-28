@@ -1,13 +1,14 @@
-import { afterEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import fixture from './fixtures/channel-argv.json'
-import { calls, cleanup, deliver, start, state, until, type Call, type Server } from './fixtures/harness.ts'
+import { calls, cleanup, deliver, driveClock, start, state, until, wait, type Call, type Server } from './fixtures/harness.ts'
 import { PASSING_LABELS, REFUSED_LABELS } from './fixtures/labels.ts'
 import { CLOSED, lock, NOT_ON_MESSAGE, PRESS_AGAIN, RECORD_MAX } from './buttons.ts'
 import { appendPermit, permitFile, permitText } from './permit.ts'
 import { AGENT_TICK_MS, agentEventFile, appendAgentEvent } from './agents.ts'
 
+beforeEach(driveClock)
 afterEach(cleanup)
 
 const OWNER = { id: 1, is_bot: false, first_name: 'Owner', username: 'owner' }
@@ -235,16 +236,16 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
       ok(await tool(srv, 'edit_message', { chat_id: '1', message_id: '77', buttons: [] }))
     }
     await until(() => polls()[0]?.refused !== undefined)
-    await Bun.sleep(100)
+    await wait(100)
     await refused()
     // The next poll fails with a 502, and grammY polls again 3 seconds later.
     await until(() => polls()[1]?.refused !== undefined, 5000)
-    await Bun.sleep(100)
+    await wait(100)
     expect(existsSync(join(dir, 'poll-heartbeat.json'))).toBe(false)
     await refused()
     // A completed poll writes the heartbeat.
     await until(() => existsSync(join(dir, 'poll-heartbeat.json')), 6000)
-    await Bun.sleep(100)
+    await wait(100)
     const m = await ask(srv)
     ok(await tool(srv, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [] }))
     expect(calls(dir).filter(c => SENDS.includes(c.method) || c.method === 'editMessageText').map(c => [c.method, c.payload.text])).toEqual([['sendMessage', 'Merge now?']])
@@ -442,7 +443,7 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     expect(await answerTo(dir, p.id)).toBeNull()
     await until(() => srv.inbound().length === 2)
     await until(() => entryOf(dir, m) === undefined)
-    await Bun.sleep(300)
+    await wait(300)
     const [first, event] = srv.inbound()
     expect(first.content).toBe('one more thing')
     expect(event).toEqual({
@@ -514,7 +515,7 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     await until(() => !existsSync(join(dir, 'inbound.json')))
     // Telegram has handed the press over; the lock holds it for 2 seconds.
     const handed = Date.now()
-    await Bun.sleep(2000)
+    await wait(2000)
     release()
     await until(() => pressed(srv).length === 1)
     expect(Date.parse(pressed(srv)[0].meta.ts)).toBeLessThan(handed + 1000)
@@ -564,7 +565,7 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     deliver(dir, [yes.update, no.update])
     expect(await answerTo(dir, yes.id)).toBeNull()
     expect(await answerTo(dir, no.id)).toBe(CLOSED)
-    await Bun.sleep(300)
+    await wait(300)
     expect(pressed(srv).map(n => n.meta.button)).toEqual(['Yes'])
     expect(shown(dir, m)).toEqual(chosen('Yes'))
     await srv.close()
@@ -579,7 +580,7 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     const replaced = press(dir, m, 'Yes', { markup: old })
     deliver(dir, [replaced.update])
     expect(await answerTo(dir, replaced.id)).toBe(CLOSED)
-    await Bun.sleep(300)
+    await wait(300)
     expect(pressed(srv)).toEqual([])
     expect(swaps(dir, m)).toEqual([])
     expect(shown(dir, m).inline_keyboard[0].map((b: any) => b.text)).toEqual(['Ship', 'Wait'])
@@ -601,7 +602,7 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     const late = press(dir, m, 'Yes', { markup: old })
     deliver(dir, [late.update])
     expect(await answerTo(dir, late.id)).toBe(CLOSED)
-    await Bun.sleep(300)
+    await wait(300)
     expect(pressed(srv)).toEqual([])
     expect(shown(dir, m)).toBeUndefined()
     await probe.close()
@@ -655,7 +656,7 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     const p = press(dir, m, 'Yes')
     deliver(dir, [p.update])
     expect(await answerTo(dir, p.id)).toBeNull()
-    await Bun.sleep(300)
+    await wait(300)
     expect(srv.inbound()).toEqual([])
     expect(entryOf(dir, m).taken).toBeUndefined()
     await srv.close()
@@ -719,9 +720,9 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     const release = await lock(join(dir, 'buttons.lock'))
     deliver(dir, [p.update])
     await until(() => !existsSync(join(dir, 'inbound.json')))
-    await Bun.sleep(200)
+    await wait(200)
     first.child.stdin.end()
-    await Bun.sleep(300)
+    await wait(300)
     release()
     await until(() => first.child.exitCode !== null, 4000)
     expect(answers(dir)[p.id]).toBe(PRESS_AGAIN)
@@ -824,7 +825,7 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     deliver(dir, [second.update])
     expect(await answerTo(dir, second.id)).toBe(CLOSED)
     expect(ok(await reply)).toBe(`sent (id: ${m}); buttons on message ${m}`)
-    await Bun.sleep(300)
+    await wait(300)
     expect(pressed(srv).map(n => n.meta.button)).toEqual(['Yes'])
     expect(entryOf(dir, m)).toBeUndefined()
     expect(record(dir).entries).toEqual([])
@@ -957,7 +958,7 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
   test('a text edit reaching Telegram after a second server’s keyboard edit, whose answer is held, leaves the message with that keyboard, set again after the text edit', async () => {
     const { dir, p, s, m } = await plainPair([{ ...PLAIN, preMs: 1500 }], [{ ...SET, holdMs: 3000 }])
     const text = tool(s, 'edit_message', { chat_id: '1', message_id: String(m), text: 'PLAIN' })
-    await Bun.sleep(200)
+    await wait(200)
     const setting = tool(p, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [['Yes', 'No']] })
     expect(ok(await text)).toBe(`edited (id: ${m})`)
     expect(ok(await setting)).toBe(`edited (id: ${m})`)
@@ -993,7 +994,7 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
   test('a late text edit that Telegram applies but whose connection drops before an answer still leaves the message with that keyboard', async () => {
     const { dir, p, s, m } = await plainPair([{ ...PLAIN, preMs: 1500, drop: true }], [{ ...SET, holdMs: 3000 }])
     const text = tool(s, 'edit_message', { chat_id: '1', message_id: String(m), text: 'PLAIN' })
-    await Bun.sleep(200)
+    await wait(200)
     const setting = tool(p, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [['Yes', 'No']] })
     expect(failed(await text)).toContain("Network request for 'editMessageText' failed")
     ok(await setting)
@@ -1014,11 +1015,11 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     const refused = { error_code: 400, description: "Bad Request: message can't be edited" }
     const { dir, p, s, m } = await plainPair([{ ...PLAIN, preMs: 1500 }], [{ ...SET, holdMs: 3000, error: refused }])
     const text = tool(s, 'edit_message', { chat_id: '1', message_id: String(m), text: 'PLAIN' })
-    await Bun.sleep(200)
+    await wait(200)
     const setting = tool(p, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [['Yes', 'No']] })
     expect(ok(await text)).toBe(`edited (id: ${m})`)
     expect(failed(await setting)).toContain("message can't be edited")
-    await Bun.sleep(300)
+    await wait(300)
     expect(editLog(dir, m).map(([who, method, , answer]) => [who, method, answer])).toEqual([
       ['p', 'editMessageReplyMarkup', 'refused'],
       ['s', 'editMessageText', 'ok'],
@@ -1032,7 +1033,7 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
   test('when Telegram refuses the keyboard set again with a 429, the text edit fails with that description', async () => {
     const { dir, p, s, m } = await plainPair([{ ...PLAIN, preMs: 1500 }, { method: 'editMessageReplyMarkup', error: TOO_MANY }], [{ ...SET, holdMs: 3000 }])
     const text = tool(s, 'edit_message', { chat_id: '1', message_id: String(m), text: 'PLAIN' })
-    await Bun.sleep(200)
+    await wait(200)
     const setting = tool(p, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [['Yes', 'No']] })
     expect(failed(await text)).toBe(`edit_message failed: the text was edited, but the buttons another call gave message ${m} meanwhile could not be set again: Call to 'editMessageReplyMarkup' failed! (429: Too Many Requests: retry after 5)`)
     ok(await setting)
@@ -1052,7 +1053,7 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     const gone = { error_code: 400, description: 'Bad Request: message to edit not found' }
     const { dir, p, s, m } = await plainPair([{ ...PLAIN, preMs: 1500 }, { method: 'editMessageReplyMarkup', error: gone }], [{ ...SET, holdMs: 3000 }])
     const text = tool(s, 'edit_message', { chat_id: '1', message_id: String(m), text: 'PLAIN' })
-    await Bun.sleep(200)
+    await wait(200)
     const setting = tool(p, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [['Yes', 'No']] })
     ok(await setting)
     expect(failed(await text)).toBe(`edit_message failed: the text was edited, but the buttons another call gave message ${m} meanwhile could not be set again: Call to 'editMessageReplyMarkup' failed! (400: Bad Request: message to edit not found)`)
@@ -1069,7 +1070,7 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
   test('when the answer to the keyboard set again is held past 10 seconds, the text edit fails saying the change may still land', async () => {
     const { dir, p, s, m } = await plainPair([{ ...PLAIN, preMs: 1500 }, { method: 'editMessageReplyMarkup', holdMs: 11_000 }], [{ ...SET, holdMs: 3000 }])
     const text = tool(s, 'edit_message', { chat_id: '1', message_id: String(m), text: 'PLAIN' }, 25_000)
-    await Bun.sleep(200)
+    await wait(200)
     const setting = tool(p, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [['Yes', 'No']] })
     ok(await setting)
     expect(failed(await text)).toBe(`edit_message failed: the text was edited, but the buttons another call gave message ${m} meanwhile could not be set again: Telegram did not answer within 10 s; the change may still land`)
@@ -1085,7 +1086,7 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
   test('when a press takes the keyboard and its swap gets a 429 before the late text edit arrives, the message ends with one disabled button showing the label, and the record no longer holds it', async () => {
     const { dir, p, s, m } = await plainPair([{ ...PLAIN, preMs: 3000 }], [{ method: 'editMessageReplyMarkup', has: 'disabled', times: 1, error: TOO_MANY }])
     const text = tool(s, 'edit_message', { chat_id: '1', message_id: String(m), text: 'PLAIN' })
-    await Bun.sleep(200)
+    await wait(200)
     ok(await tool(p, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [['Yes', 'No']] }))
     const set = JSON.stringify(shown(dir, m))
     deliver(dir, [press(dir, m, 'Yes').update])
@@ -1106,7 +1107,7 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
   test('a text edit of a message no other call touches makes exactly one call, and succeeds with its answer held past 10 seconds', async () => {
     const { dir, p, s, m } = await plainPair([{ ...PLAIN, holdMs: 11_000 }])
     expect(ok(await tool(s, 'edit_message', { chat_id: '1', message_id: String(m), text: 'PLAIN' }, 15_000))).toBe(`edited (id: ${m})`)
-    await Bun.sleep(300)
+    await wait(300)
     expect(editLog(dir, m)).toEqual([['s', 'editMessageText', 'none', 'ok']])
     await s.close()
     await p.close()
@@ -1118,7 +1119,7 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     const m = Number(/^sent \(id: (\d+)\)$/.exec(ok(await tool(srv, 'reply', { chat_id: '1', text: 'working' })))![1])
     expect(existsSync(join(dir, 'buttons.json'))).toBe(false)
     expect(ok(await tool(srv, 'edit_message', { chat_id: '1', message_id: String(m), text: 'PLAIN' }, 15_000))).toBe(`edited (id: ${m})`)
-    await Bun.sleep(300)
+    await wait(300)
     expect(editsOf(dir, m).map(c => [c.method, markupOf(c) ?? 'none', c.refused ?? 'ok'])).toEqual([['editMessageText', 'none', 'ok']])
     expect(existsSync(join(dir, 'buttons.json'))).toBe(false)
     await srv.close()
@@ -1146,7 +1147,7 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     const stale = press(dir, m, 'Yes', { markup: old })
     deliver(dir, [stale.update])
     expect(await answerTo(dir, stale.id)).toBe(CLOSED)
-    await Bun.sleep(200)
+    await wait(200)
     expect(pressed(srv)).toEqual([])
     await srv.close()
   }, 25000)
@@ -1205,7 +1206,7 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     const p = press(dir, m, 'Yes', { markup: old })
     deliver(dir, [p.update])
     expect(await answerTo(dir, p.id)).toBe(CLOSED)
-    await Bun.sleep(200)
+    await wait(200)
     expect(pressed(srv)).toEqual([])
     await srv.close()
   }, 15000)
@@ -1257,7 +1258,7 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     deliver(dir, [press(dir, m, 'yes abcde').update])
     await until(() => pressed(srv).length === 1)
     expect(pressed(srv)[0].meta.button).toBe('yes abcde')
-    await Bun.sleep(300)
+    await wait(300)
     expect(permissionAnswers(srv)).toEqual([])
     await srv.close()
   }, 15000)
@@ -1278,7 +1279,7 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     deliver(dir, taps.map(t => t.update))
     await until(() => taps.every(t => t.id in answers(dir)))
     expect(taps.map(t => answers(dir)[t.id])).toEqual(Array(4).fill(NOT_ON_MESSAGE))
-    await Bun.sleep(300)
+    await wait(300)
     expect(permissionAnswers(srv)).toEqual([])
     expect(calls(dir).filter(c => c.method === 'editMessageText')).toEqual([])
     expect(pressed(srv)).toEqual([])

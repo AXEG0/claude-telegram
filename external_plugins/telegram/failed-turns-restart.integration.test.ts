@@ -1,12 +1,13 @@
 // The failure notice across a server restart, and a notice Telegram refuses,
 // in the running server with the offline Telegram fake.
-import { afterEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { CREDITS, failing, notice, NOTHING_MS, RESTORED_TEXT, session } from './fixtures/failing.ts'
 import fixture from './fixtures/channel-argv.json'
-import { calls, cleanup, deliver, start, state, until } from './fixtures/harness.ts'
+import { calls, cleanup, deliver, driveClock, start, state, until, wait } from './fixtures/harness.ts'
 import turnHooks from './fixtures/turn-hooks.json'
 import { apiError, prompt, recorded, reply, upTo } from './fixtures/turns.ts'
 
+beforeEach(driveClock)
 afterEach(cleanup)
 
 const own = recorded('start-absorbed-own-turns')
@@ -31,7 +32,7 @@ describe.skipIf(process.platform !== 'linux')('the failure notice across a resta
     const s = await restart(first)
     s.write(prompt('p2', Date.now() - 500, '1', 2), apiError('e2', Date.now() - 50, CREDITS))
     expect(s.fail()).toEqual([0, 0])
-    await Bun.sleep(NOTHING_MS)
+    await wait(NOTHING_MS)
     expect(s.texts('1')).toEqual([notice()])
     s.write(prompt('p3', Date.now() - 500, '1', 3), reply('r3', Date.now() - 50, 'OK-later'))
     expect(s.stop('OK-later')).toEqual([0])

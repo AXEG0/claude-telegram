@@ -633,3 +633,22 @@ Telegram's Bot API offers neither message history nor search, so the bot sees
 messages as they arrive. When Claude needs earlier context, it asks you to paste
 or summarize it. Photos download on arrival, so that Claude can `Read` them at
 once, and other files download on request through their `attachment_file_id`.
+
+## Tests
+
+Run the suite with `bun run test` in this folder; it runs four test files at a
+time. The tests that wait on the server's timers run it on a clock the test
+moves forward (`fixtures/clock.ts`), so a 10-second limit or the 1-to-15-second
+conflict backoff takes a fraction of a second. Within one server, each timer
+fires at its own due time and in its order, and the work it starts runs before
+the next timer when that work ends within three turns of the event loop; longer
+work, such as a read through `fs/promises`, can land after a later timer of the
+same move. The test moves every server 100 ms at a time, so it sees what
+happened at most one move late, and it moves the clock only while no process of
+the test is working. Such a test waits through the harness (`until`, `wait`, a
+request), which holds each limit both on that clock and in real time. The
+plugin's own code is the same in tests as in use.
+
+The "Telegram plugin tests" CI job runs the same command and prints the
+runner's processors and the suite's time on every run. A run that takes 3
+minutes or more fails it, as does any failing test.

@@ -30,6 +30,22 @@ jobs:
         with:
           bun-version: 1.3.13
       - run: bun install --frozen-lockfile
-      # Four test files at a time: the running-server tests mostly wait on
-      # real timers, so the files that hold them run side by side.
-      - run: bun run test
+      # The running-server tests drive their servers' clock (fixtures/clock.ts)
+      # instead of waiting out real timers. The suite's bound is 3 minutes: a
+      # run that reaches it fails this step. Every run prints its time and the
+      # runner's processors, and a failing test still fails the step.
+      - name: bun run test, within 3 minutes
+        run: |
+          lscpu
+          bound_ms=180000
+          start=$(date +%s%N)
+          status=0
+          bun run test || status=$?
+          took_ms=$(( ($(date +%s%N) - start) / 1000000 ))
+          took="$((took_ms / 1000)).$(printf '%03d' $((took_ms % 1000)))"
+          if [ "$took_ms" -ge "$bound_ms" ]; then
+            echo "::error title=Test suite over its bound::The suite took ${took} s on $(nproc) cores; its bound is $((bound_ms / 1000)) s."
+            exit 1
+          fi
+          echo "The suite took ${took} s on $(nproc) cores, within its $((bound_ms / 1000)) s bound."
+          exit "$status"
