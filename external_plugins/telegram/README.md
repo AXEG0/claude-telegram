@@ -339,7 +339,14 @@ record the turn's end on `Stop`,
 that subagent's [row](#subagents-and-shells), so typing goes on for the turn
 that waits on it. A subagent's tool calls start no typing, as the
 subagent's work shows in its [own message](#subagents-and-shells); they count as activity
-for the turn that waits on the subagent.
+for the turn that waits on the subagent. Each of these hooks acts only on a
+JSON object that names one of its own events exactly and carries a non-empty
+text session id, as Claude Code's hook input does. Every shell started inside a
+session inherits the session's `CLAUDE_PID`, so either script run there by hand
+would mark the session; given nothing on stdin, text, or JSON that names
+another event or lacks such a session id, it writes nothing. Given an object of
+that shape, built by hand or copied from a real hook, it marks the session as a
+real hook would.
 
 The indicator pauses while a permission prompt waits on you, and resumes when
 you answer in Telegram, or at Claude's next tool call after an answer in the

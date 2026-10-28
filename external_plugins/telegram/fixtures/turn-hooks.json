@@ -1,0 +1,177 @@
+{
+  "source": "Claude Code 2.1.311: the inputs of the events hooks/busy.ts and hooks/turn-end.ts run on and the two subagent events beside them, recorded from one session that ran a Bash call, a failing Bash call and a subagent with one Bash call, and the main session StopFailure from a session started on a model that does not exist. Paths, ids, the prompt and the first command are neutral; each tool call keeps one id from its start to its end.",
+  "user_prompt_submit": {
+    "session_id": "sess0005-test-4000-8000-000000000a05",
+    "transcript_path": "/Users/someone/.claude/projects/-srv-probe-hook-probe-work/sess0005-test-4000-8000-000000000a05.jsonl",
+    "cwd": "/srv/probe/hook-probe/work",
+    "prompt_id": "prompt05-test-4000-8000-000000000b05",
+    "permission_mode": "bypassPermissions",
+    "hook_event_name": "UserPromptSubmit",
+    "prompt": "Run true, then false, then a subagent that runs echo sub."
+  },
+  "pre_tool_use": {
+    "session_id": "sess0005-test-4000-8000-000000000a05",
+    "transcript_path": "/Users/someone/.claude/projects/-srv-probe-hook-probe-work/sess0005-test-4000-8000-000000000a05.jsonl",
+    "cwd": "/srv/probe/hook-probe/work",
+    "prompt_id": "prompt05-test-4000-8000-000000000b05",
+    "permission_mode": "bypassPermissions",
+    "effort": {
+      "level": "medium"
+    },
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "true"
+    },
+    "tool_use_id": "toolu_test00000000000001"
+  },
+  "post_tool_use": {
+    "session_id": "sess0005-test-4000-8000-000000000a05",
+    "transcript_path": "/Users/someone/.claude/projects/-srv-probe-hook-probe-work/sess0005-test-4000-8000-000000000a05.jsonl",
+    "cwd": "/srv/probe/hook-probe/work",
+    "prompt_id": "prompt05-test-4000-8000-000000000b05",
+    "permission_mode": "bypassPermissions",
+    "effort": {
+      "level": "medium"
+    },
+    "hook_event_name": "PostToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "true"
+    },
+    "tool_response": {
+      "stdout": "",
+      "stderr": "",
+      "interrupted": false,
+      "isImage": false,
+      "noOutputExpected": false
+    },
+    "tool_use_id": "toolu_test00000000000001",
+    "duration_ms": 155
+  },
+  "post_tool_use_failure": {
+    "session_id": "sess0005-test-4000-8000-000000000a05",
+    "transcript_path": "/Users/someone/.claude/projects/-srv-probe-hook-probe-work/sess0005-test-4000-8000-000000000a05.jsonl",
+    "cwd": "/srv/probe/hook-probe/work",
+    "prompt_id": "prompt05-test-4000-8000-000000000b05",
+    "permission_mode": "bypassPermissions",
+    "effort": {
+      "level": "medium"
+    },
+    "hook_event_name": "PostToolUseFailure",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "false"
+    },
+    "tool_use_id": "toolu_test00000000000002",
+    "error": "Exit code 1",
+    "is_interrupt": false,
+    "duration_ms": 8
+  },
+  "subagent_start": {
+    "session_id": "sess0005-test-4000-8000-000000000a05",
+    "transcript_path": "/Users/someone/.claude/projects/-srv-probe-hook-probe-work/sess0005-test-4000-8000-000000000a05.jsonl",
+    "cwd": "/srv/probe/hook-probe/work",
+    "prompt_id": "prompt05-test-4000-8000-000000000b05",
+    "agent_id": "a5b7d9f1c3e4d6f80",
+    "agent_type": "general-purpose",
+    "hook_event_name": "SubagentStart"
+  },
+  "subagent_pre_tool_use": {
+    "session_id": "sess0005-test-4000-8000-000000000a05",
+    "transcript_path": "/Users/someone/.claude/projects/-srv-probe-hook-probe-work/sess0005-test-4000-8000-000000000a05.jsonl",
+    "cwd": "/srv/probe/hook-probe/work",
+    "prompt_id": "prompt05-test-4000-8000-000000000b05",
+    "permission_mode": "bypassPermissions",
+    "agent_id": "a5b7d9f1c3e4d6f80",
+    "agent_type": "general-purpose",
+    "effort": {
+      "level": "medium"
+    },
+    "hook_event_name": "PreToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "echo sub"
+    },
+    "tool_use_id": "toolu_test00000000000003"
+  },
+  "subagent_post_tool_use": {
+    "session_id": "sess0005-test-4000-8000-000000000a05",
+    "transcript_path": "/Users/someone/.claude/projects/-srv-probe-hook-probe-work/sess0005-test-4000-8000-000000000a05.jsonl",
+    "cwd": "/srv/probe/hook-probe/work",
+    "prompt_id": "prompt05-test-4000-8000-000000000b05",
+    "permission_mode": "bypassPermissions",
+    "agent_id": "a5b7d9f1c3e4d6f80",
+    "agent_type": "general-purpose",
+    "effort": {
+      "level": "medium"
+    },
+    "hook_event_name": "PostToolUse",
+    "tool_name": "Bash",
+    "tool_input": {
+      "command": "echo sub"
+    },
+    "tool_response": {
+      "stdout": "sub",
+      "stderr": "",
+      "interrupted": false,
+      "isImage": false,
+      "noOutputExpected": false
+    },
+    "tool_use_id": "toolu_test00000000000003",
+    "duration_ms": 6
+  },
+  "subagent_stop": {
+    "session_id": "sess0005-test-4000-8000-000000000a05",
+    "transcript_path": "/Users/someone/.claude/projects/-srv-probe-hook-probe-work/sess0005-test-4000-8000-000000000a05.jsonl",
+    "cwd": "/srv/probe/hook-probe/work",
+    "prompt_id": "prompt05-test-4000-8000-000000000b05",
+    "permission_mode": "bypassPermissions",
+    "agent_id": "a5b7d9f1c3e4d6f80",
+    "agent_type": "general-purpose",
+    "effort": {
+      "level": "medium"
+    },
+    "hook_event_name": "SubagentStop",
+    "stop_hook_active": false,
+    "agent_transcript_path": "/Users/someone/.claude/projects/-srv-probe-hook-probe-work/sess0005-test-4000-8000-000000000a05/subagents/agent-a5b7d9f1c3e4d6f80.jsonl",
+    "last_assistant_message": "ok",
+    "background_tasks": [],
+    "session_crons": []
+  },
+  "stop": {
+    "session_id": "sess0005-test-4000-8000-000000000a05",
+    "transcript_path": "/Users/someone/.claude/projects/-srv-probe-hook-probe-work/sess0005-test-4000-8000-000000000a05.jsonl",
+    "cwd": "/srv/probe/hook-probe/work",
+    "prompt_id": "prompt05-test-4000-8000-000000000b05",
+    "permission_mode": "bypassPermissions",
+    "effort": {
+      "level": "medium"
+    },
+    "hook_event_name": "Stop",
+    "stop_hook_active": false,
+    "last_assistant_message": "finished",
+    "background_tasks": [],
+    "session_crons": []
+  },
+  "session_end": {
+    "session_id": "sess0005-test-4000-8000-000000000a05",
+    "transcript_path": "/Users/someone/.claude/projects/-srv-probe-hook-probe-work/sess0005-test-4000-8000-000000000a05.jsonl",
+    "cwd": "/srv/probe/hook-probe/work",
+    "prompt_id": "prompt05-test-4000-8000-000000000b05",
+    "hook_event_name": "SessionEnd",
+    "reason": "other"
+  },
+  "stop_failure": {
+    "session_id": "sess0005-test-4000-8000-000000000a05",
+    "transcript_path": "/Users/someone/.claude/projects/-srv-probe-hook-probe-work/sess0005-test-4000-8000-000000000a05.jsonl",
+    "cwd": "/srv/probe/hook-probe/work",
+    "prompt_id": "prompt05-test-4000-8000-000000000b05",
+    "effort": {
+      "level": "high"
+    },
+    "hook_event_name": "StopFailure",
+    "error": "model_not_found",
+    "last_assistant_message": "There's an issue with the selected model (claude-probe-nonexistent-model). It may not exist or you may not have access to it. Run --model to pick a different model."
+  }
+}

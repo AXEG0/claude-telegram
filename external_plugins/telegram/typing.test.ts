@@ -1,9 +1,11 @@
 import { describe, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, readFileSync, readdirSync } from 'fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, utimesSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { ancestorPids, busyFiles, CAP_MS, createTyping, markerFiles, PROMPT_GRACE_MS, readBusyAt, readTurnEnd, subagentFiles, writeTurnEnd } from './typing.ts'
+import { ancestorPids, BUSY_EVENTS, busyFiles, CAP_MS, createTyping, hookInput, markerFiles, PROMPT_GRACE_MS, readBusyAt, readTurnEnd, subagentFiles, TURN_END_EVENTS, writeTurnEnd } from './typing.ts'
 import failureHooks from './fixtures/failure-hooks.json'
+import turnHooks from './fixtures/turn-hooks.json'
+import { runRegistered } from './fixtures/hooks.ts'
 
 function harness(capMs = 60_000, chat?: string) {
   let t = 1_000
@@ -367,7 +369,7 @@ describe('hooks/busy.ts', () => {
 
   test('touches busy-<Claude Code pid> for Claude\'s own call, whatever its tool input holds', () => {
     const dir = mkdtempSync(join(tmpdir(), 'typing-'))
-    const input = JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'mcp__a2a__send', tool_input: { agent_id: 'peer' } })
+    const input = JSON.stringify({ ...turnHooks.pre_tool_use, tool_name: 'mcp__a2a__send', tool_input: { agent_id: 'peer' } })
     expect(run(input, { TELEGRAM_STATE_DIR: dir, CLAUDE_PID: '4242' }).exitCode).toBe(0)
     expect(readBusyAt(busyFiles(dir, [4242]))).toBeGreaterThan(0)
     expect(readBusyAt(subagentFiles(dir, [4242]))).toBe(0)
@@ -375,7 +377,7 @@ describe('hooks/busy.ts', () => {
 
   test('a subagent\'s call touches subagent-<pid> instead', () => {
     const dir = mkdtempSync(join(tmpdir(), 'typing-'))
-    const input = JSON.stringify({ hook_event_name: 'PreToolUse', agent_id: 'a1', agent_type: 'Explore' })
+    const input = JSON.stringify(turnHooks.subagent_pre_tool_use)
     expect(run(input, { TELEGRAM_STATE_DIR: dir, CLAUDE_PID: '4242' }).exitCode).toBe(0)
     expect(readdirSync(join(dir, 'turns'))).toEqual(['subagent-4242'])
   })
@@ -390,11 +392,6 @@ describe('hooks/busy.ts', () => {
     }
   })
 
-  test('input it cannot read counts as Claude\'s own, and it still exits 0', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'typing-'))
-    expect(run('not json', { TELEGRAM_STATE_DIR: dir, CLAUDE_PID: '4242' }).exitCode).toBe(0)
-    expect(readdirSync(join(dir, 'turns'))).toEqual(['busy-4242'])
-  })
 })
 
 describe('hooks/turn-end.ts', () => {
@@ -433,10 +430,168 @@ describe('hooks/turn-end.ts', () => {
     expect(readdirSync(join(other, 'turns')).sort()).toEqual(['pid-4242', `session-${session_id}`])
   })
 
-  test('exits 0 on input it cannot read', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'typing-'))
-    const r = runHook('not json', { TELEGRAM_STATE_DIR: dir, CLAUDE_PID: '4242' })
-    expect(r.exitCode).toBe(0)
-    expect(readdirSync(join(dir, 'turns'))).toEqual(['pid-4242'])
+})
+
+// Any shell started inside a Claude Code session inherits its CLAUDE_PID, so
+// a marking hook run there by hand would mark that session's turn. Each one
+// acts only on a JSON object that names one of its own events exactly and
+// carries a non-empty text session_id (see hookInput); an object of that shape
+// built by hand still marks, as a real hook would.
+describe('the marking hooks act only on hook input', () => {
+  const hooksJson = JSON.parse(readFileSync(join(import.meta.dir, 'hooks', 'hooks.json'), 'utf8')).hooks
+  // The input Claude Code sends for each event these hooks run on, and for
+  // the two subagent events, which neither runs on.
+  const recorded: Record<string, { session_id: string; hook_event_name: string }> = {
+    UserPromptSubmit: turnHooks.user_prompt_submit,
+    PreToolUse: turnHooks.pre_tool_use,
+    PostToolUse: turnHooks.post_tool_use,
+    PostToolUseFailure: turnHooks.post_tool_use_failure,
+    Stop: turnHooks.stop,
+    StopFailure: turnHooks.stop_failure,
+    SessionEnd: turnHooks.session_end,
+    SubagentStart: turnHooks.subagent_start,
+    SubagentStop: turnHooks.subagent_stop,
+  }
+  const scripts: [string, readonly string[]][] = [['busy.ts', BUSY_EVENTS], ['turn-end.ts', TURN_END_EVENTS]]
+  const run = (script: string, stdin: string, dir: string) => Bun.spawnSync(['bun', join(import.meta.dir, 'hooks', script)], {
+    stdin: new TextEncoder().encode(stdin),
+    env: { PATH: process.env.PATH!, HOME: process.env.HOME!, TELEGRAM_STATE_DIR: dir, CLAUDE_PID: '4242' },
   })
+
+  // Every file under dir, with its content and mtime.
+  function snapshot(dir: string, prefix = ''): Record<string, [string, number]> {
+    const out: Record<string, [string, number]> = {}
+    for (const name of readdirSync(join(dir, prefix))) {
+      const rel = join(prefix, name)
+      const st = statSync(join(dir, rel))
+      if (st.isDirectory()) Object.assign(out, snapshot(dir, rel))
+      else out[rel] = [readFileSync(join(dir, rel), 'utf8'), st.mtimeMs]
+    }
+    return out
+  }
+
+  // A state folder holding this session's marks from an hour ago, and a mark
+  // older than a week, which the turn-end hook's sweep deletes.
+  function seeded(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'typing-'))
+    const turns = join(dir, 'turns')
+    mkdirSync(turns)
+    const hourAgo = new Date(Date.now() - 60 * 60 * 1000)
+    for (const name of ['pid-4242', 'busy-4242', 'subagent-4242', `session-${turnHooks.stop.session_id}`]) {
+      writeFileSync(join(turns, name), name.startsWith('busy') || name.startsWith('subagent') ? '' : '5')
+      utimesSync(join(turns, name), hourAgo, hourAgo)
+    }
+    const weekAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000)
+    writeFileSync(join(turns, 'pid-77'), '5')
+    utimesSync(join(turns, 'pid-77'), weekAgo, weekAgo)
+    return dir
+  }
+
+  test('each hook\'s events are the events hooks.json runs it on', () => {
+    for (const [script, events] of scripts) {
+      const command = `bun "\${CLAUDE_PLUGIN_ROOT}/hooks/${script}"`
+      const on = Object.keys(hooksJson).filter(event =>
+        hooksJson[event].some((g: { hooks: { command: string }[] }) => g.hooks.some(h => h.command === command)))
+      expect(on.sort()).toEqual([...events].sort())
+    }
+  })
+
+  test('the recorded input of each event passes for the hook that runs on it, and for no other', () => {
+    for (const [, events] of scripts) {
+      for (const [event, input] of Object.entries(recorded)) {
+        expect(hookInput(JSON.stringify(input), events) !== undefined).toBe(events.includes(event))
+      }
+    }
+  })
+
+  // The event, case and session rows, built for each of the hook's own events
+  // from its recorded input.
+  function ownEventRows(event: string): [string, string][] {
+    const own = recorded[event]!
+    const { session_id: _, ...withoutSession } = own
+    return [
+      [`its own event ${event} in lower case`, JSON.stringify({ ...own, hook_event_name: event.toLowerCase() })],
+      [`its own event ${event} with a trailing space`, JSON.stringify({ ...own, hook_event_name: `${event} ` })],
+      [`its own event ${event} without the session`, JSON.stringify(withoutSession)],
+      [`its own event ${event} from a subagent, without the session`, JSON.stringify({ ...withoutSession, agent_id: turnHooks.subagent_pre_tool_use.agent_id })],
+      [`its own event ${event} with an empty session`, JSON.stringify({ ...own, session_id: '' })],
+      [`its own event ${event} with a session that is not text`, JSON.stringify({ ...own, session_id: 5 })],
+      [`its own event ${event} with a session that is true`, JSON.stringify({ ...own, session_id: true })],
+      [`its own event ${event} with a session that is an object`, JSON.stringify({ ...own, session_id: { a: 1 } })],
+    ]
+  }
+
+  for (const [script, events] of scripts) {
+    const own = recorded[events[0]!]!
+    const notHookInput: [string, string][] = [
+      ['nothing', ''],
+      ['text', 'not json'],
+      ['a number', '17'],
+      ['a string', '"x"'],
+      ['true', 'true'],
+      ['null', 'null'],
+      ['an empty array', '[]'],
+      ['an array holding its hook input', JSON.stringify([own])],
+      ['an empty object', '{}'],
+      ['an object with a session and no event', JSON.stringify({ session_id: own.session_id })],
+      ['an event no marking hook runs on', JSON.stringify({ ...turnHooks.session_end, hook_event_name: 'SessionStart', source: 'startup' })],
+      ...events.flatMap(ownEventRows),
+      ...Object.entries(recorded).filter(([event]) => !events.includes(event))
+        .map(([event, input]): [string, string] => [`the ${event} input, an event it does not run on`, JSON.stringify(input)]),
+    ]
+
+    describe(`hooks/${script}, run with CLAUDE_PID set`, () => {
+      test.each(notHookInput)('leaves the state folder as it was, given %s', (_, stdin) => {
+        const dir = seeded()
+        const before = snapshot(dir)
+        expect(run(script, stdin, dir).exitCode).toBe(0)
+        expect(snapshot(dir)).toEqual(before)
+      })
+
+      test.each(notHookInput)('creates no state folder, given %s', (_, stdin) => {
+        const dir = join(mkdtempSync(join(tmpdir(), 'typing-')), 'state')
+        expect(run(script, stdin, dir).exitCode).toBe(0)
+        expect(existsSync(dir)).toBe(false)
+      })
+
+      test.each(events.map(e => [e]))('marks the session on its recorded %s input, run as hooks.json runs it', event => {
+        const dir = mkdtempSync(join(tmpdir(), 'typing-'))
+        const before = Date.now()
+        // StopFailure also runs hooks/subagent.ts, which records nothing for the main session's.
+        expect(new Set(runRegistered(event, recorded[event]!, { TELEGRAM_STATE_DIR: dir, CLAUDE_PID: '4242' }))).toEqual(new Set([0]))
+        const turns = join(dir, 'turns')
+        if (script === 'busy.ts') {
+          expect(readdirSync(turns)).toEqual(['busy-4242'])
+        } else {
+          expect(readdirSync(turns).sort()).toEqual(['pid-4242', `session-${recorded[event]!.session_id}`])
+          expect(readTurnEnd([join(turns, 'pid-4242')])).toBeGreaterThanOrEqual(before)
+        }
+      })
+
+      // Built from Claude Code's input builder, not recorded: a served call's
+      // session is `served:<caller>` with an empty transcript path, and a hook
+      // run on another machine gets every path-like field emptied.
+      const forms: [string, (input: { session_id: string }) => { session_id: string }][] = [
+        ['a served call', input => ({ ...input, session_id: 'served:unknown', transcript_path: '' })],
+        ['another machine', input => ({ ...input, transcript_path: '', cwd: '' })],
+      ]
+      test.each(events.flatMap(event => forms.map(([form, make]) => [event, form, make] as const)))(
+        'marks the session on its %s input as %s sends it', (event, _, make) => {
+          const dir = mkdtempSync(join(tmpdir(), 'typing-'))
+          const input = make(recorded[event]!)
+          expect(new Set(runRegistered(event, input, { TELEGRAM_STATE_DIR: dir, CLAUDE_PID: '4242' }))).toEqual(new Set([0]))
+          const turns = join(dir, 'turns')
+          if (script === 'busy.ts') expect(readdirSync(turns)).toEqual(['busy-4242'])
+          // A served call's session id is no file name, so only the pid marks its turn, as on main.
+          else expect(readdirSync(turns).sort()).toEqual(/^[\w-]+$/.test(input.session_id) ? ['pid-4242', `session-${input.session_id}`] : ['pid-4242'])
+        })
+    })
+  }
+
+  test.each([['PreToolUse', turnHooks.subagent_pre_tool_use], ['PostToolUse', turnHooks.subagent_post_tool_use]] as const)(
+    'a subagent\'s recorded %s input marks it working on', (event, input) => {
+      const dir = mkdtempSync(join(tmpdir(), 'typing-'))
+      expect(runRegistered(event, input, { TELEGRAM_STATE_DIR: dir, CLAUDE_PID: '4242' })).toEqual([0])
+      expect(readdirSync(join(dir, 'turns'))).toEqual(['subagent-4242'])
+    })
 })
