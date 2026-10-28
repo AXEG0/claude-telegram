@@ -6,7 +6,7 @@ import { join } from 'path'
 import { failureFiles, failureText, RESTORED_TEXT, type FailureRecord, type RunState } from '../failures.ts'
 import { REFRESH_MS } from '../typing.ts'
 import fixture from './channel-argv.json'
-import { calls, start, state, until } from './harness.ts'
+import { calls, start, state } from './harness.ts'
 import { runRegistered } from './hooks.ts'
 import turnHooks from './turn-hooks.json'
 import { append, CREDITS, restamp, type Line } from './turns.ts'
@@ -59,9 +59,11 @@ export function session(dir: string, channel: ReturnType<typeof start>) {
     run: () => JSON.parse(readFileSync(join(dir, 'failure-run.json'), 'utf8')) as RunState,
     records: (pid = channel.child.pid) => readFileSync(failureFiles(dir, [pid!])[0]!, 'utf8').trim().split('\n').map(l => JSON.parse(l) as FailureRecord),
     texts: (chat: string) => sent().filter(c => c.payload.chat_id === chat).map(c => c.payload.text as string),
-    // The chat's messages once it has taken `count`, or at the timeout.
+    // The chat's messages once it has taken `count`, or at the timeout; an
+    // error reading them ends the test with that error.
     async arrived(chat: string, count: number, timeout = COMES_MS) {
-      await until(() => s.texts(chat).length >= count, timeout).catch(() => {})
+      const end = Date.now() + timeout
+      while (s.texts(chat).length < count && Date.now() < end) await Bun.sleep(10)
       return s.texts(chat)
     },
     // The same, once a tick more has passed.
