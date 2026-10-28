@@ -311,8 +311,10 @@ export function start(dir: string, argv: string[], env: Record<string, string> =
     const mark = () => { came = { clock: onClock(w), real: inReal(w) } }
     response.then(mark, mark)
     while (!came && (leftOver(w), onClock(w) <= timeout && inReal(w) <= timeout)) await drive(STEP_MS, w)
+    if (came && came.clock > timeout * 0.7) console.error(`EXPERIMENT ${method} ${JSON.stringify(params).slice(0, 90)} answered at ${came.clock} of ${timeout} on the clock, ${Math.round(came.real)} ms real`)
     if (came && came.real <= timeout && came.clock <= timeout) return response
     leftOver(w)
+    console.error(`EXPERIMENT ${method} ${JSON.stringify(params).slice(0, 90)} past its limit: came ${JSON.stringify(came)}, clock ${onClock(w)}, real ${Math.round(inReal(w))}`)
     if ((came?.real ?? inReal(w)) > timeout) return Promise.reject(new Error(`${method} timed out in real time: ${stderr}`))
     return Promise.reject(new Error(`${method} timed out on the test's clock: ${stderr}`))
   }

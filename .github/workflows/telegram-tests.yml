@@ -1,8 +1,7 @@
 name: Telegram plugin tests
 
-# Throwaway, not for merge: sixteen runners each run the press and held-edit
-# tests in six processes at once, half with the press released after a fixed
-# wait and half once the server has said it is shutting down.
+# Throwaway, not for merge: sixteen runners each run the suite three times and
+# print when each hop of the held keyboard edit test reached the fake Telegram.
 
 # Runs the Telegram plugin's own suite on every pull request and on main, so a
 # merge into main rests on it. Required on main by the branch ruleset, so it
@@ -28,8 +27,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arm: [wait300, shutdownline]
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
     defaults:
       run:
         working-directory: external_plugins/telegram
@@ -39,41 +37,21 @@ jobs:
         with:
           bun-version: 1.3.13
       - run: bun install --frozen-lockfile
-      - name: the press and held-edit tests, six at once
-        env:
-          ARM: ${{ matrix.arm }}
+      - name: the suite three times
         run: |
           lscpu | grep -E '^(Model name|CPU\(s\)):'
-          if [ "$ARM" = wait300 ]; then
-            python3 - <<'PY'
-          p = 'buttons.integration.test.ts'
-          s = open(p).read()
-          b = """    // The press is judged once the server has seen its input close.
-              await until(() => first.stderr().includes('telegram channel: shutting down'))
-          """
-          a = """    await wait(300)
-          """
-          assert s.count(b) == 1
-          open(p, 'w').write(s.replace(b, a))
-          PY
-          fi
-          git diff --stat
-          for i in 1 2 3 4 5 6; do
-            mkdir -p "$RUNNER_TEMP/p$i"
-            TMPDIR="$RUNNER_TEMP/p$i" bun test buttons.integration.test.ts -t 'press being judged|held keyboard edit' --rerun-each 40 > "press-$i.log" 2>&1 &
-          done
-          wait
           failed=0
-          for f in press-*.log; do
-            echo "$f: $(grep -c '^(pass)' "$f") passed, $(grep -c '^(fail)' "$f") failed"
-            grep '^(fail)' "$f" | cut -c1-110 | sort | uniq -c
-            grep -E '^error' "$f" | cut -c1-110 | sort | uniq -c
-            grep -q '^(fail)' "$f" && failed=1
+          for i in 1 2 3; do
+            start=$(date +%s)
+            if bun run test > run-$i.log 2>&1; then echo "run $i passed in $(( $(date +%s) - start )) s"; else failed=1; echo "run $i FAILED in $(( $(date +%s) - start )) s"; fi
+            grep '^(fail)' run-$i.log | cut -c1-120 || true
+            grep -E '^error: ' run-$i.log | cut -c1-120 || true
+            grep 'EXPERIMENT' run-$i.log | cut -c1-900 || true
           done
           exit $failed
       - if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: logs-${{ matrix.arm }}-${{ matrix.shard }}
-          path: external_plugins/telegram/press-*.log
+          name: logs-${{ matrix.shard }}
+          path: external_plugins/telegram/run-*.log
           retention-days: 1

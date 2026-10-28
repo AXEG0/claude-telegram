@@ -1015,10 +1015,15 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
   test('when Telegram then refuses that held keyboard edit, the message ends without buttons, the record no longer holds it, and the text edit makes no further call', async () => {
     const refused = { error_code: 400, description: "Bad Request: message can't be edited" }
     const { dir, p, s, m } = await plainPair([{ ...PLAIN, preMs: 1500 }], [{ ...SET, holdMs: 3000, error: refused }])
+    const t0 = Date.now()
     const text = tool(s, 'edit_message', { chat_id: '1', message_id: String(m), text: 'PLAIN' })
     await wait(200)
     const setting = tool(p, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [['Yes', 'No']] })
-    expect(ok(await text)).toBe(`edited (id: ${m})`)
+    const hops = () => { const all = calls(dir); const sp = all.find(c => c.method === 'editMessageText')?.pid; return JSON.stringify(all.filter(c => c.at >= t0 && c.method !== 'getUpdates').map(c => [c.pid === sp ? 's' : 'p', c.method, c.at - t0])) + ' last polls ' + JSON.stringify(all.filter(c => c.method === 'getUpdates').slice(-2).map(c => c.at - t0)) }
+    let answer: any
+    try { answer = await text } catch (err) { console.error(`EXPERIMENT held text failed at ${Date.now() - t0} on the clock; hops ${hops()}`); throw err }
+    console.error(`EXPERIMENT held text answered by ${Date.now() - t0} on the clock; hops ${hops()}`)
+    expect(ok(answer)).toBe(`edited (id: ${m})`)
     expect(failed(await setting)).toContain("message can't be edited")
     await wait(300)
     expect(editLog(dir, m).map(([who, method, , answer]) => [who, method, answer])).toEqual([
