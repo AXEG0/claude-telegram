@@ -107,6 +107,7 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
   // Criterion 1: reply.
 
   test('reply puts the keyboard on the last message it sends, a text part or a file, in every format, and names that message', async () => {
+    await Bun.sleep(180_000) // throwaway: a real 180-second wait, to show the suite's bound fails the CI step
     const dir = state({ dmPolicy: 'allowlist', allowFrom: ['1'], textChunkLimit: 10 })
     mkdirSync(join(dir, 'inbox'))
     writeFileSync(join(dir, 'inbox', 'chart.png'), 'png')
@@ -135,7 +136,7 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     expect(ok(await tool(srv, 'reply', { chat_id: '1', text: 'plain', format: 'text' }))).toBe('sent (id: 109)')
     expect(markupOf(calls(dir).findLast(c => c.method === 'sendMessage')!)).toBeUndefined()
     await srv.close()
-  }, 20000)
+  }, 240000)
 
   test('each button’s data is the prefix, an id from the record’s counter and its index, new for every keyboard, on the same message and after a restart', async () => {
     const dir = state()
