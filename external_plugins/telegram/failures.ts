@@ -36,13 +36,15 @@
 //
 // The state lives in failure-run.json in the state directory, written whole
 // by the polling server alone, so a restart keeps the run, the chats told and
-// what Telegram answered.
+// what Telegram answered. A file that holds no run state is said once on
+// stderr and replaced by an empty one.
 //
 // This file carries no dependencies beyond Node's, like typing.ts, so the hook
 // can import it before `bun install` has run.
 
-import { appendFileSync, closeSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, writeFileSync } from 'fs'
+import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, renameSync, writeFileSync } from 'fs'
 import { join } from 'path'
+import { createLogFollower } from './log-follower.ts'
 import { REFRESH_MS } from './typing.ts'
 
 // A record waits this long for a sibling hook's line, and a retry starts here.
@@ -165,30 +167,16 @@ export function readClean(files: string[]): CleanRecord | undefined {
 }
 
 // Follows the failure logs: each call returns the records appended since the
-// last, newer than `after`, skipping a line that is not a record.
+// last, newer than `after`, skipping a line that is not a record. A log the
+// hook's weekly sweep deleted and a new failure wrote again is read from its
+// start (see log-follower.ts).
 export function createRecordReader(files: string[]) {
-  const offsets = new Map<string, number>()
-  const size = (file: string) => { try { return statSync(file).size } catch { return -1 } }
+  const logs = files.map(createLogFollower)
   return {
     read(after: number): FailureRecord[] {
       const out: FailureRecord[] = []
-      for (const file of files) {
-        const end = size(file)
-        if (end < 0) continue
-        let off = offsets.get(file) ?? 0
-        if (end < off) off = 0
-        if (end === off) continue
-        const fd = openSync(file, 'r')
-        let text: string
-        try {
-          const buf = Buffer.alloc(end - off)
-          readSync(fd, buf, 0, buf.length, off)
-          text = buf.toString('utf8')
-        } finally { closeSync(fd) }
-        const last = text.lastIndexOf('\n')
-        if (last < 0) continue
-        offsets.set(file, off + Buffer.byteLength(text.slice(0, last + 1)))
-        for (const line of text.slice(0, last).split('\n')) {
+      for (const log of logs) {
+        for (const line of log.read()) {
           let rec: unknown
           try { rec = JSON.parse(line) } catch { continue }
           if (isRecord(rec) && rec.t > after) out.push(rec as FailureRecord)
@@ -198,7 +186,7 @@ export function createRecordReader(files: string[]) {
     },
     // Whether a log holds a line not read yet.
     waiting(): boolean {
-      return files.some(file => size(file) > (offsets.get(file) ?? 0))
+      return logs.some(log => log.waiting())
     },
   }
 }
@@ -395,8 +383,10 @@ export function attribute(rec: FailureRecord, claimed: ReadonlySet<string>): Att
 // message that is not an error, stamped at or before the record's time, whose
 // text is the record's when `byText`. A message is a run of assistant entries
 // with one message id, no prompt between them, their texts joined by line
-// breaks. Undefined when no such message is found.
-export function answerAt(rec: CleanRecord, byText: boolean): number | undefined {
+// breaks. Undefined when no such message is found. The walk stops at the
+// first entry stamped at or before `after` that is not part of the message
+// read, since an answer that old is not the one the caller waits for.
+export function answerAt(rec: CleanRecord, byText: boolean, after = -Infinity): number | undefined {
   if (!rec.transcript) return undefined
   let lines: ReturnType<typeof backwardLines>
   try { lines = backwardLines(rec.transcript) } catch { return undefined }
@@ -423,7 +413,7 @@ export function answerAt(rec: CleanRecord, byText: boolean): number | undefined 
         const at = judge()
         if (at !== undefined) return at
       }
-      if (!e) return undefined
+      if (!e || e.at <= after) return undefined
       run = e.type === 'assistant' && !e.apiError ? [e] : []
     }
   } finally {
@@ -442,13 +432,41 @@ export type RunState = {
   seen: number
   claimed: { uuid: string; at: number }[]
   run: null | { since: number; lastFailure: number; notified: Target[] }
-  clean: null | (CleanRecord & { since: number; fallback?: boolean })
+  // older: its text is found only at or before the run's last failure, so it
+  // never closes the run; the next clean record replaces it.
+  clean: null | (CleanRecord & { since: number; fallback?: boolean; older?: boolean })
   closing: Closing[]
   reasons: { at: number; reason: string }[]
   sends: { at: number; chat: string; message: 'notice' | 'back to normal'; answer: string }[]
 }
 
 const isFinal = (s: Sent) => typeof s === 'string' && s.startsWith('final')
+
+// A Telegram call's timeout after `tries` calls that failed: a send's or a
+// bot lookup's, doubling from FIRST_TIMEOUT_MS up to MAX_WAIT_MS.
+const callTimeout = (tries: number) => Math.min(FIRST_TIMEOUT_MS * 2 ** tries, MAX_WAIT_MS)
+
+// failure-run.json as save() writes it, or undefined for anything else.
+const num = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
+const str = (v: unknown): v is string => typeof v === 'string'
+const bool = (v: unknown): v is boolean => typeof v === 'boolean'
+const obj = (v: unknown): v is Record<string, any> => typeof v === 'object' && v !== null && !Array.isArray(v)
+const opt = (v: unknown, is: (v: unknown) => boolean) => v === undefined || is(v)
+const all = (v: unknown, is: (v: unknown) => boolean) => Array.isArray(v) && v.every(is)
+const sentOf = (v: unknown) => v === null || v === true || str(v)
+const retries = (v: Record<string, any>) => opt(v.retryAt, num) && opt(v.tries, num)
+function runStateOf(v: unknown): RunState | undefined {
+  if (!obj(v)) return undefined
+  const target = (t: unknown) => obj(t) && str(t.chat) && num(t.at) && str(t.text) && sentOf(t.sent) && retries(t)
+  const closing = (c: unknown) => obj(c) && str(c.chat) && str(c.text) && sentOf(c.notice) && sentOf(c.restored) && retries(c)
+  const run = v.run === null || (obj(v.run) && num(v.run.since) && num(v.run.lastFailure) && all(v.run.notified, target))
+  const clean = v.clean === null || (obj(v.clean) && num(v.clean.t) && num(v.clean.since) && opt(v.clean.text, str)
+    && opt(v.clean.transcript, str) && opt(v.clean.fallback, bool) && opt(v.clean.older, bool))
+  const ok = num(v.seen) && all(v.claimed, c => obj(c) && str(c.uuid) && num(c.at)) && run && clean
+    && all(v.closing, closing) && all(v.reasons, r => obj(r) && num(r.at) && str(r.reason))
+    && all(v.sends, x => obj(x) && num(x.at) && str(x.chat) && str(x.message) && str(x.answer))
+  return ok ? v as RunState : undefined
+}
 
 // A Telegram error's code and description, or the error's own message.
 function describe(err: unknown): string {
@@ -472,23 +490,19 @@ export function createFailureWatch(opts: {
   now?: () => number
 }) {
   const now = opts.now ?? Date.now
-  const loaded = readJson(opts.file) as Partial<RunState> | undefined
-  const fresh = typeof loaded?.seen !== 'number'
+  // A file that is not a run state, cut short or edited by hand, counts as
+  // none: the run starts empty, said once.
+  const loaded = existsSync(opts.file) ? runStateOf(readJson(opts.file)) : undefined
+  if (existsSync(opts.file) && !loaded) opts.log(`${opts.file} holds no failure run state; starting from an empty one`)
+  const fresh = !loaded
   const started = now()
-  const state: RunState = {
-    seen: fresh ? 0 : loaded!.seen!,
-    claimed: Array.isArray(loaded?.claimed) ? loaded!.claimed! : [],
-    run: loaded?.run ?? null,
-    clean: loaded?.clean ?? null,
-    closing: Array.isArray(loaded?.closing) ? loaded!.closing! : [],
-    reasons: Array.isArray(loaded?.reasons) ? loaded!.reasons! : [],
-    sends: Array.isArray(loaded?.sends) ? loaded!.sends! : [],
-  }
+  const state: RunState = loaded ?? { seen: 0, claimed: [], run: null, clean: null, closing: [], reasons: [], sends: [] }
   const reader = createRecordReader(opts.failures)
   // With no state, the records written before the server started are an
   // earlier session's.
   const after = () => Math.max(state.seen, fresh ? started - 1 : 0)
-  type Queued = { rec: FailureRecord; firstTry?: number; result?: Extract<Attribution, { state: 'done' }>; targets: Map<string, string | null> }
+  // lookups: each chat's failed lookups, which make its next lookup's timeout grow.
+  type Queued = { rec: FailureRecord; firstTry?: number; result?: Extract<Attribution, { state: 'done' }>; targets: Map<string, string | null>; lookups: Map<string, number> }
   const queue: Queued[] = []
   // Targets of the records finished since told() was last called.
   const told = new Set<string>()
@@ -544,10 +558,12 @@ export function createFailureWatch(opts: {
       let waiting = false
       for (const chat of q.result.chats) {
         if (q.targets.has(chat)) continue
+        const tries = q.lookups.get(chat) ?? 0
         try {
-          const bot = await opts.botChat(chat, AbortSignal.timeout(FIRST_TIMEOUT_MS))
+          const bot = await opts.botChat(chat, AbortSignal.timeout(callTimeout(tries)))
           q.targets.set(chat, bot ? opts.owner ?? null : chat)
         } catch (err) {
+          q.lookups.set(chat, tries + 1)
           // A chat whose kind Telegram did not confirm gets nothing.
           if (now() - q.firstTry < PENDING_MS) { waiting = true; continue }
           q.targets.set(chat, opts.owner ?? null)
@@ -572,12 +588,27 @@ export function createFailureWatch(opts: {
     if (state.clean && state.clean.t <= run.lastFailure) { state.clean = null; save() }
     if (!state.clean || queue.length) return
     const clean = state.clean
-    let at = answerAt(clean, clean.text !== undefined && !clean.fallback)
-    if (at === undefined && clean.text !== undefined && !clean.fallback && now() - clean.since >= PENDING_MS) {
-      clean.fallback = true
-      note('the clean turn\'s answer was not found by its text; its newest answer counts instead')
-      save()
-      at = answerAt(clean, false)
+    if (clean.older) return
+    // Each tick's walk ends at the run's last failure: no answer stamped at or
+    // before it can close the run.
+    const byText = clean.text !== undefined && !clean.fallback
+    let at = answerAt(clean, byText, run.lastFailure)
+    if (at === undefined && byText && now() - clean.since >= PENDING_MS) {
+      // One walk past the last failure tells a text found only before it,
+      // which never closes the run, from a text found nowhere, which falls
+      // back to the newest answer.
+      const found = answerAt(clean, true)
+      if (found !== undefined && found > run.lastFailure) at = found
+      else if (found !== undefined) {
+        clean.older = true
+        save()
+        return
+      } else {
+        clean.fallback = true
+        note('the clean turn\'s answer was not found by its text; its newest answer counts instead')
+        save()
+        at = answerAt(clean, false, run.lastFailure)
+      }
     }
     if (at === undefined || at <= run.lastFailure) return
     for (const n of run.notified) {
@@ -593,7 +624,7 @@ export function createFailureWatch(opts: {
   // try set from it.
   async function deliver(entry: { chat: string; retryAt?: number; tries?: number }, message: 'notice' | 'back to normal', text: string): Promise<Sent> {
     const tries = entry.tries ?? 0
-    const timeout = Math.min(FIRST_TIMEOUT_MS * 2 ** tries, MAX_WAIT_MS)
+    const timeout = callTimeout(tries)
     const signal = AbortSignal.timeout(timeout)
     let answer: Sent
     try {
@@ -649,7 +680,7 @@ export function createFailureWatch(opts: {
   async function step(): Promise<void> {
     const records = reader.read(after())
     for (const rec of records) {
-      queue.push({ rec, targets: new Map() })
+      queue.push({ rec, targets: new Map(), lookups: new Map() })
       // Every failure extends the run, whether or not it notifies anyone.
       if (!state.run) state.run = { since: rec.t, lastFailure: rec.t, notified: [] }
       else state.run.lastFailure = Math.max(state.run.lastFailure, rec.t)

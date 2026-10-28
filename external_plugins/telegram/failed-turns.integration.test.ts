@@ -73,10 +73,18 @@ describe.skipIf(process.platform !== 'linux')('a turn that ends on an error', ()
     expect(s.fail()).toEqual([0, 0])
     await Bun.sleep(NOTHING_MS)
     expect(s.sent()).toEqual([])
+    // Both records were attributed, to nobody, rather than left waiting for
+    // an entry: the newest is the last the server finished, and the run told
+    // no chat.
+    expect(s.records().map(r => r.t)).toHaveLength(2)
+    expect(s.run().seen).toBe(s.records()[1]!.t)
+    expect(s.run().run!.notified).toEqual([])
     s.write(prompt('p1', Date.now() - 500, '1', 5), reply('r1', Date.now() - 50, 'OK-later'))
     expect(s.stop('OK-later')).toEqual([0])
     await Bun.sleep(NOTHING_MS)
     expect(s.sent()).toEqual([])
+    // The clean turn closed the run.
+    expect(s.run().run).toBeNull()
     await s.channel.close()
   }, 40000)
 

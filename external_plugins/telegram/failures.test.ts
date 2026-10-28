@@ -1,19 +1,22 @@
-import { describe, expect, test } from 'bun:test'
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, utimesSync, writeFileSync } from 'fs'
+import { afterEach, describe, expect, test } from 'bun:test'
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import failureHooks from './fixtures/failure-hooks.json'
 import turnHooks from './fixtures/turn-hooks.json'
 import { apiError, CREDITS, jsonl, prompt, recorded, reply, text, upTo, type Line } from './fixtures/turns.ts'
 import {
-  appendFailure, attribute, CAP_BYTES, CHUNK_BYTES, cleanFiles, cleanRecord, createFailureWatch, createRecordReader,
+  answerAt, appendFailure, attribute, CAP_BYTES, CHUNK_BYTES, cleanFiles, cleanRecord, createFailureWatch, createRecordReader,
   failureFiles, failureRecord, failureText, FIRST_TIMEOUT_MS, LAYOUT_CHANGED, MAX_WAIT_MS, PENDING_MS, readClean,
   RESTORED_TEXT, TICK_MS, writeClean, type FailureRecord, type RunState,
 } from './failures.ts'
 
 const FIXTURES = join(import.meta.dir, 'fixtures', 'transcripts')
 const fixture = (name: string) => join(FIXTURES, `${name}.jsonl`)
-const scratch = () => mkdtempSync(join(tmpdir(), 'failures-'))
+// Each test's folders go when it ends.
+const made: string[] = []
+const scratch = () => { const dir = mkdtempSync(join(tmpdir(), 'failures-')); made.push(dir); return dir }
+afterEach(() => { for (const dir of made.splice(0)) rmSync(dir, { recursive: true, force: true }) })
 const at = (line: Line) => Date.parse(line.timestamp)
 
 // A failure record as the hook writes it for the error entry on `index`
@@ -278,6 +281,7 @@ function harness(opts: { start: number; bots?: string[]; owner?: string; lookup?
     if (typeof answer === 'object' && 'slowMs' in answer) return Promise.race([Bun.sleep(answer.slowMs), aborted()])
   }
   const lookups: string[] = []
+  const logs: string[] = []
   const lookup = opts.lookup ?? (async (chat: string) => (opts.bots ?? []).includes(chat))
   const make = () => createFailureWatch({
     file: join(dir, 'failure-run.json'),
@@ -286,13 +290,13 @@ function harness(opts: { start: number; bots?: string[]; owner?: string; lookup?
     botChat: (chat, signal) => { lookups.push(chat); return lookup(chat, signal) },
     owner: opts.owner,
     send,
-    log: () => {},
+    log: line => logs.push(line),
     now: () => clock,
   })
   const h = {
     dir,
     watch: make(),
-    requests, delivered, lookups,
+    requests, delivered, lookups, logs,
     answer: (chat: string, ...a: Answer[]) => answers.set(chat, a),
     set now(t: number) { clock = t },
     get now() { return clock },
@@ -492,6 +496,25 @@ describe('the run', () => {
     expect(nobody.delivered.map(d => d.chat)).toEqual(['3'])
   })
 
+  test('a lookup that gets no answer goes again with twice the time, as a send does', async () => {
+    // Telegram answers chat 2's lookups after 12 s.
+    const began: number[] = []
+    const lookup = (chat: string, signal: AbortSignal) => chat !== '2' ? Promise.resolve(false) : new Promise<boolean>((resolve, reject) => {
+      began.push(Date.now())
+      const answer = setTimeout(() => resolve(false), 12_000)
+      signal.addEventListener('abort', () => { clearTimeout(answer); reject(signal.reason) }, { once: true })
+    })
+    const h = harness({ start: START, owner: '1', lookup })
+    h.now = FAIL.t
+    h.fail(FAIL)
+    await h.tick(TICK_MS)
+    expect(h.delivered).toEqual([])
+    await h.tick(TICK_MS)
+    expect(began.length).toBe(2)
+    expect(began[1]! - began[0]!).toBeGreaterThanOrEqual(FIRST_TIMEOUT_MS - 100)
+    expect(h.delivered.map(d => d.chat)).toEqual(['2', '3'])
+  }, 30_000)
+
   test('the run and the chats told survive a restart, so a told chat\'s next failure sends nothing', async () => {
     const h = harness({ start: START })
     h.now = FAIL.t
@@ -505,6 +528,34 @@ describe('the run', () => {
     await h.tick(TICK_MS)
     expect(h.delivered.map(d => d.chat)).toEqual(['2', '3'])
     expect(h.state().seen).toBe(h.now - 2 * TICK_MS + 1140)
+  })
+})
+
+describe('the state file', () => {
+  test.each([
+    ['a run without its targets', JSON.stringify({ seen: 0, claimed: [], run: { since: 1, lastFailure: 1 }, clean: null, closing: [], reasons: [], sends: [] })],
+    ['a file cut short', '{"seen": 1, "claimed": ['],
+    ['an array', '[]'],
+  ])('%s is said once and replaced by an empty state, and the next failure is told', async (_, content) => {
+    const dir = scratch()
+    writeFileSync(join(dir, 'failure-run.json'), content)
+    const h = harness({ start: START, dir })
+    h.now = FAIL.t
+    h.fail(FAIL)
+    await h.tick(TICK_MS)
+    await h.tick(TICK_MS)
+    expect(h.delivered.map(d => d.chat)).toEqual(['2', '3'])
+    expect(h.logs.filter(l => l.includes('holds no failure run state'))).toEqual([`${join(dir, 'failure-run.json')} holds no failure run state; starting from an empty one`])
+    expect(h.state().run!.notified.map(n => n.chat)).toEqual(['2', '3'])
+  })
+
+  test('a missing file starts an empty state without a word', async () => {
+    const h = harness({ start: START })
+    h.now = FAIL.t
+    h.fail(FAIL)
+    await h.tick(TICK_MS)
+    expect(h.logs.filter(l => l.includes('failure run state'))).toEqual([])
+    expect(h.delivered.map(d => d.chat)).toEqual(['2', '3'])
   })
 })
 
@@ -591,10 +642,24 @@ describe('the close', () => {
     for (let waited = 0; waited <= PENDING_MS + TICK_MS; waited += TICK_MS) await h.tick(TICK_MS)
     expect(h.texts('2')).toEqual([NOTICE])
     expect(h.state().run).not.toBeNull()
+    // Its text is found once, past the failure, and the record waits for the next.
+    expect(h.state().clean!.older).toBe(true)
     appendFileSync(path, jsonl([reply('r9', h.now, 'OK-now')]))
     h.clean(h.now + 30, 'OK-now', path)
     await h.tick(TICK_MS)
     expect(h.texts('2')).toEqual([NOTICE, RESTORED_TEXT])
+  })
+
+  test('the answer search stops at an entry stamped at or before its bound', () => {
+    // Turn 1's answer, "OK-answer-1", ends before the merged turn's failure.
+    const late = { t: FAIL.t + 23, text: 'OK-answer-1', transcript: fixture('merged-starts') }
+    expect(answerAt(late, true)).toBeLessThan(FAIL.t)
+    expect(answerAt(late, true, FAIL.t)).toBeUndefined()
+    expect(answerAt(late, false, FAIL.t)).toBeUndefined()
+    // Turn 3's answer, "OK-answer-2", comes after it, and the bound leaves it found.
+    const next = { t: at(merged[55]!) + 26, text: 'OK-answer-2', transcript: fixture('merged-starts') }
+    expect(answerAt(next, true, FAIL.t)).toBe(answerAt(next, true)!)
+    expect(answerAt(next, true, FAIL.t)).toBeGreaterThan(FAIL.t)
   })
 
   test('a clean record without text uses the newest reply', async () => {

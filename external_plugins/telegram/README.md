@@ -429,7 +429,8 @@ normal that Telegram refuses or does not answer goes again as soon as Telegram
 allows, unless Telegram refuses that chat for good; when Telegram took a
 message but its answer was lost, the chat can get that message twice.
 `failure-run.json` keeps the run, the chats told and Telegram's answers, so a
-restart loses none of them. A turn that ends on an API error without running
+restart loses none of them; a `failure-run.json` that holds no run state, cut
+short or edited by hand, is replaced by an empty one, with a line on stderr. A turn that ends on an API error without running
 any hook, which some Claude Code releases do, gets no notice; it ends in the
 stuck notice instead.
 

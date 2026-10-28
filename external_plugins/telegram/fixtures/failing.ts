@@ -1,9 +1,9 @@
 // The production server with owner chat 1, the session transcript its hooks
 // name, and the registered Stop and StopFailure hooks run as Claude Code runs
 // them, for the tests of the failure notice. Only Telegram's HTTP is fake.
-import { writeFileSync } from 'fs'
+import { readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
-import { failureText, RESTORED_TEXT } from '../failures.ts'
+import { failureFiles, failureText, RESTORED_TEXT, type FailureRecord, type RunState } from '../failures.ts'
 import { REFRESH_MS } from '../typing.ts'
 import fixture from './channel-argv.json'
 import { calls, start, state, until } from './harness.ts'
@@ -54,6 +54,10 @@ export function session(dir: string, channel: ReturnType<typeof start>) {
     },
     hook(event: string, input: object, pid?: number) { return runRegistered(event, input, env(pid)) },
     sent,
+    // failure-run.json as the server last wrote it, and the failure records
+    // the hooks wrote for the server's Claude Code process.
+    run: () => JSON.parse(readFileSync(join(dir, 'failure-run.json'), 'utf8')) as RunState,
+    records: (pid = channel.child.pid) => readFileSync(failureFiles(dir, [pid!])[0]!, 'utf8').trim().split('\n').map(l => JSON.parse(l) as FailureRecord),
     texts: (chat: string) => sent().filter(c => c.payload.chat_id === chat).map(c => c.payload.text as string),
     // The chat's messages once it has taken `count`, or at the timeout.
     async arrived(chat: string, count: number, timeout = COMES_MS) {
