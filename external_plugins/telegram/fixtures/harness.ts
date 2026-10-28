@@ -111,7 +111,40 @@ async function idle(): Promise<void> {
     idle = working() ? 0 : idle + 1
   }
 }
+// What a server that did not move shows: each thread's name, state and
+// kernel wait, the signals pending, blocked and caught, its clock files, and
+// the end of its error output.
+const stderrOf = new Map<ChildProcess, () => string>()
+function read(path: string): string { try { return readFileSync(path, 'utf8') } catch (err) { return `(${(err as Error).message})` } }
+function field(status: string, name: string): string { return status.match(new RegExp(`^${name}:\\s*(.*)$`, 'm'))?.[1] ?? '?' }
+function snapshot(child: ChildProcess, dir: string, pid: number): string {
+  const status = read(`/proc/${pid}/status`)
+  const lines = [`server ${pid}: ShdPnd ${field(status, 'ShdPnd')} SigCgt ${field(status, 'SigCgt')} SigIgn ${field(status, 'SigIgn')}`]
+  let threads: string[] = []
+  try { threads = readdirSync(`/proc/${pid}/task`) } catch {}
+  for (const tid of threads) {
+    const t = read(`/proc/${pid}/task/${tid}/status`)
+    lines.push(`  thread ${tid} ${field(t, 'Name')} ${field(t, 'State')} wchan=${read(`/proc/${pid}/task/${tid}/wchan`)} SigPnd ${field(t, 'SigPnd')} SigBlk ${field(t, 'SigBlk')} syscall=${read(`/proc/${pid}/task/${tid}/syscall`).trim()}`)
+  }
+  lines.push(`  request ${read(join(dir, 'clock', String(pid)))}; now ${read(join(dir, 'clock', `${pid}.now`))}`)
+  lines.push(`  stderr: ${(stderrOf.get(child)?.() ?? '').slice(-2000)}`)
+  return lines.join('\n')
+}
+// What the test wrote to a server, a request, a notification or the end of
+// its input, leaves this process only once the test's event loop runs, and a
+// move can start before that. The clock waits until it has left, so the
+// server reads it at the time the test wrote it, and the check for real work
+// that follows sees the server take it up.
+const unsent = new Map<ChildProcess, () => boolean>()
+async function sent(): Promise<void> {
+  const end = performance.now() + 30_000
+  while ([...unsent.values()].some(pending => pending())) {
+    if (performance.now() > end) throw new Error('what the test wrote to a server did not leave the test in 30 s')
+    await Bun.sleep(1)
+  }
+}
 async function driveOnce(ms: number): Promise<boolean> {
+  await sent()
   // A server still starting has no clock yet. The timeline waits for it, so
   // every server of the test stays on the same time.
   const live = () => [...driven].filter(c => c.exitCode === null && c.signalCode === null)
@@ -123,18 +156,19 @@ async function driveOnce(ms: number): Promise<boolean> {
   }
   await idle()
   const n = ++advances
-  const moving: [string, number][] = []
+  const moving: [string, number, ChildProcess][] = []
   for (const child of live()) {
     const pid = serverPidOf(child)
     const dir = dirOf.get(child)!
     if (pid === undefined || clockOf(dir, pid) === undefined) continue
     writeFileSync(join(dir, 'clock', String(pid)), JSON.stringify({ n, to: timeline! + ms }))
-    try { process.kill(pid, 'SIGUSR2'); moving.push([dir, pid]) } catch {}
+    try { process.kill(pid, 'SIGUSR2'); moving.push([dir, pid, child]) } catch {}
   }
   if (moving.length === 0) { await Bun.sleep(10); return false }
   const end = performance.now() + 30_000
-  while (moving.some(([dir, pid]) => clockOf(dir, pid)?.n !== n && existsSync(`/proc/${pid}`))) {
-    if (performance.now() > end) throw new Error('a server did not move its clock')
+  const stalled = () => moving.filter(([dir, pid]) => clockOf(dir, pid)?.n !== n && existsSync(`/proc/${pid}`))
+  while (stalled().length) {
+    if (performance.now() > end) throw new Error(`a server did not move its clock\n${stalled().map(([dir, pid, child]) => snapshot(child, dir, pid)).join('\n')}`)
     await Bun.sleep(1)
   }
   timeline! += ms
@@ -208,6 +242,28 @@ export function deliver(dir: string, updates: object[]): void {
   renameSync(`${file}.tmp`, file)
 }
 
+// What a call past its limit on the test's clock shows: each call that reached
+// the fake Telegram in the test's state folder since the call was sent, with
+// when it came on the clock from then and the server that made it, and each
+// server's polls as a count and when the last came.
+function callsSince(dir: string, from: number, self: number | undefined): string {
+  const who = (pid: number) => `server ${pid}${pid === self ? ' (this call\'s)' : ''}`
+  const lines: string[] = []
+  const polls = new Map<number, { n: number; last: number }>()
+  for (const c of calls(dir)) {
+    if (c.at < from) continue
+    if (c.method === 'getUpdates') {
+      const p = polls.get(c.pid) ?? { n: 0, last: 0 }
+      polls.set(c.pid, { n: p.n + 1, last: c.at - from })
+      continue
+    }
+    const message = c.payload?.message_id !== undefined ? ` message ${c.payload.message_id}` : ''
+    lines.push(`  ${c.at - from} ms: ${who(c.pid)} ${c.method}${message}${c.refused ? `, which the fake refuses: ${c.refused}` : ''}`)
+  }
+  for (const [pid, p] of polls) lines.push(`  ${who(pid)}: ${p.n} polls, the last at ${p.last} ms`)
+  return lines.length ? lines.join('\n') : '  none'
+}
+
 export function start(dir: string, argv: string[], env: Record<string, string> = {}) {
   const child = spawn(process.execPath, [join(import.meta.dir, 'claude-parent.ts'), ...argv.slice(1)], {
     argv0: argv[0],
@@ -227,8 +283,24 @@ export function start(dir: string, argv: string[], env: Record<string, string> =
   })
   children.push(child)
   if (timeline !== undefined) { driven.add(child); dirOf.set(child, dir) }
+  // Each write counts until its callback, and the end of the input until the
+  // pipe has closed; a pipe that fails or closes holds nothing back.
+  let writing = 0, ending = false
+  const input = child.stdin
+  const write = input.write.bind(input), finish = input.end.bind(input)
+  input.write = ((chunk: unknown, ...rest: unknown[]) => {
+    const callback = typeof rest[rest.length - 1] === 'function' ? rest.pop() as (err?: Error | null) => void : undefined
+    writing++
+    return write(chunk as never, ...(rest as []), (err?: Error | null) => { writing--; callback?.(err) })
+  }) as typeof input.write
+  input.end = ((...args: unknown[]) => { ending = true; return finish(...(args as [])) }) as typeof input.end
+  input.once('close', () => { writing = 0; ending = false })
+  child.once('exit', () => { writing = 0; ending = false })
+  input.on('error', () => { writing = 0; ending = false })
+  unsent.set(child, () => writing > 0 || ending)
   let stderr = ''
   child.stderr.on('data', chunk => { stderr += chunk })
+  stderrOf.set(child, () => stderr)
   let output = ''
   let id = 0
   const replies = new Map<number, (value: any) => void>()
@@ -264,7 +336,7 @@ export function start(dir: string, argv: string[], env: Record<string, string> =
     if (came && came.real <= timeout && came.clock <= timeout) return response
     leftOver(w)
     if ((came?.real ?? inReal(w)) > timeout) return Promise.reject(new Error(`${method} timed out in real time: ${stderr}`))
-    return Promise.reject(new Error(`${method} timed out on the test's clock: ${stderr}`))
+    return Promise.reject(new Error(`${method} timed out on the test's clock: ${stderr}\nTelegram calls since it was sent, by when each reached the fake on the test's clock:\n${callsSince(dir, w.from, serverPidOf(child))}`))
   }
   return {
     child, request, stderr: () => stderr,
@@ -320,6 +392,8 @@ export async function cleanup(): Promise<void> {
   }
   driven.clear()
   dirOf.clear()
+  unsent.clear()
+  stderrOf.clear()
   epoch++
   if (timeline !== undefined) { timeline = undefined; setSystemTime() }
 }
