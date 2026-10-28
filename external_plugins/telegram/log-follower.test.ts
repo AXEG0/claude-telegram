@@ -55,7 +55,7 @@ describe('a followed log', () => {
     follower.close()
   })
 
-  test('cut back in place is read from its start, and a line not yet ended waits for its end', () => {
+  test('cut back below what was read is read from its start, and a line not yet ended waits for its end', () => {
     const file = log()
     appendFileSync(file, line(1_700_000_000_001) + '\n' + line(1_700_000_000_002) + '\n')
     const follower = createLogFollower(file)
@@ -66,6 +66,17 @@ describe('a followed log', () => {
     expect(follower.read()).toEqual([])
     appendFileSync(file, line(1_700_000_000_003).slice(20) + '\n')
     expect(follower.read()).toEqual([line(1_700_000_000_003)])
+    follower.close()
+  })
+
+  test('a byte that is not UTF-8 leaves the next line read whole', () => {
+    const file = log()
+    const bad = Buffer.concat([Buffer.from('{"t":1700000000001,"text":"'), Buffer.from([0xff, 0xfe]), Buffer.from('"}\n')])
+    appendFileSync(file, bad)
+    const follower = createLogFollower(file)
+    expect(follower.read()).toHaveLength(1)
+    appendFileSync(file, line(1_700_000_000_002) + '\n')
+    expect(follower.read()).toEqual([line(1_700_000_000_002)])
     follower.close()
   })
 

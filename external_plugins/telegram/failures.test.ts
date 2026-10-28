@@ -193,7 +193,7 @@ describe('attribution, on recorded transcripts', () => {
     expect(attribute({ ...recordFor('merged-starts', 31), transcript: join(dir, 'missing.jsonl') }, new Set()).state).toBe('pending')
   })
 
-  test('a turn start more than 64 MB from the end is not found, and one within it is', () => {
+  test('a turn start more than 64 MB from the end tells nobody at once, with the reason, and one within it is found', () => {
     const dir = scratch()
     const t0 = Date.parse('2026-10-27T15:00:00.000Z')
     const blob = JSON.stringify({ type: 'api-request-blob', blob: 'x'.repeat(CHUNK_BYTES - 64) }) + '\n'
@@ -205,7 +205,30 @@ describe('attribution, on recorded transcripts', () => {
       return { t: t0 + 1040, text: CREDITS, transcript: path }
     }
     expect(attribute(build(CAP_BYTES - 2 * CHUNK_BYTES), new Set())).toEqual({ state: 'done', entry: { uuid: 'e1', at: t0 + 1000 }, chats: ['1'] })
-    expect(attribute(build(CAP_BYTES + CHUNK_BYTES), new Set())).toEqual({ state: 'pending', reason: 'turn start not found within 64 MB' })
+    expect(attribute(build(CAP_BYTES + CHUNK_BYTES), new Set())).toEqual({ state: 'done', entry: { uuid: 'e1', at: t0 + 1000 }, chats: [], reason: 'turn start not found within 64 MB' })
+  })
+
+  test('a pipe or a folder named as the transcript is refused at once: pending for attribution, no answer for the close', () => {
+    const dir = scratch()
+    const pipe = join(dir, 'pipe.jsonl')
+    expect(Bun.spawnSync(['mkfifo', pipe]).exitCode).toBe(0)
+    const folder = join(dir, 'folder.jsonl')
+    mkdirSync(folder)
+    // A child process, so an open that waits for a writer ends at its time limit and fails the test.
+    const script = `
+      import { answerAt, attribute } from ${JSON.stringify(join(import.meta.dir, 'failures.ts'))}
+      const out = []
+      for (const transcript of ${JSON.stringify([pipe, folder])}) {
+        out.push(attribute({ t: 1, text: 'x', transcript }, new Set()))
+        out.push(answerAt({ t: 1, text: 'x', transcript }, true) ?? null)
+      }
+      console.log(JSON.stringify(out))`
+    const r = Bun.spawnSync(['bun', '-e', script], { env: { PATH: process.env.PATH!, HOME: process.env.HOME! }, timeout: 5000 })
+    expect(r.exitCode).toBe(0)
+    expect(JSON.parse(r.stdout.toString())).toEqual([
+      { state: 'pending', reason: `transcript not readable: ${pipe} is not a regular file` }, null,
+      { state: 'pending', reason: `transcript not readable: ${folder} is not a regular file` }, null,
+    ])
   })
 
   test('a line cut by a chunk\'s edge is read whole', () => {
@@ -432,6 +455,38 @@ describe('the record queue', () => {
   })
 })
 
+describe('a transcript that cannot be read', () => {
+  test('its record is dropped after 30 s with the reason, and holds the recovery no longer', async () => {
+    const h = harness({ start: START })
+    const folder = join(h.dir, 'folder.jsonl')
+    mkdirSync(folder)
+    h.now = FAIL.t
+    h.fail({ ...FAIL, transcript: folder })
+    await h.tick(TICK_MS)
+    expect(h.watch.unfinished()).toBe(true)
+    for (let waited = TICK_MS; waited <= PENDING_MS + TICK_MS; waited += TICK_MS) await h.tick(TICK_MS)
+    expect(h.watch.unfinished()).toBe(false)
+    expect(h.state().seen).toBe(FAIL.t)
+    expect(h.state().reasons.map(r => r.reason)).toEqual([`failure at ${new Date(FAIL.t).toISOString()} dropped: transcript not readable: ${folder} is not a regular file`])
+  })
+
+  test('named by a clean record, it closes nothing, and a notice waiting on a 429 still goes', async () => {
+    const h = harness({ start: START })
+    h.answer('2', { error_code: 429, description: 'Too Many Requests: retry after 6', parameters: { retry_after: 6 } })
+    h.now = FAIL.t
+    h.fail(FAIL)
+    await h.tick(TICK_MS)
+    const folder = join(h.dir, 'folder.jsonl')
+    mkdirSync(folder)
+    h.clean(FAIL.t + 6000, 'OK-later', folder)
+    await h.tick(TICK_MS)
+    await h.tick(TICK_MS)
+    expect(h.requests.filter(r => r.chat === '2').length).toBe(2)
+    expect(h.texts('2')).toEqual([NOTICE])
+    expect(h.state().run).not.toBeNull()
+  })
+})
+
 describe('the run', () => {
   test('a run opens on a failure, tells each target once, and a new chat\'s failure mid-run gets its own notice', async () => {
     const h = harness({ start: START })
@@ -514,6 +569,31 @@ describe('the run', () => {
     expect(began[1]! - began[0]!).toBeGreaterThanOrEqual(FIRST_TIMEOUT_MS - 100)
     expect(h.delivered.map(d => d.chat)).toEqual(['2', '3'])
   }, 30_000)
+
+  test('a lookup that hangs ends with the record\'s 30 s, and its chat is told in the owner chat then', async () => {
+    // How long each of chat 2's lookups ran before its timeout ended it.
+    const ran: number[] = []
+    const lookup = (chat: string, signal: AbortSignal) => chat !== '2' ? Promise.resolve(false) : new Promise<boolean>((_, reject) => {
+      const began = Date.now()
+      signal.addEventListener('abort', () => { ran.push(Date.now() - began); reject(signal.reason) }, { once: true })
+    })
+    const h = harness({ start: START, owner: '1', lookup })
+    h.now = FAIL.t
+    h.fail(FAIL)
+    await h.tick(TICK_MS)
+    expect(ran).toHaveLength(1)
+    expect(ran[0]!).toBeGreaterThanOrEqual(FIRST_TIMEOUT_MS - 100)
+    // 28 s into the record's 30: the next lookup gets the 2 s left, not 16 s.
+    await h.tick(PENDING_MS - 2000)
+    expect(ran).toHaveLength(2)
+    expect(ran[1]!).toBeLessThan(3000)
+    expect(h.delivered).toEqual([])
+    // Past the 30 s, the owner chat is told without another lookup.
+    await h.tick(TICK_MS)
+    expect(ran).toHaveLength(2)
+    expect(h.delivered.map(d => d.chat).sort()).toEqual(['1', '3'])
+    expect(h.state().reasons.map(r => r.reason)).toEqual([expect.stringMatching(/; the notice for chat 2 goes to the owner chat$/)])
+  }, 40_000)
 
   test('the run and the chats told survive a restart, so a told chat\'s next failure sends nothing', async () => {
     const h = harness({ start: START })

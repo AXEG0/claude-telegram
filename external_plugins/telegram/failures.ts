@@ -42,7 +42,7 @@
 // This file carries no dependencies beyond Node's, like typing.ts, so the hook
 // can import it before `bun install` has run.
 
-import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, renameSync, writeFileSync } from 'fs'
+import { appendFileSync, closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, renameSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { createLogFollower } from './log-follower.ts'
 import { REFRESH_MS } from './typing.ts'
@@ -194,10 +194,18 @@ export function createRecordReader(files: string[]) {
 // ---- Reading the transcript ----
 
 // A transcript's lines from its end, read in chunks, up to the cap. A line cut
-// by the cap is left out, and `capped` tells the caller the file goes on.
+// by the cap is left out, and `capped` tells the caller the file goes on. The
+// path comes from Claude Code's hook input, so anything but a regular file is
+// refused: opened without blocking, since a pipe's open waits for a writer and
+// would stop the whole server.
 function backwardLines(path: string) {
-  const fd = openSync(path, 'r')
-  let pos = fstatSync(fd).size
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK)
+  const st = fstatSync(fd)
+  if (!st.isFile()) {
+    closeSync(fd)
+    throw new Error(`${path} is not a regular file`)
+  }
+  let pos = st.size
   let read = 0
   let carry = Buffer.alloc(0)
   // The lines of the last chunk read, newest first, and the next to give.
@@ -370,10 +378,13 @@ export function attribute(rec: FailureRecord, claimed: ReadonlySet<string>): Att
       }
       break
     }
-    if (!started) {
-      return { state: 'pending', reason: lines.state.capped ? 'turn start not found within 64 MB' : 'turn start not found' }
-    }
+    // The transcript only grows at its end, so a start beyond the cap never
+    // comes within it: the record notifies nobody now, rather than after 30 s.
+    if (!started && lines.state.capped) return { state: 'done', entry, chats: [], reason: 'turn start not found within 64 MB' }
+    if (!started) return { state: 'pending', reason: 'turn start not found' }
     return { state: 'done', entry, chats }
+  } catch (err) {
+    return { state: 'pending', reason: `transcript not readable: ${err instanceof Error ? err.message : err}` }
   } finally {
     lines.close()
   }
@@ -416,6 +427,9 @@ export function answerAt(rec: CleanRecord, byText: boolean, after = -Infinity): 
       if (!e || e.at <= after) return undefined
       run = e.type === 'assistant' && !e.apiError ? [e] : []
     }
+  } catch {
+    // A transcript that cannot be read holds no answer the close can use.
+    return undefined
   } finally {
     lines.close()
   }
@@ -501,8 +515,9 @@ export function createFailureWatch(opts: {
   // With no state, the records written before the server started are an
   // earlier session's.
   const after = () => Math.max(state.seen, fresh ? started - 1 : 0)
-  // lookups: each chat's failed lookups, which make its next lookup's timeout grow.
-  type Queued = { rec: FailureRecord; firstTry?: number; result?: Extract<Attribution, { state: 'done' }>; targets: Map<string, string | null>; lookups: Map<string, number> }
+  // lookups: each chat's failed lookups, which make its next lookup's timeout
+  // grow, and the last one's error.
+  type Queued = { rec: FailureRecord; firstTry?: number; result?: Extract<Attribution, { state: 'done' }>; targets: Map<string, string | null>; lookups: Map<string, { tries: number; error: string }> }
   const queue: Queued[] = []
   // Targets of the records finished since told() was last called.
   const told = new Set<string>()
@@ -556,18 +571,26 @@ export function createFailureWatch(opts: {
         q.result = a
       }
       let waiting = false
+      const fallBack = (chat: string, error: string) => {
+        q.targets.set(chat, opts.owner ?? null)
+        note(`${error}; the notice for chat ${chat} goes to ${opts.owner ? 'the owner chat' : 'nobody, with no owner chat'}`)
+      }
       for (const chat of q.result.chats) {
         if (q.targets.has(chat)) continue
-        const tries = q.lookups.get(chat) ?? 0
+        const failed = q.lookups.get(chat)
+        // A lookup ends with the record's 30 s, so a chat whose lookups fail
+        // is told in the owner chat then; a chat not looked up yet gets one try.
+        const left = PENDING_MS - (now() - q.firstTry)
+        if (failed && left <= 0) { fallBack(chat, failed.error); continue }
+        const tries = failed?.tries ?? 0
         try {
-          const bot = await opts.botChat(chat, AbortSignal.timeout(callTimeout(tries)))
+          const bot = await opts.botChat(chat, AbortSignal.timeout(left > 0 ? Math.min(callTimeout(tries), left) : FIRST_TIMEOUT_MS))
           q.targets.set(chat, bot ? opts.owner ?? null : chat)
         } catch (err) {
-          q.lookups.set(chat, tries + 1)
+          q.lookups.set(chat, { tries: tries + 1, error: describe(err) })
           // A chat whose kind Telegram did not confirm gets nothing.
           if (now() - q.firstTry < PENDING_MS) { waiting = true; continue }
-          q.targets.set(chat, opts.owner ?? null)
-          note(`${describe(err)}; the notice for chat ${chat} goes to ${opts.owner ? 'the owner chat' : 'nobody, with no owner chat'}`)
+          fallBack(chat, describe(err))
         }
       }
       if (waiting) return

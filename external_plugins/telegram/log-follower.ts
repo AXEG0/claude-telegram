@@ -22,18 +22,21 @@ export function createLogFollower(path: string) {
   const same = (a: Stats, b: Stats) => a.ino === b.ino && a.dev === b.dev
 
   // The ended lines from the offset to the file's end; a line not yet ended
-  // stays for the next read.
+  // stays for the next read. The offset moves by the bytes up to the last line
+  // break, so a byte that is not UTF-8 cannot shift it. A file cut back below
+  // what was read is read again from its start; one cut back and written
+  // again to its old size or past it is not told apart from one appended to,
+  // which no writer of these logs does.
   function take(): string[] {
     const size = fstatSync(fd!).size
     if (size < offset) offset = 0
     if (size === offset) return []
     const buf = Buffer.alloc(size - offset)
     const got = readSync(fd!, buf, 0, buf.length, offset)
-    const text = buf.subarray(0, got).toString('utf8')
-    const last = text.lastIndexOf('\n')
+    const last = buf.subarray(0, got).lastIndexOf(0x0a)
     if (last < 0) return []
-    offset += Buffer.byteLength(text.slice(0, last + 1))
-    return text.slice(0, last).split('\n')
+    offset += last + 1
+    return buf.subarray(0, last).toString('utf8').split('\n')
   }
 
   return {
@@ -58,7 +61,7 @@ export function createLogFollower(path: string) {
       const now = stat()
       if (fd === undefined) return !!now && now.size > 0
       const held = fstatSync(fd)
-      // Grown, or cut back in place and written again.
+      // Grown, or cut back below what was read and written again.
       if (held.size > 0 && held.size !== offset) return true
       return !!now && !same(now, held) && now.size > 0
     },
