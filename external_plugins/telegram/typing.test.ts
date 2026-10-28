@@ -505,7 +505,7 @@ describe('the marking hooks act only on hook input', () => {
   })
 
   // The event, case and session rows, built for each of the hook's own events
-  // from its recorded input, so a check loosened for one event alone fails.
+  // from its recorded input.
   function ownEventRows(event: string): [string, string][] {
     const own = recorded[event]!
     const { session_id: _, ...withoutSession } = own
