@@ -2,12 +2,13 @@
 // running server with the offline Telegram fake: a chat whose turn failed
 // hears of the failure, and back to normal once turns end without an error,
 // instead of "Claude is active again".
-import { afterEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { idleText, RECOVERED_TEXT, stuckText } from './alerts.ts'
 import { failing, notice, NOTHING_MS, QUIET_MS, RESTORED_TEXT } from './fixtures/failing.ts'
-import { cleanup, deliver, state, until } from './fixtures/harness.ts'
+import { cleanup, deliver, driveClock, state, until, wait } from './fixtures/harness.ts'
 import { apiError, CREDITS, prompt, recorded, reply, upTo } from './fixtures/turns.ts'
 
+beforeEach(driveClock)
 afterEach(cleanup)
 
 const own = recorded('start-absorbed-own-turns')
@@ -28,7 +29,7 @@ describe.skipIf(process.platform !== 'linux')('the failure notice and the stuck 
     s.recorded(upTo(own, 13), 12)
     expect(s.fail()).toEqual([0, 0])
     expect(await s.arrived('1', 2)).toEqual([stuckText(600), notice()])
-    await Bun.sleep(QUIET_MS)
+    await wait(QUIET_MS)
     s.write(prompt('p2', Date.now() - 500, '1', 2), reply('r2', Date.now() - 50, 'OK-later'))
     expect(s.stop('OK-later')).toEqual([0])
     expect(await s.settled('1', 3)).toEqual([stuckText(600), notice(), RESTORED_TEXT])
@@ -55,7 +56,7 @@ describe.skipIf(process.platform !== 'linux')('the failure notice and the stuck 
     const s = await failing(STUCK)
     s.recorded(recorded('scheduled-start'), 46)
     expect(s.fail()).toEqual([0, 0])
-    await Bun.sleep(NOTHING_MS)
+    await wait(NOTHING_MS)
     expect(s.sent()).toEqual([])
     fromOwner(s.dir, 'stuck after a silent failure')
     expect(await s.arrived('1', 1)).toEqual([stuckText(600)])
@@ -74,7 +75,7 @@ describe.skipIf(process.platform !== 'linux')('the failure notice and the stuck 
     const entryAt = Date.now() - 50
     s.recorded(lines.slice(0, 11), 7, 200)
     expect(s.fail()).toEqual([0, 0])
-    await Bun.sleep(2 * 4000)
+    await wait(2 * 4000)
     expect(s.texts('1')).toEqual([stuckText(600)])
     // Claude Code stamps the entry before its hook runs, and writes it late.
     s.write(apiError('late', entryAt, CREDITS))

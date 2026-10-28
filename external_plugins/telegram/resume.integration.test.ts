@@ -1,13 +1,14 @@
 // A subagent resumed after its run ended in its transcript, a stop hook after
 // its group ended, and a transcript tail with no whole entry, in the running
 // server with the offline Telegram fake.
-import { afterEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { join } from 'path'
 import { AGENT_TICK_MS, appendAgentEvent, CHAT_GAP_MS, CLOCK_REFRESH_MS } from './agents.ts'
-import { calls, cleanup, deliver, state, until } from './fixtures/harness.ts'
+import { calls, cleanup, deliver, driveClock, state, until, wait } from './fixtures/harness.ts'
 import { row, session, WAIT_MS, type Session } from './fixtures/session.ts'
 import { apiError, assistantText, requestBlob, userText } from './fixtures/transcript.ts'
 
+beforeEach(driveClock)
 afterEach(cleanup)
 
 const isSend = (c: { method: string }) => c.method === 'sendMessage'
@@ -32,7 +33,7 @@ async function failA1(s: Session) {
   s.begin('a2', 'Other job')
   s.write('a1', userText('u1', Date.now(), 'Long job'))
   const sent = await s.next(t => row(t, 2).startsWith('2. ⏳'))
-  await Bun.sleep(Math.max(0, sent.at + CHAT_GAP_MS + 500 - Date.now()))
+  await wait(Math.max(0, sent.at + CHAT_GAP_MS + 500 - Date.now()))
   s.write('a1', apiError('e1', Date.now(), 'overloaded'))
   const failed = await s.next(t => row(t, 1).startsWith('1. ❌'), sent.index + 1)
   return { sent, failed }
@@ -46,7 +47,7 @@ async function endsInPlace(s: Session, sentId: number, after: number) {
   const done = await s.next(t => row(t, 1).startsWith('1. ✅') && row(t, 2).startsWith('2. ✅'), after)
   expect(row(done.payload.text, 1)).toMatch(/^1\. ✅ Done in \d+s · general-purpose · Resumed job$/)
   expect(done.payload.message_id).toBe(sentId)
-  await Bun.sleep(CLOCK_REFRESH_MS + AGENT_TICK_MS)
+  await wait(CLOCK_REFRESH_MS + AGENT_TICK_MS)
   expect(s.panels().slice(done.index + 1)).toEqual([])
   expect(s.panels().filter(c => c.payload.chat_id !== '1')).toEqual([])
   expect(s.panels().filter(isSend)).toHaveLength(1)
@@ -57,7 +58,7 @@ describe.skipIf(process.platform !== 'linux')('a subagent resumed after its run 
     const s = await twoChats()
     const { sent, failed } = await failA1(s)
     // The failure is shown and confirmed; then the other person writes.
-    await Bun.sleep(AGENT_TICK_MS + 500)
+    await wait(AGENT_TICK_MS + 500)
     await otherChatWrites(s)
     s.write('a1', userText('u2', Date.now(), 'Resume'))
     s.begin('a1', 'Resumed job')
@@ -101,11 +102,11 @@ describe.skipIf(process.platform !== 'linux')('a failure read from the transcrip
     s.begin('a1', 'Long job')
     s.write('a1', userText('u1', Date.now(), 'Long job'))
     const sent = await s.next(t => row(t, 1).startsWith('1. ⏳'))
-    await Bun.sleep(Math.max(0, sent.at + CHAT_GAP_MS + 500 - Date.now()))
+    await wait(Math.max(0, sent.at + CHAT_GAP_MS + 500 - Date.now()))
     s.write('a1', apiError('e1', Date.now(), 'overloaded'))
     const failed = await s.next(t => row(t, 1).startsWith('1. ❌'), sent.index + 1)
     // The next tick confirms the failure and ends the group.
-    await Bun.sleep(2 * AGENT_TICK_MS + 500)
+    await wait(2 * AGENT_TICK_MS + 500)
     expect(s.panels().slice(failed.index + 1)).toEqual([])
     s.stop('a1')
     const done = await s.next(t => row(t, 1).startsWith('1. ✅'), failed.index + 1)
@@ -119,11 +120,11 @@ describe.skipIf(process.platform !== 'linux')('a failure read from the transcrip
     s.begin('a1', 'Long job')
     s.write('a1', userText('u1', Date.now(), 'Long job'))
     const sent = await s.next(t => row(t, 1).startsWith('1. ⏳'))
-    await Bun.sleep(Math.max(0, sent.at + CHAT_GAP_MS + 500 - Date.now()))
+    await wait(Math.max(0, sent.at + CHAT_GAP_MS + 500 - Date.now()))
     s.write('a1', apiError('e1', Date.now(), 'overloaded'))
     const failed = await s.next(t => row(t, 1).startsWith('1. ❌'), sent.index + 1)
     // The next tick confirms the failure and ends the group.
-    await Bun.sleep(2 * AGENT_TICK_MS + 500)
+    await wait(2 * AGENT_TICK_MS + 500)
     s.begin('a2', 'Second job')
     const second = await s.next(t => row(t, 1).includes('Second job'), failed.index + 1)
     expect(second.method).toBe('sendMessage')
@@ -145,14 +146,14 @@ describe.skipIf(process.platform !== 'linux')('a failure read from the transcrip
     s.begin('a1', 'Long job')
     s.write('a1', userText('u1', Date.now(), 'Long job'))
     const sent = await s.next(t => row(t, 1).startsWith('1. ⏳'))
-    await Bun.sleep(Math.max(0, sent.at + CHAT_GAP_MS + 500 - Date.now()))
+    await wait(Math.max(0, sent.at + CHAT_GAP_MS + 500 - Date.now()))
     s.write('a1', apiError('e1', Date.now(), 'overloaded'))
     const failed = await s.next(t => row(t, 1).startsWith('1. ❌'), sent.index + 1)
     // About 400 KB of request records, before the next tick: the tail holds
     // no whole user or assistant entry.
     s.write('a1', ...Array.from({ length: 5 }, () => requestBlob(80 * 1024)))
     // Two ticks: one reads that tail, the next finds the file unchanged.
-    await Bun.sleep(2 * AGENT_TICK_MS + 500)
+    await wait(2 * AGENT_TICK_MS + 500)
     s.write('a1', assistantText('t1', Date.now(), 'The answer'))
     const again = await s.next(t => row(t, 1).startsWith('1. ⏳'), failed.index + 1)
     expect(again.method).toBe('editMessageText')

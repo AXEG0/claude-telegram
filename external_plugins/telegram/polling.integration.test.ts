@@ -1,8 +1,8 @@
-import { afterEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { spawn } from 'child_process'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'fs'
 import { join } from 'path'
-import { asSeconds, calls, children, cleanup, CONFLICT, conflicts, deliver, pollGaps, start, state, until } from './fixtures/harness.ts'
+import { asSeconds, calls, children, cleanup, CONFLICT, conflicts, deliver, driveClock, pollGaps, stamp, start, state, until, wait } from './fixtures/harness.ts'
 import fixture from './fixtures/channel-argv.json'
 import { AGENT_TICK_MS, appendAgentEvent, agentEventFile } from './agents.ts'
 import { appendPermit, permitDetail, permitFile, permitText, type PermitEvent } from './permit.ts'
@@ -11,6 +11,7 @@ import { NO_ASKS } from './asks.ts'
 import { REFRESH_MS } from './typing.ts'
 import { API_CONSTANTS } from 'grammy'
 
+beforeEach(driveClock)
 afterEach(cleanup)
 
 // Real /proc ancestry, real MCP transport, and the production server. Only
@@ -25,7 +26,7 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     appendPermit(permitFile(dir, channel.child.pid!), ev)
     const notices = () => calls(dir).filter(c => c.method === 'sendMessage' && c.payload.text === permitText(ev))
     await until(() => notices().length > 0)
-    await Bun.sleep(1500)
+    await wait(1500)
     expect(notices()).toHaveLength(1)
     expect(notices()[0]!.payload.chat_id).toBe('1')
     expect(calls(dir).filter(c => c.method === 'sendMessage' && c.payload.chat_id !== '1')).toEqual([])
@@ -53,7 +54,7 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     await until(() => channel.stderr().includes('polling as @test_bot'))
     expect(channel.stderr()).toContain(`TELEGRAM_ALERT_CHAT is not set; ${NO_OWNER}`)
     appendPermit(permitFile(dir, channel.child.pid!), { t: Date.now(), event: 'allowed', tool_name: 'Bash', description: 'Push job archive to rental' })
-    await Bun.sleep(2500)
+    await wait(2500)
     expect(calls(dir).some(c => c.method === 'sendMessage')).toBe(false)
     await channel.close()
   }, 15000)
@@ -63,7 +64,7 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     const sender = start(dir, ['claude', '-p', 'hello'])
     await sender.ready()
     appendPermit(permitFile(dir, sender.child.pid!), { t: Date.now(), event: 'allowed', tool_name: 'Bash', description: 'Push job archive to rental' })
-    await Bun.sleep(2500)
+    await wait(2500)
     expect(calls(dir).some(c => c.method === 'sendMessage')).toBe(false)
     await sender.close()
   }, 15000)
@@ -170,11 +171,12 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     const idleAt = Date.now()
     expect(idleAt - begin).toBeGreaterThanOrEqual(6000)
     expect(alerts()[0]!.payload.text).toBe(idleText(6000))
-    // A file's mtime comes from the kernel's coarse clock, which can trail
-    // Date.now() by a few milliseconds; the mark must land after the alert.
-    await Bun.sleep(50)
+    // The mark comes after the alert and carries the time on the test's
+    // clock, as the busy hook's touch would at that moment.
+    await wait(50)
     mkdirSync(join(dir, 'turns'), { recursive: true })
     writeFileSync(join(dir, 'turns', `busy-${channel.child.pid}`), '')
+    stamp(join(dir, 'turns', `busy-${channel.child.pid}`))
     await until(() => alerts().length > 1, 2 * REFRESH_MS + 4000)
     expect(alerts().map(c => c.payload.text)).toEqual([idleText(6000), RECOVERED_TEXT])
     expect(calls(dir).filter(c => c.method === 'sendMessage' && c.payload.chat_id !== '77')).toEqual([])
@@ -185,7 +187,7 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     const dir = state()
     const sender = start(dir, ['claude', 'mcp', 'list'], { TELEGRAM_ALERT_CHAT: '77', TELEGRAM_ALERT_IDLE_MINUTES: '0.01' })
     await sender.ready()
-    await Bun.sleep(600 + 2 * REFRESH_MS)
+    await wait(600 + 2 * REFRESH_MS)
     expect(calls(dir)).toEqual([])
     expect(sender.child.exitCode).toBeNull()
     await sender.close()
@@ -255,7 +257,7 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     mkdirSync(join(dir, 'turns'), { recursive: true })
     writeFileSync(join(dir, 'turns', `pid-${channel.child.pid}`), String(Date.now()))
     await until(() => notices().some(c => c.payload.text === RECOVERED_TEXT), 2 * REFRESH_MS + 4000)
-    await Bun.sleep(REFRESH_MS + 500)
+    await wait(REFRESH_MS + 500)
     expect(notices().map(c => c.payload.text)).toEqual([stuckText(600), RECOVERED_TEXT])
     expect(calls(dir).filter(c => c.method === 'sendMessage' && c.payload.chat_id !== '1')).toEqual([])
     await channel.close()
@@ -413,7 +415,7 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     channel.notify('notifications/claude/channel/permission_request', ASK)
     const asks = () => calls(dir).filter(c => c.method === 'sendMessage' && c.payload.text === ASK_TEXT)
     await until(() => asks().length > 0)
-    await Bun.sleep(500)
+    await wait(500)
     expect(asks().map(c => c.payload.chat_id)).toEqual(['1'])
     expect(asks()[0]!.payload.reply_markup).toEqual({ inline_keyboard: [[
       { text: 'See more', callback_data: 'perm:more:abcde' },
@@ -463,7 +465,7 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     await until(() => channel.stderr().includes('polling as @test_bot'))
     expect(channel.stderr()).toContain(warning)
     channel.notify('notifications/claude/channel/permission_request', ASK)
-    await Bun.sleep(500)
+    await wait(500)
     writeFileSync(join(dir, 'inbound.json'), updates(
       tap('cb1', OWNER, 'perm:allow:abcde'),
       tap('cb2', PERSON, 'perm:more:abcde'),
@@ -623,7 +625,7 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
   // Waits for the first event, then long enough for any other to show.
   async function settled(channel: ReturnType<typeof start>) {
     await until(() => channel.inbound().length > 0, 6000)
-    await Bun.sleep(500)
+    await wait(500)
     return channel.inbound()
   }
 
@@ -682,7 +684,7 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
       react(OWNER, DM, 11, [], ['🔥']),
     ))
     await until(() => channel.inbound().length === 2, 6000)
-    await Bun.sleep(500)
+    await wait(500)
     expect(channel.inbound().map(n => [n.meta.message_id, n.meta.reaction ?? n.content])).toEqual([['10', 'ship it'], ['11', '🔥']])
     await channel.close()
   }, 15000)
@@ -1195,7 +1197,7 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
       tap('cb2', SUB, 'permit:p1'),
     ))
     await until(() => calls(dir).filter(c => c.method === 'answerCallbackQuery').length === 2, 6000)
-    await Bun.sleep(500)
+    await wait(500)
     expect(callbackAnswers(dir)).toEqual({ cb1: 'Not authorized.', cb2: 'Not authorized.' })
     expect(channel.inbound()).toEqual([])
     expect(answers(channel)).toEqual([])
@@ -1229,7 +1231,7 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     const channel = start(dir, fixture.argv)
     await channel.ready()
     await until(() => channel.inbound().length === 5, 6000)
-    await Bun.sleep(500)
+    await wait(500)
     expect(channel.inbound().map(n => n.meta.chat_id).sort()).toEqual(['-300', '-400', '-500', '-600', '1'])
     await channel.close()
   }, 15000)

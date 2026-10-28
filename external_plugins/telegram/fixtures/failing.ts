@@ -6,7 +6,7 @@ import { join } from 'path'
 import { failureFiles, failureText, RESTORED_TEXT, type FailureRecord, type RunState } from '../failures.ts'
 import { REFRESH_MS } from '../typing.ts'
 import fixture from './channel-argv.json'
-import { calls, start, state } from './harness.ts'
+import { calls, start, state, until, wait } from './harness.ts'
 import { runRegistered } from './hooks.ts'
 import turnHooks from './turn-hooks.json'
 import { append, CREDITS, restamp, type Line } from './turns.ts'
@@ -60,16 +60,18 @@ export function session(dir: string, channel: ReturnType<typeof start>) {
     records: (pid = channel.child.pid) => readFileSync(failureFiles(dir, [pid!])[0]!, 'utf8').trim().split('\n').map(l => JSON.parse(l) as FailureRecord),
     texts: (chat: string) => sent().filter(c => c.payload.chat_id === chat).map(c => c.payload.text as string),
     // The chat's messages once it has taken `count`, or at the timeout; an
-    // error reading them ends the test with that error.
+    // error reading them ends the test with that error. The check holds the
+    // limit itself, so `until` returns at it, and throws only when no server
+    // is left to move the test's clock.
     async arrived(chat: string, count: number, timeout = COMES_MS) {
       const end = Date.now() + timeout
-      while (s.texts(chat).length < count && Date.now() < end) await Bun.sleep(10)
+      await until(() => s.texts(chat).length >= count || Date.now() >= end, timeout)
       return s.texts(chat)
     },
     // The same, once a tick more has passed.
     async settled(chat: string, count: number, timeout = COMES_MS) {
       await s.arrived(chat, count, timeout)
-      await Bun.sleep(QUIET_MS)
+      await wait(QUIET_MS)
       return s.texts(chat)
     },
   }

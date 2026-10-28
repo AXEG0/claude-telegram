@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, jest, test } from 'bun:test'
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -335,6 +335,28 @@ function harness(opts: { start: number; bots?: string[]; owner?: string; lookup?
   return h
 }
 
+// A call that waits on its timeout under Bun's fake timers: the clock moves
+// 50 ms at a time until the call settles.
+async function settled<T>(call: Promise<T>, limit = 60_000): Promise<T> {
+  let done = false
+  call.then(() => { done = true }, () => { done = true })
+  for (let spent = 0; !done && spent < limit; spent += 50) await moved(50)
+  return call
+}
+// Moves the fake clock ms on from timer to timer, so each timer fires at its
+// own due time and the work it starts runs before the next, as the server's
+// clock does (fixtures/clock.ts).
+async function moved(ms: number): Promise<void> {
+  const to = Date.now() + ms
+  const stop = setTimeout(() => {}, ms)
+  while (Date.now() < to) {
+    jest.advanceTimersToNextTimer()
+    for (let i = 0; i < 3; i++) await new Promise<void>(resolve => setImmediate(resolve))
+  }
+  clearTimeout(stop)
+}
+afterEach(() => { if (jest.isFakeTimers()) jest.useRealTimers() })
+
 const merged = recorded('merged-starts')
 // Before every recorded transcript, so a fresh watch reads all their records.
 const START = Date.parse('2026-10-27T13:00:00.000Z')
@@ -552,6 +574,7 @@ describe('the run', () => {
   })
 
   test('a lookup that gets no answer goes again with twice the time, as a send does', async () => {
+    jest.useFakeTimers()
     // Telegram answers chat 2's lookups after 12 s.
     const began: number[] = []
     const lookup = (chat: string, signal: AbortSignal) => chat !== '2' ? Promise.resolve(false) : new Promise<boolean>((resolve, reject) => {
@@ -562,15 +585,16 @@ describe('the run', () => {
     const h = harness({ start: START, owner: '1', lookup })
     h.now = FAIL.t
     h.fail(FAIL)
-    await h.tick(TICK_MS)
+    await settled(h.tick(TICK_MS))
     expect(h.delivered).toEqual([])
-    await h.tick(TICK_MS)
+    await settled(h.tick(TICK_MS))
     expect(began.length).toBe(2)
     expect(began[1]! - began[0]!).toBeGreaterThanOrEqual(FIRST_TIMEOUT_MS - 100)
     expect(h.delivered.map(d => d.chat)).toEqual(['2', '3'])
   }, 30_000)
 
   test('a lookup that hangs ends with the record\'s 30 s, and its chat is told in the owner chat then', async () => {
+    jest.useFakeTimers()
     // How long each of chat 2's lookups ran before its timeout ended it.
     const ran: number[] = []
     const lookup = (chat: string, signal: AbortSignal) => chat !== '2' ? Promise.resolve(false) : new Promise<boolean>((_, reject) => {
@@ -580,16 +604,16 @@ describe('the run', () => {
     const h = harness({ start: START, owner: '1', lookup })
     h.now = FAIL.t
     h.fail(FAIL)
-    await h.tick(TICK_MS)
+    await settled(h.tick(TICK_MS))
     expect(ran).toHaveLength(1)
     expect(ran[0]!).toBeGreaterThanOrEqual(FIRST_TIMEOUT_MS - 100)
     // 28 s into the record's 30: the next lookup gets the 2 s left, not 16 s.
-    await h.tick(PENDING_MS - 2000)
+    await settled(h.tick(PENDING_MS - 2000))
     expect(ran).toHaveLength(2)
     expect(ran[1]!).toBeLessThan(3000)
     expect(h.delivered).toEqual([])
     // Past the 30 s, the owner chat is told without another lookup.
-    await h.tick(TICK_MS)
+    await settled(h.tick(TICK_MS))
     expect(ran).toHaveLength(2)
     expect(h.delivered.map(d => d.chat).sort()).toEqual(['1', '3'])
     expect(h.state().reasons.map(r => r.reason)).toEqual([expect.stringMatching(/; the notice for chat 2 goes to the owner chat$/)])
@@ -869,34 +893,36 @@ describe('the sends', () => {
   })
 
   test('a send that hangs is one request while ticks skip the step; at its timeout it counts as lost and goes again after the wait', async () => {
+    jest.useFakeTimers()
     const h = harness({ start: START })
     h.answer('2', 'hang')
     h.now = FAIL.t
     h.fail(FAIL)
     const began = Date.now()
     void h.tick(TICK_MS)
-    // Ticks, 100 ms apart on the real clock, while the send hangs.
-    while (Date.now() - began < FIRST_TIMEOUT_MS - 500) { await Bun.sleep(100); void h.watch.tick() }
+    // Ticks, 100 ms apart on the timers' clock, while the send hangs.
+    while (Date.now() - began < FIRST_TIMEOUT_MS - 500) { await moved(100); void h.watch.tick() }
     expect(h.requests.map(r => r.chat)).toEqual(['2'])
-    while (!h.state().run!.notified.find(n => n.chat === '2')!.sent) await Bun.sleep(50)
+    while (!h.state().run!.notified.find(n => n.chat === '2')!.sent) await moved(50)
     expect(Date.now() - began).toBeGreaterThanOrEqual(FIRST_TIMEOUT_MS - 100)
     expect(h.state().run!.notified.find(n => n.chat === '2')!.sent).toBe('retry: no answer in 8 s')
     await h.watch.tick()
     expect(h.texts('3')).toEqual([NOTICE])
     expect(h.requests.filter(r => r.chat === '2').length).toBe(1)
-    await h.tick(TICK_MS)
+    await settled(h.tick(TICK_MS))
     expect(h.requests.filter(r => r.chat === '2').length).toBe(2)
     expect(h.texts('2')).toEqual([NOTICE])
   }, 20_000)
 
   test('a Telegram that takes the notice but answers after 12 s is confirmed by the second try, which waits 16 s', async () => {
+    jest.useFakeTimers()
     const h = harness({ start: START })
     h.answer('2', { slowMs: 12_000 }, { slowMs: 12_000 })
     h.now = FAIL.t
     h.fail(FAIL)
-    await h.tick(TICK_MS)
+    await settled(h.tick(TICK_MS))
     expect(h.state().run!.notified.find(n => n.chat === '2')!.sent).toBe('retry: no answer in 8 s')
-    await h.tick(TICK_MS)
+    await settled(h.tick(TICK_MS))
     expect(h.state().run!.notified.find(n => n.chat === '2')!.sent).toBe(true)
     expect(h.texts('2')).toEqual([NOTICE, NOTICE])
   }, 30_000)

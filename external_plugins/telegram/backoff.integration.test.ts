@@ -1,7 +1,8 @@
-import { afterEach, describe, expect, test } from 'bun:test'
-import { asSeconds, CONFLICT, cleanup, conflicts, deliver, pollGaps, start, state, until } from './fixtures/harness.ts'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { asSeconds, cleanup, CONFLICT, conflicts, deliver, driveClock, pollGaps, start, state, until, wait } from './fixtures/harness.ts'
 import fixture from './fixtures/channel-argv.json'
 
+beforeEach(driveClock)
 afterEach(cleanup)
 
 // The longest wait in the suite, alone in its file so that a run with

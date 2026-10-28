@@ -1,16 +1,17 @@
 // A subagent whose run ends on an API error, read from its own transcript or
 // from the StopFailure hook, in the running server with the offline Telegram
 // fake.
-import { afterEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { AGENT_TICK_MS } from './agents.ts'
 import failureHooks from './fixtures/failure-hooks.json'
-import { cleanup } from './fixtures/harness.ts'
+import { cleanup, driveClock, wait } from './fixtures/harness.ts'
 import { runRegistered } from './fixtures/hooks.ts'
 import { row, session, type Session } from './fixtures/session.ts'
 import { apiError, interruption, line, toolCall, userText } from './fixtures/transcript.ts'
 
+beforeEach(driveClock)
 afterEach(cleanup)
 
 // The registered hooks' subagent, its files in Claude Code's own layout: the
@@ -93,7 +94,7 @@ describe.skipIf(process.platform !== 'linux')('a subagent that ends on an API er
     const first = await s.next(t => row(t, 1).startsWith('1. ⏳'))
     // The earlier run's hook, late: it finds that run's error entry.
     expect(agent.fail()).toEqual([0, 0])
-    await Bun.sleep(2 * AGENT_TICK_MS + 500)
+    await wait(2 * AGENT_TICK_MS + 500)
     expect(s.panels().slice(first.index + 1).filter(c => row(c.payload.text, 1).startsWith('1. ❌'))).toEqual([])
     await s.channel.close()
     expect(row(s.panels().at(-1)!.payload.text, 1)).toMatch(/^1\. 🔌 No longer followed after \d+s · failing-probe · Say hello · last: /)
@@ -105,7 +106,7 @@ describe.skipIf(process.platform !== 'linux')('a subagent that ends on an API er
     s.write('a1', userText('u1', Date.now(), 'Long job'))
     const first = await s.next(t => row(t, 1).startsWith('1. ⏳'))
     s.write('a1', interruption('i1', Date.now(), true))
-    await Bun.sleep(2 * AGENT_TICK_MS + 500)
+    await wait(2 * AGENT_TICK_MS + 500)
     expect(s.panels().slice(first.index + 1).filter(c => c.payload.text.includes('⏹'))).toEqual([])
     await s.channel.close()
     expect(row(s.panels().at(-1)!.payload.text, 1)).toMatch(/^1\. 🔌 No longer followed after \d+s · general-purpose · Long job · last: /)

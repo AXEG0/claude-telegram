@@ -1,12 +1,13 @@
 // A row its own transcript closed, which a newer entry opens again, and what
 // leaves such a row as it is, in the running server with the offline Telegram
 // fake.
-import { afterEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { AGENT_TICK_MS, CHAT_GAP_MS } from './agents.ts'
-import { cleanup, conflicts } from './fixtures/harness.ts'
+import { cleanup, conflicts, driveClock, wait } from './fixtures/harness.ts'
 import { row, session } from './fixtures/session.ts'
 import { apiError, attachment, requestBlob, userText } from './fixtures/transcript.ts'
 
+beforeEach(driveClock)
 afterEach(cleanup)
 
 const isSend = (c: { method: string }) => c.method === 'sendMessage'
@@ -37,7 +38,7 @@ describe.skipIf(process.platform !== 'linux')('a row its transcript closed', () 
     s.write('a1', apiError('e1', Date.now(), 'overloaded'))
     const failed = await s.next(t => row(t, 1).startsWith('1. ❌'), sent.index + 1)
     // The failure is acknowledged and confirmed before the run goes on.
-    await Bun.sleep(AGENT_TICK_MS + 500)
+    await wait(AGENT_TICK_MS + 500)
     s.write('a1', userText('u2', Date.now(), 'Continue'))
     const again = await s.next(t => row(t, 1).startsWith('1. ⏳'), failed.index + 1)
     expect(again.payload.message_id).toBe(sent.message_id)
@@ -74,7 +75,7 @@ describe.skipIf(process.platform !== 'linux')('a row its transcript closed', () 
     const sent = await s.next(t => row(t, 2).startsWith('2. ⏳'))
     s.write('a1', apiError('e1', Date.now(), 'overloaded'))
     const failed = await s.next(t => row(t, 1).startsWith('1. ❌'), sent.index + 1)
-    await Bun.sleep(500)
+    await wait(500)
     // A hook that ran late stamps its own clock, past the resumed run's start.
     s.stop('a1', Date.now() + 20_000, { outcome: 'failed', error: 'server_error' })
     const final = await s.next(t => row(t, 1).includes('(server_error)'), failed.index + 1)
@@ -82,7 +83,7 @@ describe.skipIf(process.platform !== 'linux')('a row its transcript closed', () 
     s.begin('a1', 'Resumed job')
     const resumed = await s.next(t => row(t, 1).includes('Resumed job'), final.index + 1)
     expect(row(resumed.payload.text, 1)).toMatch(/^1\. ⏳ general-purpose · Resumed job · /)
-    await Bun.sleep(AGENT_TICK_MS + 500)
+    await wait(AGENT_TICK_MS + 500)
     expect(s.panels().slice(resumed.index + 1).filter(c => row(c.payload.text, 1).startsWith('1. ❌'))).toEqual([])
   }, 30000)
 
@@ -93,7 +94,7 @@ describe.skipIf(process.platform !== 'linux')('a row its transcript closed', () 
     const sent = await s.next(t => row(t, 1).startsWith('1. ⏳'))
     // Past the chat's spacing, so the tick that reads the error also shows it,
     // and the next tick is the one that would confirm it.
-    await Bun.sleep(Math.max(0, sent.at + CHAT_GAP_MS + 500 - Date.now()))
+    await wait(Math.max(0, sent.at + CHAT_GAP_MS + 500 - Date.now()))
     s.write('a1', apiError('e1', Date.now(), 'overloaded'))
     const failed = await s.next(t => row(t, 1).startsWith('1. ❌'), sent.index + 1)
     // The nudge Claude Code sends after a cut refusal, before the next tick.
@@ -141,7 +142,7 @@ describe.skipIf(process.platform !== 'linux')('a row its transcript closed', () 
     s.write('a1', apiError('e1', Date.now(), 'overloaded'))
     const failed = await s.next(t => row(t, 1).startsWith('1. ❌'), sent.index + 1)
     tail(s)
-    await Bun.sleep(2 * AGENT_TICK_MS + 500)
+    await wait(2 * AGENT_TICK_MS + 500)
     expect(s.panels().slice(failed.index + 1).filter(c => c.payload.text.includes('⏳'))).toEqual([])
     expect(s.panels().filter(isSend)).toHaveLength(1)
   }

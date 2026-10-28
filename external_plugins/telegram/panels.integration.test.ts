@@ -1,16 +1,17 @@
 // The record of each open subagents message, and the polling server closing
 // the messages of a server that is gone, in the running server with the
 // offline Telegram fake.
-import { afterEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { AGENT_TICK_MS, CHAT_GAP_MS } from './agents.ts'
 import { flock, LOCK_EX, LOCK_NB } from './buttons.ts'
 import fixture from './fixtures/channel-argv.json'
-import { calls, cleanup, conflicts, start, state, until, type Call } from './fixtures/harness.ts'
+import { calls, cleanup, conflicts, driveClock, start, state, until, wait, type Call } from './fixtures/harness.ts'
 import { row, session, WAIT_MS } from './fixtures/session.ts'
 import { toolCall } from './fixtures/transcript.ts'
 
+beforeEach(driveClock)
 afterEach(cleanup)
 
 type Stored = { file: string; chat: string; message: number; text: string; writer: string }
@@ -213,7 +214,7 @@ describe.skipIf(process.platform !== 'linux')('the polling server\'s sweep', () 
     await nextServer(dir)
     await swept(dir, { message: 202, text: '🤖 Subagents\n1. 🔌 dead writer' })
     await until(() => !existsSync(dead) && !existsSync(lockFile(dir, W(2))))
-    await Bun.sleep(AGENT_TICK_MS + 500)
+    await wait(AGENT_TICK_MS + 500)
     expect(existsSync(live)).toBe(true)
     expect(existsSync(lockFile(dir, W(1)))).toBe(true)
     expect(edits(dir, 201)).toEqual([])
@@ -259,7 +260,7 @@ describe.skipIf(process.platform !== 'linux')('the polling server\'s sweep', () 
     await nextServer(dir, conflicts([{ method: 'editMessageText', times: 1,
       error: { error_code: 429, description: 'Too Many Requests: retry after 1', parameters: { retry_after: 1 } } }]))
     await until(() => edits(dir, 501).some(c => c.refused), WAIT_MS)
-    await Bun.sleep(200)
+    await wait(200)
     expect(existsSync(file)).toBe(true)
     expect(existsSync(lockFile(dir, W(6)))).toBe(true)
     await until(() => edits(dir, 501).some(c => !c.refused), WAIT_MS)
@@ -274,14 +275,22 @@ describe.skipIf(process.platform !== 'linux')('the polling server\'s sweep', () 
     // A server that died left a record in the same chat, after the live
     // message went out; the live message wants an edit on each tick.
     plant(dir, W(7), 601, '🤖 Subagents\n1. 🔌 swept', { lock: true })
+    // A tool call each second, on the test's clock.
     let step = 0
-    const steps = setInterval(() => s.write('a1', toolCall(`c${++step}`, Date.now(), `Step ${step}`, 100 + step)), 1000)
+    let stepping = true
+    const steps = (async () => {
+      while (stepping) {
+        await wait(1000)
+        if (stepping) s.write('a1', toolCall(`c${++step}`, Date.now(), `Step ${step}`, 100 + step))
+      }
+    })()
     try {
       await until(() => edits(dir, 601).length === 1, 4 * AGENT_TICK_MS)
       const sweptAt = edits(dir, 601)[0]!.at
       await until(() => s.panels().some(c => c.at > sweptAt && c.payload.message_id !== 601), 4 * AGENT_TICK_MS)
     } finally {
-      clearInterval(steps)
+      stepping = false
+      await steps
     }
     const chat = calls(dir).filter(c => (c.method === 'sendMessage' || c.method === 'editMessageText') && c.payload.chat_id === '1')
     expect(chat.length).toBeGreaterThan(2)
@@ -296,8 +305,11 @@ describe.skipIf(process.platform !== 'linux')('the polling server\'s sweep', () 
     await until(() => edits(dir, 701).length === 1, WAIT_MS)
     // The sweep holds the lock while Telegram holds its answer.
     const waiter = Bun.spawn([process.execPath, join(import.meta.dir, 'fixtures', 'lock-waiter.ts'), lockFile(dir, W(8))], { stdout: 'pipe' })
-    const out = await Promise.race([new Response(waiter.stdout).text(), Bun.sleep(5000).then(() => 'timed out')])
+    // The sweep lets go once its held answer comes, on the test's clock.
+    let out: string | undefined
+    void new Response(waiter.stdout).text().then(text => { out = text })
+    await until(() => out !== undefined, 5000).catch(() => {})
     waiter.kill()
-    expect(JSON.parse(out)).toEqual({ granted: true, exists: false })
+    expect(JSON.parse(out ?? '"timed out"')).toEqual({ granted: true, exists: false })
   }, 30000)
 })

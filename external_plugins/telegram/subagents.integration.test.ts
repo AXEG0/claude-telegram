@@ -1,13 +1,14 @@
-import { afterEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
-import { calls, cleanup, conflicts, start, state, until, type Call } from './fixtures/harness.ts'
+import { calls, cleanup, conflicts, driveClock, start, state, until, wait, type Call } from './fixtures/harness.ts'
 import { runRegistered } from './fixtures/hooks.ts'
 import fixture from './fixtures/channel-argv.json'
 import failureHooks from './fixtures/failure-hooks.json'
 import { AGENT_TICK_MS, appendAgentEvent, agentEventFile, CHAT_GAP_MS } from './agents.ts'
 import { REFRESH_MS } from './typing.ts'
 
+beforeEach(driveClock)
 afterEach(cleanup)
 
 // The owner's message, which makes the owner's chat the one the subagents
@@ -132,7 +133,7 @@ describe.skipIf(process.platform !== 'linux')('the subagents message in the runn
       const send = calls(dir).find(panelSend)!
       expect(send.payload.text).toMatch(/^🤖 Subagents\n1\. ⏳ failing-probe · Say hello · Starting… · \d+s$/)
       // Past the chat's spacing, so only the stream's refresh can hold the edit.
-      await Bun.sleep(Math.max(0, send.at + CHAT_GAP_MS - Date.now()))
+      await wait(Math.max(0, send.at + CHAT_GAP_MS - Date.now()))
       expect(runRegistered('StopFailure', { ...failure, transcript_path: transcript }, env)).toEqual([0, 0])
       const failedAt = Date.now()
       await until(() => calls(dir).some(panelEdit), AGENT_TICK_MS + 4000)
@@ -157,7 +158,7 @@ describe.skipIf(process.platform !== 'linux')('the subagents message in the runn
     await until(() => typing().some(c => c.at > failedAt + REFRESH_MS), 2 * REFRESH_MS + 2000)
     expect(runRegistered('StopFailure', failureHooks.main_stop_failure, env)).toEqual([0, 0])
     const endedAt = Date.now()
-    await Bun.sleep(2 * REFRESH_MS)
+    await wait(2 * REFRESH_MS)
     expect(typing().filter(c => c.at > endedAt + 100)).toEqual([])
     await channel.close()
   }, 30000)

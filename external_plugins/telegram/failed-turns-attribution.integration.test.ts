@@ -1,10 +1,11 @@
 // Which chats a failed turn's notice goes to, read from the recorded session
 // transcripts, in the running server with the offline Telegram fake.
-import { afterEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { CREDITS, failing, notice, NOTHING_MS, QUIET_MS, RESTORED_TEXT } from './fixtures/failing.ts'
-import { cleanup } from './fixtures/harness.ts'
+import { cleanup, driveClock, wait } from './fixtures/harness.ts'
 import { apiError, prompt, recorded, reply, upTo } from './fixtures/turns.ts'
 
+beforeEach(driveClock)
 afterEach(cleanup)
 
 describe.skipIf(process.platform !== 'linux')('the chats a failed turn tells', () => {
@@ -72,7 +73,7 @@ describe.skipIf(process.platform !== 'linux')('the chats a failed turn tells', (
     // Chat 2's next turn fails too.
     s.write(prompt('p2', Date.now() - 500, '2', 3), apiError('e2', Date.now() - 50, CREDITS))
     expect(s.fail()).toEqual([0, 0])
-    await Bun.sleep(NOTHING_MS)
+    await wait(NOTHING_MS)
     expect(s.texts('2')).toEqual([notice()])
     expect(s.texts('3')).toEqual([notice()])
     // A clean turn of chat 2's.
@@ -80,7 +81,7 @@ describe.skipIf(process.platform !== 'linux')('the chats a failed turn tells', (
     expect(s.stop('OK-later')).toEqual([0])
     expect(await s.arrived('2', 2)).toEqual([notice(), RESTORED_TEXT])
     expect(await s.settled('3', 2)).toEqual([notice(), RESTORED_TEXT])
-    await Bun.sleep(QUIET_MS)
+    await wait(QUIET_MS)
     expect(s.texts('2')).toEqual([notice(), RESTORED_TEXT])
     await s.channel.close()
   }, 60000)
