@@ -107,6 +107,32 @@ export function hookClaudePid(env: NodeJS.ProcessEnv = process.env): number | un
   return Number(env.CLAUDE_PID) || ancestorPids(process.ppid, 1)[0]
 }
 
+// The events hooks.json runs each marking hook on.
+export const TURN_END_EVENTS = ['Stop', 'StopFailure', 'SessionEnd'] as const
+export const BUSY_EVENTS = ['PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'UserPromptSubmit'] as const
+
+// Its other fields stay unchecked, for each hook to read as it needs.
+export type HookInput<E extends string> = { hook_event_name: E; session_id: string; [field: string]: unknown }
+
+// What a marking hook acts on: a JSON object that names one of the hook's own
+// events exactly and carries a non-empty text session_id, as every input
+// Claude Code sends does. Any shell started inside a session inherits its
+// CLAUDE_PID, so a hook script run there by hand would mark that session's
+// turn; given nothing, text, or JSON without its own event or such a session,
+// the hook now writes nothing. An object of that shape, built by hand or
+// copied, still marks, as a real hook would.
+export function hookInput<E extends string>(raw: string, events: readonly E[]): HookInput<E> | undefined {
+  let input: { hook_event_name?: unknown; session_id?: unknown } | null
+  try {
+    input = JSON.parse(raw)
+  } catch {
+    return undefined
+  }
+  if (!events.includes(input?.hook_event_name as E)) return undefined
+  if (typeof input?.session_id !== 'string' || !input.session_id) return undefined
+  return input as HookInput<E>
+}
+
 export type Typing = {
   start(chatId: string): void
   tick(): void
