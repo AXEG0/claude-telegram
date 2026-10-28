@@ -27,7 +27,7 @@ import { ancestorPids, busyFiles, createTyping, markerFiles, readBusyAt, readTur
 import { STT_KINDS, sttConfig, transcribeTelegramFile } from './stt.ts'
 import { AGENT_TICK_MS, agentEventFile, CHAT_GAP_MS, CLOSING_EDIT_MS, createAgentStream, createEventReader } from './agents.ts'
 import { createPanelStore } from './panels.ts'
-import { editRichParsed, RICH_FORMAT_HELP, RICH_INSTRUCTIONS, richEditParse, richEnabled, sendRich, type RawApi } from './rich.ts'
+import { editRichParsed, formatOf, formatSchema, RICH_INSTRUCTIONS, richEditParse, richEnabled, sendRich, type RawApi } from './rich.ts'
 import { replyMeta, richText } from './reply.ts'
 import { heartbeatTransformer } from './heartbeat.ts'
 import { batchGap, createBatcher } from './batch.ts'
@@ -720,11 +720,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
             items: { type: 'string' },
             description: 'Absolute file paths to attach. Images send as photos (inline preview); other types as documents. Max 50MB each.',
           },
-          format: {
-            type: 'string',
-            enum: RICH ? ['rich', 'text', 'markdownv2'] : ['text', 'markdownv2'],
-            description: RICH ? RICH_FORMAT_HELP : "Rendering mode. 'markdownv2' enables Telegram formatting (bold, italic, code, links). Caller must escape special chars per MarkdownV2 rules. Default: 'text' (plain, no escaping needed).",
-          },
+          format: formatSchema(RICH),
           buttons: {
             type: 'array',
             items: { type: 'array', items: { type: 'string' } },
@@ -767,11 +763,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           chat_id: { type: 'string' },
           message_id: { type: 'string' },
           text: { type: 'string' },
-          format: {
-            type: 'string',
-            enum: RICH ? ['rich', 'text', 'markdownv2'] : ['text', 'markdownv2'],
-            description: RICH ? RICH_FORMAT_HELP : "Rendering mode. 'markdownv2' enables Telegram formatting (bold, italic, code, links). Caller must escape special chars per MarkdownV2 rules. Default: 'text' (plain, no escaping needed).",
-          },
+          format: formatSchema(RICH),
           buttons: {
             type: 'array',
             items: { type: 'array', items: { type: 'string' } },
@@ -997,11 +989,13 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
   try {
     switch (req.params.name) {
       case 'reply': {
+        // A format outside the list is refused before anything is looked
+        // up, reserved or sent. See rich.ts.
+        const format = formatOf(args.format, RICH, 'nothing was sent')
         const chat_id = args.chat_id as string
         const text = args.text as string
         const reply_to = args.reply_to != null ? Number(args.reply_to) : undefined
         const files = (args.files as string[] | undefined) ?? []
-        const format = (args.format as string | undefined) ?? (RICH ? 'rich' : 'text')
         const rows = args.buttons !== undefined ? parseButtons(args.buttons, false) : undefined
         if (rows) assertPressesReachHere()
 
@@ -1167,6 +1161,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         return { content: [{ type: 'text', text: path }] }
       }
       case 'edit_message': {
+        // Refused like reply's, a buttons-only edit's included.
+        const format = formatOf(args.format, RICH, 'nothing was edited')
         const chat_id = args.chat_id as string
         const message_id = Number(args.message_id)
         const text = args.text as string | undefined
@@ -1184,7 +1180,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           return { content: [{ type: 'text', text: `edited (id: ${args.message_id})` }] }
         }
         // An edit in a bot's chat goes plain, like a reply. See bots.ts.
-        const editFormat = sendStyle((args.format as string | undefined) ?? (RICH ? 'rich' : 'text'), toBot)
+        const editFormat = sendStyle(format, toBot)
         // The rich parse runs before the lock is taken.
         const richEdit = RICH && editFormat === 'rich'
         const parsed = richEdit ? await richEditParse(text) : undefined

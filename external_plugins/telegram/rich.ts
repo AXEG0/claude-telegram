@@ -32,8 +32,32 @@ export const RICH_INSTRUCTIONS =
   'Rich messages: replies and edits render GitHub Markdown: headings, tables (inline formatting, up to 20 columns), task lists, code, ' +
   '<details><summary>…</summary>…</details>, ==marked==, ||spoiler||. A literal == or || goes in backticks. Math only as <tg-math>…</tg-math>; a $ stays a dollar sign.'
 
-export const RICH_FORMAT_HELP =
+const RICH_FORMAT_HELP =
   "Rendering mode. 'rich' (the default) sends GitHub Markdown as a Telegram rich message (tables, headings, details). 'text' is plain, no escaping needed. 'markdownv2' enables Telegram formatting (bold, italic, code, links); caller must escape special chars per MarkdownV2 rules."
+const PLAIN_FORMAT_HELP =
+  "Rendering mode. 'markdownv2' enables Telegram formatting (bold, italic, code, links). Caller must escape special chars per MarkdownV2 rules. Default: 'text' (plain, no escaping needed)."
+
+// The formats reply and edit_message take, with rich messages on or off. The
+// same list is the tools' schema and the check on each call, so a format the
+// schema does not list is refused, never sent as plain text.
+const formats = (rich: boolean): string[] => rich ? ['rich', 'text', 'markdownv2'] : ['text', 'markdownv2']
+
+// The format property of reply's and edit_message's schemas.
+export const formatSchema = (rich: boolean) => ({
+  type: 'string',
+  enum: formats(rich),
+  description: rich ? RICH_FORMAT_HELP : PLAIN_FORMAT_HELP,
+})
+
+// The format a call asked for: the default when it passes none, else its value
+// when the list holds it exactly. Any other value, null included, is refused,
+// naming the value, the list and what the call left undone.
+export function formatOf(value: unknown, rich: boolean, undone: string): string {
+  if (value === undefined) return rich ? 'rich' : 'text'
+  const list = formats(rich)
+  if (typeof value === 'string' && list.includes(value)) return value
+  throw new Error(`format ${JSON.stringify(value)} is not one of ${list.join(', ')}, so ${undone}. ${formatSchema(rich).description}`)
+}
 
 // The HTML tags a rich message renders (Bot API, Rich HTML style). Telegram
 // drops any other tag and keeps its content, so "Vec<String>" arrived as
