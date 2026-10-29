@@ -685,7 +685,8 @@ note transcribed. An older one gets a second line saying why it was not
 replayed. A message Telegram sends again that the file already holds from the
 last 24 hours is skipped. After a rare crash a message can arrive twice; it is
 never lost. Once the file passes 1 MiB, it is copied to `arrivals.jsonl.1`, and
-the file keeps only the messages still on their way. The file holds the messages' text, under
+the file keeps only the messages still on their way; the next copy waits until
+the file has grown by another 1 MiB. The file holds the messages' text, under
 the state directory's owner-only permissions. A failure to read or write it
 goes to stderr, and the message carries on to Claude.
 

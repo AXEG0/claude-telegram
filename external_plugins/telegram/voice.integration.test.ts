@@ -6,7 +6,8 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import fixture from './fixtures/channel-argv.json'
-import { calls, cleanup, CONFLICT, deliver, driveClock, EXIT_MS, start, state, until, wait, type Server } from './fixtures/harness.ts'
+import { calls, cleanup, CONFLICT, deliver, driveClock, EXIT_MS, start, state, STEP_MS, until, wait, type Server } from './fixtures/harness.ts'
+import { TEXT_GAP_MS } from './batch.ts'
 import { row, session } from './fixtures/session.ts'
 import { metaText } from './reply.ts'
 
@@ -79,6 +80,21 @@ async function kill(s: Server): Promise<void> {
   await until(() => s.exited(), 4000)
 }
 const polledBy = (dir: string, s: Server) => calls(dir).some(c => c.method === 'getUpdates' && c.pid === s.serverPid())
+// The updates whose newest line in the record is a start line.
+const unfinished = (dir: string) => {
+  const newest = new Map<number, string>()
+  for (const l of record(dir)) newest.set(l.update_id, l.line)
+  return [...newest].filter(([, line]) => line === 'start').map(([id]) => id)
+}
+// The reaction from the sender of a held note, and the text from another chat,
+// sent in one round at `from`: the reaction goes at once, within the clock's
+// step, and the text after its batch gap.
+async function passedAtOnce(channel: Server, from: number): Promise<void> {
+  await until(() => channel.inbound().some(n => n.meta.reaction === '👍'), 2000)
+  expect(Date.now() - from).toBeLessThan(2 * STEP_MS)
+  await until(() => contents(channel).includes('from another chat'), 2000)
+  expect(Date.now() - from).toBeLessThan(TEXT_GAP_MS + 2 * STEP_MS)
+}
 
 describe.skipIf(process.platform !== 'linux')('a message\'s file work beside the update loop', () => {
   test('I1 a voice note whose download takes 45 s holds no other chat and no reaction, and its sender\'s text comes after it', async () => {
@@ -91,8 +107,7 @@ describe.skipIf(process.platform !== 'linux')('a message\'s file work beside the
     await wait(5000)
     deliver(dir, [text(2, OTHER, 'from another chat'), reaction(3, OWNER, 500, '👍'), text(4, OWNER, 'after my note')])
     const t5 = Date.now()
-    await until(() => contents(channel).includes('from another chat') && channel.inbound().some(n => n.meta.reaction === '👍'), 2000)
-    expect(Date.now() - t5).toBeLessThan(1000)
+    await passedAtOnce(channel, t5)
     await until(() => contents(channel).includes(heard('v1')), 50_000)
     expect(Date.now() - t0).toBeGreaterThanOrEqual(44_000)
     expect(Date.now() - t0).toBeLessThan(46_000)
@@ -100,6 +115,11 @@ describe.skipIf(process.platform !== 'linux')('a message\'s file work beside the
     const order = contents(channel)
     expect(order.indexOf(heard('v1'))).toBeLessThan(order.indexOf('after my note'))
     expect(order.filter(c => c === 'after my note')).toHaveLength(1)
+    // The record times each step: the download held 45 s.
+    await until(() => doneLine(dir, 1) !== undefined, 4000)
+    expect(doneLine(dir, 1).ms.download).toBeGreaterThanOrEqual(45_000)
+    expect(doneLine(dir, 1).ms.download).toBeLessThan(45_000 + 2 * STEP_MS)
+    expect(doneLine(dir, 1).outcome).toBe('transcribed')
     await channel.close()
   }, 60000)
 
@@ -113,8 +133,7 @@ describe.skipIf(process.platform !== 'linux')('a message\'s file work beside the
     await wait(5000)
     deliver(dir, [text(2, OTHER, 'from another chat'), reaction(3, OWNER, 500, '👍'), text(4, OWNER, 'after my note')])
     const t5 = Date.now()
-    await until(() => contents(channel).includes('from another chat') && channel.inbound().some(n => n.meta.reaction === '👍'), 2000)
-    expect(Date.now() - t5).toBeLessThan(1000)
+    await passedAtOnce(channel, t5)
     await until(() => channel.inbound().some(n => n.meta.message_id === '101'), 50_000)
     expect(contents(channel)).toContain(heard('v1'))
     expect(Date.now() - t0).toBeGreaterThanOrEqual(44_000)
@@ -311,6 +330,42 @@ describe.skipIf(process.platform !== 'linux')('a message\'s file work beside the
 })
 
 describe.skipIf(process.platform !== 'linux')('the replay of the record at start', () => {
+  test('I21 a delivered burst of two texts and a delivered edit are not delivered again by the next server', async () => {
+    const dir = state()
+    const channel = server(dir)
+    await channel.ready()
+    deliver(dir, [text(1, OWNER, 'first half'), text(2, OWNER, 'second half')])
+    await until(() => channel.inbound().length === 1, 4000)
+    expect(contents(channel)).toEqual(['first half\nsecond half'])
+    deliver(dir, [{ update_id: 3, edited_message: { message_id: 102, date: seconds(), edit_date: seconds() + 1, from: OWNER, chat: dmOf(OWNER), text: 'second half, edited' } }])
+    await until(() => channel.inbound().length === 2, 4000)
+    expect(contents(channel)[1]).toBe('second half, edited')
+    await wait(500)
+    await channel.close()
+    const next = server(dir)
+    await next.ready()
+    await until(() => polledBy(dir, next), 4000)
+    await wait(1500)
+    expect(next.inbound()).toEqual([])
+    await next.close()
+  }, 20000)
+
+  test('I22 an edit that leaves its text as Claude last got it writes no start line', async () => {
+    const dir = state()
+    const channel = server(dir)
+    await channel.ready()
+    deliver(dir, [
+      text(1, OWNER, 'as it was'),
+      { update_id: 2, edited_message: { message_id: 101, date: seconds(), edit_date: seconds() + 1, from: OWNER, chat: dmOf(OWNER), text: 'as it was', entities: [{ type: 'italic', offset: 0, length: 2 }] } },
+    ])
+    await until(() => channel.inbound().length === 1, 4000)
+    await wait(1000)
+    expect(contents(channel)).toEqual(['as it was'])
+    expect(record(dir).filter(l => l.update_id === 2)).toEqual([])
+    expect(unfinished(dir)).toEqual([])
+    await channel.close()
+  }, 20000)
+
   test('I12 a replay goes on past an entry whose handling throws, and a poll retry replays nothing again', async () => {
     const dir = state()
     const note = voice(3, OWNER, 'v1')

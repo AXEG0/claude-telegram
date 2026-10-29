@@ -27,7 +27,7 @@ export function state(access: object = { dmPolicy: 'allowlist', allowFrom: ['1']
 // Date.now(), pinned to it. Time on it moves only while the test waits, in
 // moves of STEP_MS, so the test sees what happened at most one move late,
 // while each server's timers fire at their own due times.
-const STEP_MS = 100
+export const STEP_MS = 100
 let timeline: number | undefined
 let advances = 0
 // Each test's waits belong to it: once it ends, a wait it left running moves

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'fs'
+import { appendFileSync, copyFileSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { ARRIVALS_BOUND, createArrivals, KEPT_MS, type ArrivalsIo, type DoneSeed } from './arrivals.ts'
@@ -105,6 +105,22 @@ describe('the record of arrivals', () => {
     start(rec, 500)
     expect(writes).toBe(1)
     expect(reports.filter(r => r.includes('not compacted'))).toHaveLength(1)
+  })
+
+  test('R4 after a compaction that leaves unfinished start lines over the bound, the next append does not compact again', () => {
+    const path = file()
+    let copies = 0
+    const rec = createArrivals(path, { now: () => T, log: () => {}, io: { copy: (from, to) => { copies++; copyFileSync(from, to) } } })
+    // Unfinished entries alone take the file past the bound.
+    let id = 1
+    for (; copies === 0 && id < 200; id++) start(rec, id, 30_000)
+    expect(copies).toBe(1)
+    expect(readFileSync(path, 'utf8').length).toBeGreaterThan(ARRIVALS_BOUND)
+    const skipped = readFileSync(`${path}.1`, 'utf8')
+    start(rec, id, 30_000)
+    start(rec, id + 1, 30_000)
+    expect(copies).toBe(1)
+    expect(readFileSync(`${path}.1`, 'utf8')).toBe(skipped)
   })
 
   test('R5 appends past the bound compact the file while running, and the next open skips the finished entries moved aside', () => {

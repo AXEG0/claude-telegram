@@ -100,7 +100,10 @@ export function createArrivals(file: string, opts: {
   // Whether the file may not end in a line break, so the next append starts
   // with one: learnt from the file's last byte, or set by a failed append.
   let ragged = false
-  // After a failed compaction, the size the file must reach before the next try.
+  // The size the file must reach before the next compaction: another bound past
+  // its size after the last one, whether that one failed or held only
+  // unfinished start lines over the bound, so no append compacts again and
+  // overwrites arrivals.jsonl.1 at once.
   let retryAt = 0
   // Append calls for each update the replay is handing in, failed ones
   // included, counted in memory: a compaction can replace the file meanwhile.
@@ -137,10 +140,11 @@ export function createArrivals(file: string, opts: {
       io.copy(file, old)
       const kept = [...newest(lines).values()].filter(l => l.line === 'start')
       const tmp = `${file}.${process.pid}.tmp`
-      io.write(tmp, kept.map(l => `${l.text}\n`).join(''))
+      const data = kept.map(l => `${l.text}\n`).join('')
+      io.write(tmp, data)
       io.rename(tmp, file)
       ragged = false
-      retryAt = 0
+      retryAt = Buffer.byteLength(data) + bound
     } catch (err) {
       retryAt = size + bound
       log(`arrivals.jsonl not compacted: ${err}`)

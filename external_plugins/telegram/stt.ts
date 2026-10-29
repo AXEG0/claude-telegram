@@ -115,11 +115,16 @@ const STEP_NAMES: Record<Step, string> = { getFile: 'getFile', download: 'downlo
 // The work's running step, timed, and the signal its calls take.
 type Job = { signal: AbortSignal; steps: Steps; step?: Step; since: number }
 
+// A step's error names the step: a call that throws outright, such as a
+// connection reset or a full disk, says only what failed, not where.
 async function timed<T>(job: Job, step: Step, run: () => Promise<T>): Promise<T> {
   job.step = step
   job.since = Date.now()
   try {
     return await run()
+  } catch (err) {
+    const text = err instanceof Error ? err.message : String(err)
+    throw new Error(text.includes(STEP_NAMES[step]) ? text : `${STEP_NAMES[step]}: ${text}`)
   } finally {
     job.steps[step] = Date.now() - job.since
     job.step = undefined
@@ -165,23 +170,24 @@ type FileOpts = {
   fetchImpl?: typeof fetch
 }
 
-// getFile, then the download into the inbox, each timed: the one fetch of
-// photos and speech alike. name gives the saved file's extension from
+// getFile, then the download into the inbox, the inbox write included, each
+// timed: the one fetch of photos and speech alike. name gives the saved file's extension from
 // Telegram's file_path, or throws when the file cannot be used.
 async function fetchFile(job: Job, opts: FileOpts, ext: (filePath: string) => string, saved: (path: string) => void): Promise<{ path: string; bytes: Uint8Array }> {
   const fetchImpl = opts.fetchImpl ?? fetch
   const file = await timed(job, 'getFile', () => opts.api.getFile(opts.fileId, job.signal))
   if (!file.file_path) throw new Error('getFile gave no file_path')
   const suffix = ext(file.file_path)
+  const uniqueId = (file.file_unique_id ?? '').replace(/[^a-zA-Z0-9_-]/g, '') || 'file'
+  const path = join(opts.inboxDir, `${Date.now()}-${uniqueId}.${suffix}`)
   const bytes = await timed(job, 'download', async () => {
     const res = await fetchImpl(`https://api.telegram.org/file/bot${opts.token}/${file.file_path}`, { signal: job.signal })
     if (!res.ok) throw new Error(`download HTTP ${res.status}`)
-    return new Uint8Array(await res.arrayBuffer())
+    const body = new Uint8Array(await res.arrayBuffer())
+    mkdirSync(opts.inboxDir, { recursive: true })
+    writeFileSync(path, body)
+    return body
   })
-  const uniqueId = (file.file_unique_id ?? '').replace(/[^a-zA-Z0-9_-]/g, '') || 'file'
-  const path = join(opts.inboxDir, `${Date.now()}-${uniqueId}.${suffix}`)
-  mkdirSync(opts.inboxDir, { recursive: true })
-  writeFileSync(path, bytes)
   saved(path)
   return { path, bytes }
 }

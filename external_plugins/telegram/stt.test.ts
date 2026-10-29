@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, jest, test } from 'bun:test'
-import { mkdtempSync, readFileSync } from 'fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { FILE_LIMIT_MS, fetchPhoto, STT_MAX_BYTES, sttConfig, transcribe, transcribeTelegramFile, uploadName, type SttConfig } from './stt.ts'
@@ -190,7 +190,7 @@ describe('the file work and its limit', () => {
     expect(Date.now() - t0).toBe(FILE_LIMIT_MS)
   })
 
-  test('S3 a failed transcription, download, empty transcript and file over 20 MB each come back with their reason whole', async () => {
+  test('S3 a failed transcription, download, inbox write, empty transcript and file over 20 MB each come back with their reason whole, naming the step', async () => {
     const body = 'x'.repeat(250)
     const failing = (download: number, stt: Response) => (async (input: string | URL | Request) =>
       String(input).includes('api.telegram.org') ? new Response(new Uint8Array([1]), { status: download }) : stt) as typeof fetch
@@ -202,6 +202,28 @@ describe('the file work and its limit', () => {
     expect((await run(failing(200, new Response('  \n'))))).toMatchObject({ reason: 'empty transcript' })
     expect((await run(failing(200, new Response('  \n')))).path).toBeDefined()
     expect((await run(failing(200, new Response('unused')), STT_MAX_BYTES + 1)).reason).toBe(`file is ${STT_MAX_BYTES + 1} bytes`)
+
+    // A call that throws outright says only what failed; the reason puts the
+    // running step in front of it.
+    const reset = () => { throw new TypeError('fetch failed: connection reset') }
+    const throwing = (where: 'download' | 'transcription') => (async (input: string | URL | Request) => {
+      const download = String(input).includes('api.telegram.org')
+      if ((where === 'download') === download) reset()
+      return download ? new Response(new Uint8Array([1])) : new Response('unused')
+    }) as typeof fetch
+    expect((await run(throwing('download'))).reason).toBe('download: fetch failed: connection reset')
+    expect((await run(throwing('transcription')))).toMatchObject({ reason: 'transcription: fetch failed: connection reset' })
+    expect((await run(throwing('transcription'))).path).toBeDefined()
+    const photo = await fetchPhoto({ api: { getFile: async () => file('photos/file_2.jpg') }, token: 'T', inboxDir: inbox(), fileId: 'p', fetchImpl: throwing('download') })
+    expect(photo.reason).toBe('download: fetch failed: connection reset')
+    // The inbox write is the download's last part: a folder that cannot be
+    // made, as on a full disk, names it too.
+    const blocked = join(inbox(), 'inbox')
+    writeFileSync(blocked, 'a file where the inbox should be')
+    const unsaved = await transcribeTelegramFile({ api: { getFile: async () => file() }, token: 'T', inboxDir: blocked, fileId: 'f', mime: 'audio/ogg', cfg, fetchImpl: failing(200, new Response('unused')) })
+    expect(unsaved.reason).toStartWith('download: ')
+    expect(unsaved.reason).toMatch(/EEXIST|ENOTDIR/)
+    expect(unsaved.path).toBeUndefined()
   })
 
   test('S4 a fetch that ignores its abort signal still ends at the limit', async () => {
