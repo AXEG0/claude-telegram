@@ -226,3 +226,102 @@ describe('mergeInbound', () => {
     expect(one.meta).toEqual({ chat_id: '1', message_id: '2', user: 'owner', ts: 't2', message_ids: '1,2', attachment_kind: 'document', attachment_file_id: 'f2', attachment_name: 'a.txt' })
   })
 })
+
+// The per-sender lane: a sender's messages reach the batcher in the order they
+// came, whatever each one's file work takes, and nothing else waits for them.
+describe('the per-sender lane', () => {
+  const flushed = async () => { for (let i = 0; i < 10; i++) await Promise.resolve() }
+  const deferred = () => {
+    let resolve!: () => void, reject!: (err: unknown) => void
+    const promise = new Promise<void>((res, rej) => { resolve = res; reject = rej })
+    return { promise, resolve, reject }
+  }
+
+  test('U1 a text from a sender whose earlier step is pending is handed on after it, in order', async () => {
+    const h = harness()
+    const work = deferred()
+    h.b.inOrder('k', async () => { h.b.hold('k', 'c'); await work.promise; h.b.handOn('k', 'c', msg(1, '(voice message)'), undefined) })
+    h.b.inOrder('k', () => { h.b.hold('k', 'c'); h.b.handOn('k', 'c', msg(2, 'after the note'), TEXT_GAP_MS) })
+    h.advance(TEXT_GAP_MS * 3)
+    expect(h.out).toEqual([])
+    work.resolve()
+    await flushed()
+    h.advance(TEXT_GAP_MS)
+    expect(h.out.map(o => o.content)).toEqual(['(voice message)', 'after the note'])
+  })
+
+  test('U3 while one sender\'s step is pending, another sender in the chat and one in another chat go out at their gap', async () => {
+    const h = harness()
+    const work = deferred()
+    h.b.inOrder('c:A', async () => { h.b.hold('c:A', 'c'); await work.promise; h.b.handOn('c:A', 'c', msg(1, '(voice message)'), undefined) })
+    h.b.inOrder('c:B', () => { h.b.handOn('c:B', 'c', msg(2, 'from B'), TEXT_GAP_MS) })
+    h.b.inOrder('d:C', () => { h.b.handOn('d:C', 'd', msg(3, 'from C'), TEXT_GAP_MS) })
+    h.advance(TEXT_GAP_MS)
+    expect(h.out.map(o => o.content)).toEqual(['from B', 'from C'])
+    work.resolve()
+    await flushed()
+    expect(h.out.map(o => o.content)).toEqual(['from B', 'from C', '(voice message)'])
+  })
+
+  test('U4 a flush for a sender whose lane is pending delivers at once', async () => {
+    const h = harness()
+    const work = deferred()
+    h.b.inOrder('k', async () => { await work.promise; h.b.handOn('k', 'c', msg(1, '(voice message)'), undefined) })
+    h.b.flush('k', msg(2, '👍 on message 9'))
+    expect(h.out.map(o => o.content)).toEqual(['👍 on message 9'])
+    work.resolve()
+    await flushed()
+  })
+
+  test('U5 a step that throws leaves the sender\'s next step running', async () => {
+    const errors: unknown[] = []
+    const out: Inbound[] = []
+    const b = createBatcher({ deliver: item => out.push(item), onError: err => errors.push(err) })
+    const work = deferred()
+    b.inOrder('k', async () => { await work.promise })
+    b.inOrder('k', () => { throw new Error('a broken step') })
+    b.inOrder('k', () => { b.handOn('k', 'c', msg(3, 'still here'), undefined) })
+    work.resolve()
+    await flushed()
+    expect(out.map(o => o.content)).toEqual(['still here'])
+    expect(String(errors[0])).toContain('a broken step')
+  })
+
+  test('U6 on an idle lane a text is in the batcher, its gap timer armed, by the time inOrder returns', () => {
+    const h = harness()
+    h.b.inOrder('k', () => { h.b.hold('k', 'c'); h.b.handOn('k', 'c', msg(1, 'at once'), TEXT_GAP_MS) })
+    h.advance(TEXT_GAP_MS)
+    expect(h.out.map(o => o.content)).toEqual(['at once'])
+  })
+
+  test('U7 after flushAll a lane hands nothing on and says so, while batches formed before still go out', async () => {
+    const h = harness()
+    h.b.handOn('k', 'c', msg(1, 'formed before'), TEXT_GAP_MS)
+    void h.b.flushAll()
+    expect(h.out.map(o => o.content)).toEqual(['formed before'])
+    expect(h.b.handOn('k', 'c', msg(2, 'after the stop'), TEXT_GAP_MS)).toBe(false)
+    expect(h.b.handOn('k', 'c', msg(3, 'a note after the stop'), undefined)).toBe(false)
+    h.advance(MAX_WAIT_MS)
+    expect(h.out.map(o => o.content)).toEqual(['formed before'])
+  })
+
+  test('U8 a text sent between two notes\' finishes waits for the second note', async () => {
+    const h = harness()
+    const n1 = deferred(), n2 = deferred()
+    const note = (id: number, work: Promise<void>) => async () => { h.b.hold('k', 'c'); await work; h.b.handOn('k', 'c', msg(id, `note ${id}`), undefined) }
+    h.b.inOrder('k', note(1, n1.promise))
+    h.b.inOrder('k', note(2, n2.promise))
+    h.advance(5000)
+    n1.resolve()
+    await flushed()
+    h.advance(2000)
+    h.b.inOrder('k', () => { h.b.hold('k', 'c'); h.b.handOn('k', 'c', msg(3, 'the text'), TEXT_GAP_MS) })
+    h.advance(TEXT_GAP_MS)
+    expect(h.out.map(o => o.content)).toEqual(['note 1'])
+    h.advance(3000)
+    n2.resolve()
+    await flushed()
+    h.advance(TEXT_GAP_MS)
+    expect(h.out.map(o => o.content)).toEqual(['note 1', 'note 2', 'the text'])
+  })
+})

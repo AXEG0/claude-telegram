@@ -11,6 +11,8 @@
 // one replying to another message than the batch's, also sends it first, so
 // the chat keeps its order and each message its reply.
 
+import type { DoneSeed } from './arrivals.ts'
+
 export const TEXT_GAP_MS = 300
 // A piece near Telegram's 4096 limit is likely followed by the rest of a paste.
 export const FRAGMENT_GAP_MS = 1500
@@ -23,7 +25,9 @@ export const MAX_WAIT_MS = 7500
 export const MAX_MESSAGES = 12
 export const MAX_CHARS = 50_000
 
-export type Inbound = { content: string; meta: Record<string, string> }
+// A message on its way to Claude. done carries what each update's done line
+// in the record says (see arrivals.ts); it never reaches Claude.
+export type Inbound = { content: string; meta: Record<string, string>; done?: DoneSeed[] }
 
 const REPLY_KEYS = ['reply_to_message_id', 'reply_to_user', 'reply_to_text', 'reply_to_kind', 'reply_quote']
 const ATTACHMENT_KEYS = ['attachment_kind', 'attachment_file_id', 'attachment_size', 'attachment_mime', 'attachment_name']
@@ -59,7 +63,8 @@ export function mergeInbound(items: Inbound[]): Inbound {
     // The lists are comma-separated, so a comma in a name becomes _.
     meta.attachment_names = files.map(item => (item.meta.attachment_name ?? '').replace(/,/g, '_')).join(',')
   }
-  return { content, meta }
+  const done = items.flatMap(item => item.done ?? [])
+  return done.length > 0 ? { content, meta, done } : { content, meta }
 }
 
 // The gap a message joins its sender's batch with: a file's (a photo or a
@@ -84,13 +89,26 @@ export function createBatcher(opts: {
   now?: () => number
   setTimer?: (fn: () => void, ms: number) => unknown
   clearTimer?: (timer: unknown) => void
+  // A lane step's error, which never stops the sender's later steps.
+  onError?: (err: unknown) => void
 }) {
   const now = opts.now ?? Date.now
   const setTimer = opts.setTimer ?? ((fn, ms) => setTimeout(fn, ms))
   const clearTimer = opts.clearTimer ?? (t => clearTimeout(t as ReturnType<typeof setTimeout>))
   const pending = new Map<string, Pending>()
-  // Set once the server stops: from then on a message goes out at once.
+  // Set once the server stops: from then on a message goes out at once, and a
+  // lane hands nothing on.
   let closing = false
+  const onError = opts.onError ?? (err => process.stderr.write(`telegram channel: a message's step failed: ${err}\n`))
+  // Each sender's lane: the tail of the chain of its messages' steps.
+  const lanes = new Map<string, Promise<void>>()
+  const settle = (key: string, tail: Promise<void>) => {
+    lanes.set(key, tail)
+    void tail.finally(() => {
+      // Only the tail that finished: a later step may already wait behind it.
+      if (lanes.get(key) === tail) lanes.delete(key)
+    })
+  }
 
   const flush = (key: string) => {
     const p = pending.get(key)
@@ -113,29 +131,64 @@ export function createBatcher(opts: {
     p.timer = setTimer(() => flush(key), Math.max(0, Math.min(gapMs, p.first + MAX_WAIT_MS - now())))
   }
 
+  const add = (key: string, chat: string, item: Inbound, gapMs: number) => {
+    if (closing) {
+      flush(key)
+      opts.deliver(item)
+      return
+    }
+    flushOthers(key, chat)
+    let p = pending.get(key)
+    const reply = replyOf(item)
+    if (p && (p.chars + item.content.length > MAX_CHARS || (reply && p.items.some(i => replyOf(i) && replyOf(i) !== reply)))) {
+      flush(key)
+      p = undefined
+    }
+    if (!p) {
+      p = { chat, items: [], chars: 0, first: now() }
+      pending.set(key, p)
+    }
+    p.items.push(item)
+    p.chars += item.content.length
+    if (p.items.length >= MAX_MESSAGES) flush(key)
+    else arm(key, p, gapMs)
+  }
+
   return {
     // Adds an item to the sender's batch, which goes out gapMs after it.
-    add(key: string, chat: string, item: Inbound, gapMs: number) {
-      if (closing) {
-        flush(key)
-        opts.deliver(item)
+    add,
+    // Runs a step once every step the sender's earlier messages started has
+    // handed its message on, so a sender's messages reach the batcher in the
+    // order they came. A sender with no step waiting has an idle lane, and the
+    // step runs before inOrder returns, so a plain text batches at once. A
+    // step that throws is reported, and the sender's next step still runs.
+    inOrder(key: string, step: () => unknown) {
+      const prev = lanes.get(key)
+      if (prev) {
+        settle(key, prev.then(step).then(() => {}).catch(onError))
         return
       }
-      flushOthers(key, chat)
-      let p = pending.get(key)
-      const reply = replyOf(item)
-      if (p && (p.chars + item.content.length > MAX_CHARS || (reply && p.items.some(i => replyOf(i) && replyOf(i) !== reply)))) {
+      let result: unknown
+      try {
+        result = step()
+      } catch (err) {
+        onError(err)
+        return
+      }
+      if (result instanceof Promise) settle(key, result.then(() => {}).catch(onError))
+    },
+    // Hands a lane's message on, in one step with nothing awaited: into the
+    // sender's batch with gapMs, or alone after the sender's batch with none,
+    // after every batch of the chat with chatFirst. Once the server stops it
+    // hands nothing on and returns false: the next server replays the message.
+    handOn(key: string, chat: string, item: Inbound, gapMs: number | undefined, chatFirst = false): boolean {
+      if (closing) return false
+      if (chatFirst) for (const [k, p] of [...pending]) if (p.chat === chat) flush(k)
+      if (gapMs === undefined) {
         flush(key)
-        p = undefined
-      }
-      if (!p) {
-        p = { chat, items: [], chars: 0, first: now() }
-        pending.set(key, p)
-      }
-      p.items.push(item)
-      p.chars += item.content.length
-      if (p.items.length >= MAX_MESSAGES) flush(key)
-      else arm(key, p, gapMs)
+        opts.deliver(item)
+      } else add(key, chat, item, gapMs)
+      return true
     },
     // A message from the sender is being prepared (a photo downloading): the
     // batch waits for it, up to MAX_WAIT_MS after its first item. The chat's

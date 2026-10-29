@@ -92,7 +92,10 @@ let nextId = chats.ids
 // sent after it can arrive first; its answer waits `holdMs`, then is `error`
 // if set, else the usual answer, unless `drop` loses the connection after the
 // fake applied the call and before it answers. The log marks a call a rule
-// refuses with `refused`.
+// refuses with `refused`. The file host and the transcription endpoint (see
+// TELEGRAM_TEST_FILES) obey rules too, under the methods `download` and
+// `transcribe`: their `error` answers with error_code as the HTTP status and
+// `body`, if set, as the raw body.
 type Rule = {
   method: string | string[]
   has?: string | string[]
@@ -103,6 +106,7 @@ type Rule = {
   holdMs?: number
   drop?: boolean
   error?: { error_code: number; description: string; parameters?: object }
+  body?: string
 }
 const rules = (JSON.parse(process.env.TELEGRAM_TEST_RULES || '[]') as Rule[]).map(rule => ({ rule, seen: 0, used: 0 }))
 function ruleFor(method: string, payload: Record<string, unknown>): Rule | undefined {
@@ -205,6 +209,49 @@ function remember(updates: unknown[]): void {
 }
 
 const json = (body: object) => new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } })
+
+// TELEGRAM_TEST_FILES maps a file id to the file Telegram holds for it: its
+// path and its text as bytes. getFile answers a listed id with its path, and
+// any other with true, as before. The file host serves a listed file, and the
+// transcription endpoint answers "heard: " and the uploaded text. Every other
+// URL a server fetches throws, so no test reaches a real host.
+const files = JSON.parse(process.env.TELEGRAM_TEST_FILES || '{}') as Record<string, { path: string; text: string }>
+const FILE_HOST = 'https://api.telegram.org/file/bot'
+const TRANSCRIPTIONS = 'https://api.openai.com/v1/audio/transcriptions'
+const logCall = (method: string, payload: Record<string, unknown>, extra: object = {}) =>
+  appendFileSync(process.env.TELEGRAM_TEST_API_LOG!, JSON.stringify({ pid: process.pid, method, payload, at: Date.now(), ...extra }) + '\n')
+async function ruled(method: string, payload: Record<string, unknown>, answer: () => Response): Promise<Response> {
+  const rule = ruleFor(method, payload)
+  logCall(method, payload, rule?.error ? { refused: rule.error.description } : {})
+  if (rule?.holdMs) await Bun.sleep(rule.holdMs)
+  if (rule?.error) return new Response(rule.body ?? rule.error.description, { status: rule.error.error_code })
+  return answer()
+}
+globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+  const url = input instanceof Request ? input.url : String(input)
+  if (url.startsWith(FILE_HOST)) {
+    const file_path = url.slice(FILE_HOST.length).split('/').slice(1).join('/')
+    const file = Object.values(files).find(f => f.path === file_path)
+    return ruled('download', { file_path }, () => file ? new Response(file.text) : new Response('Not Found', { status: 404 }))
+  }
+  if (url === TRANSCRIPTIONS) {
+    const upload = (init?.body as FormData | undefined)?.get('file')
+    const text = upload instanceof Blob ? await upload.text() : ''
+    return ruled('transcribe', { file: text }, () => new Response(`heard: ${text}`))
+  }
+  throw new TypeError(`the test fixture refuses a fetch to ${url}`)
+}) as typeof fetch
+
+// The update ids with a start line in the record, for each poll's log line;
+// a record missing or unreadable holds none.
+function started(): number[] {
+  try {
+    return readFileSync(join(process.env.TELEGRAM_STATE_DIR!, 'arrivals.jsonl'), 'utf8').split('\n')
+      .flatMap(line => { try { const l = JSON.parse(line); return l.line === 'start' ? [l.update_id] : [] } catch { return [] } })
+  } catch {
+    return []
+  }
+}
 
 // TELEGRAM_TEST_LONG_POLL=1 holds each long poll (a getUpdates carrying a
 // timeout, which grammY's own closing getUpdates lacks) the way Telegram
@@ -319,6 +366,7 @@ const fakeFetch = (async (url: string | URL | Request, options?: RequestInit) =>
     pid: process.pid, method, payload, at: Date.now(),
     ...(to ? album ? { message_ids: album } : { message_id: to.message_id } : {}),
     ...(refusal ? { refused: refusal.description } : {}),
+    ...(method === 'getUpdates' ? { started: started() } : {}),
   }) + '\n')
   if (to) bridgeSend(method, payload)
   if (rule?.holdMs) await Bun.sleep(rule.holdMs)
@@ -326,6 +374,8 @@ const fakeFetch = (async (url: string | URL | Request, options?: RequestInit) =>
   if (rule?.drop) throw new TypeError('fetch failed: the connection was reset')
   let result: unknown = true
   if (method === 'getMe') result = ME
+  const listed = method === 'getFile' ? files[String(payload.file_id)] : undefined
+  if (listed) result = { file_id: payload.file_id, file_unique_id: `u-${payload.file_id}`, file_path: listed.path, file_size: listed.text.length }
   if (n) {
     if (chats.hold?.send === n) await Bun.sleep(chats.hold.ms)
     if (!to) return json(notFound)

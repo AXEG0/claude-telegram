@@ -198,7 +198,11 @@ message carries.
 ### Photos and files
 
 Photos download on arrival to the inbox, `inbox/` in the state directory, and
-`image_path` on the tag gives Claude the file to `Read`. Telegram compresses
+`image_path` on the tag gives Claude the file to `Read`. A photo's download,
+like a voice message's, runs beside the server's handling of other updates,
+with 300 seconds from the photo's arrival (see
+[Voice messages](#voice-messages)), and the reason a download failed goes into
+the [record of arrivals](#record-of-arrivals). Telegram compresses
 photos; to pass the original, send it as a file (long-press → Send as File).
 A document, video, video note or sticker, a voice note or audio file that
 goes untranscribed, and a photo that fails to download, arrives with
@@ -213,10 +217,22 @@ reach Claude as text. The server downloads the recording to the inbox, sends it
 to OpenAI's `/v1/audio/transcriptions`, and delivers the transcript as the
 message, marked `[transcript]` after any caption, with `transcribed_by` and
 `audio_path` on the tag. `TELEGRAM_STT_LANGUAGES` keeps a short clip from being
-heard as a language outside the ones you speak. When transcription fails or
-takes longer than 30 seconds, the message arrives as an attachment Claude can
-download. The server handles updates in order, so a voice note in transcription
-holds the messages after it.
+heard as a language outside the ones you speak.
+
+A message's file work, a photo's download or a recording's download and
+transcription, runs beside the server's handling of other updates, so other
+chats, reactions and button presses never wait for it. A sender's own messages
+and edits still reach Claude in the order they were sent: a text sent after a
+slow voice note waits for it. A button press and a typed permission answer
+(`yes <code>`) pass a waiting note, so a choice or a prompt never stalls behind
+it, and in a group another member's message passes it too. Two notes from one
+sender download side by side, so the text after them waits for the slower one.
+
+The file work has 300 seconds from the message's arrival. When transcription
+fails or runs out of time, the message arrives as an attachment Claude can
+download, with `transcript_error` naming the step and the cause, such as
+`download HTTP 404` or `getFile gave no answer within 300 s`, and with
+`audio_path` when the recording was saved.
 
 ### Bursts
 
@@ -271,8 +287,9 @@ message. An edited reply carries what it replies to, as a new message does.
 An edit passes the same access check as a new message from the same sender in
 the same chat, read-only: it never starts pairing or writes `access.json`, and
 it never answers a permission prompt. It goes alone, after any burst still
-waiting in the chat, so the chat keeps its order. Telegram also reports changes
-that are not someone correcting text, such as a live location moving or a
+waiting in the chat and after any message of the sender's still being
+prepared, such as a voice note in transcription, so the chat keeps its order.
+Telegram also reports changes that are not someone correcting text, such as a live location moving or a
 formatting change, so an edit without text or a caption sends nothing, and so
 does one whose text is what Claude last got for that message. The server
 remembers that text for the last 1000 messages since it started; an edit of a
@@ -460,7 +477,9 @@ When Claude Code asks permission for a tool call, the bot sends the request to
 `TELEGRAM_ALERT_CHAT`, the owner's chat, with **See more** for the tool's input
 and **✅ Allow** / **❌ Deny** buttons. Only the owner answers it, with a button
 or a `yes <code>` / `no <code>` reply. An answer goes to Claude Code, and the
-message tapped keeps the outcome. Anyone else on the allowlist, a person or
+message tapped keeps the outcome. An answer goes after any burst waiting in the
+chat, but never waits for a message of the owner's still being prepared, such
+as a voice note in transcription. Anyone else on the allowlist, a person or
 [another bot](#other-bots), gets no prompt: a tap of theirs is refused, and
 their `yes <code>` reaches Claude as an ordinary message.
 
@@ -646,6 +665,29 @@ gives up on a conflict: after each one it waits a second longer, up to 15
 seconds, so it hears the chat again within 15 seconds of the other poller
 stopping. A failed poll writes nothing. The file is for a health check outside
 the process; the server never reads it.
+
+## Record of arrivals
+
+`arrivals.jsonl` in the state directory keeps every message the server admits
+until it has reached Claude. Before Telegram counts a message delivered, the
+server writes a line with its raw update; once Claude Code has taken the
+message, a second line with each step's time in milliseconds (`queued`,
+`getFile`, `download`, `transcribe`, `batched` and `total`) and the outcome
+(`transcribed`, `untranscribed`, `photo saved`, `photo missing`, `delivered`)
+or the reason. The file survives restarts, so the reason a voice note went
+untranscribed stays readable afterwards.
+
+When the polling server starts, it hands every message whose newest line is
+still the first, and which is under 24 hours old, the time Telegram keeps an
+update, back through the access check and its sender's order, so a message a
+crash, a restart or a shutdown cut off still reaches the next session, a voice
+note transcribed. An older one gets a second line saying why it was not
+replayed. A message Telegram sends again that the file already holds from the
+last 24 hours is skipped. After a rare crash a message can arrive twice; it is
+never lost. Once the file passes 1 MiB, it is copied to `arrivals.jsonl.1`, and
+the file keeps only the messages still on their way. The file holds the messages' text, under
+the state directory's owner-only permissions. A failure to read or write it
+goes to stderr, and the message carries on to Claude.
 
 ## No history or search
 

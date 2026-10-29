@@ -234,7 +234,7 @@ export async function until(check: () => boolean, timeout = 4000): Promise<void>
   }
 }
 
-export type Call = { pid: number; method: string; payload: any; at: number; message_id?: number; refused?: string }
+export type Call = { pid: number; method: string; payload: any; at: number; message_id?: number; refused?: string; started?: number[] }
 // Each call the fake logged. A line not yet ended is still being written,
 // and is read once it is.
 export function calls(dir: string): Call[] {
