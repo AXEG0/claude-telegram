@@ -131,20 +131,40 @@ function snapshot(child: ChildProcess, dir: string, pid: number): string {
   return lines.join('\n')
 }
 // What the test wrote to a server, a request, a notification or the end of
-// its input, leaves this process only once the test's event loop runs, and a
-// move can start before that. The clock waits until it has left, so the
-// server reads it at the time the test wrote it, and the check for real work
-// that follows sees the server take it up.
-const unsent = new Map<ChildProcess, () => boolean>()
-async function sent(): Promise<void> {
+// its input, reaches the server some time after the write, and Bun calls the
+// write's callback before it has. A move that starts before the server has
+// taken it up moves the server's clock past the time the test wrote it. The
+// clock waits until each server has taken all of it, by what the server's
+// clock reports (fixtures/clock.ts), so the server reads it at the time the
+// test wrote it, and the check for real work that follows sees the server
+// take it up. A server that exits, or an input that fails, holds nothing back.
+type Owed = { pid: number; written: number; ending: boolean } | undefined
+const owedBy = new Map<ChildProcess, () => Owed>()
+function inputOf(dir: string, pid: number): { bytes: number; ended: boolean } {
+  try { return JSON.parse(readFileSync(join(dir, 'clock', `${pid}.input`), 'utf8')) } catch { return { bytes: 0, ended: false } }
+}
+function owing(child: ChildProcess): Owed {
+  const owed = owedBy.get(child)?.()
+  if (!owed) return undefined
+  const input = inputOf(dirOf.get(child)!, owed.pid)
+  return input.bytes < owed.written || (owed.ending && !input.ended) ? owed : undefined
+}
+async function taken(live: () => ChildProcess[]): Promise<void> {
   const end = performance.now() + 30_000
-  while ([...unsent.values()].some(pending => pending())) {
-    if (performance.now() > end) throw new Error('what the test wrote to a server did not leave the test in 30 s')
+  for (;;) {
+    const waiting = live().filter(c => owing(c) !== undefined)
+    if (waiting.length === 0) return
+    if (performance.now() > end) {
+      throw new Error(`a server did not take up what the test wrote to it within 30 s\n${waiting.map(c => {
+        const { pid, written, ending } = owing(c) ?? { pid: 0, written: 0, ending: false }
+        const input = inputOf(dirOf.get(c)!, pid)
+        return `server ${pid}: written ${written} bytes${ending ? ' and the end' : ''}, taken ${input.bytes}${input.ended ? ' and the end' : ''}\n${snapshot(c, dirOf.get(c)!, pid)}`
+      }).join('\n')}`)
+    }
     await Bun.sleep(1)
   }
 }
 async function driveOnce(ms: number): Promise<boolean> {
-  await sent()
   // A server still starting has no clock yet. The timeline waits for it, so
   // every server of the test stays on the same time.
   const live = () => [...driven].filter(c => c.exitCode === null && c.signalCode === null)
@@ -154,6 +174,7 @@ async function driveOnce(ms: number): Promise<boolean> {
     if (performance.now() > booting) throw new Error('a server did not start its clock')
     await Bun.sleep(5)
   }
+  await taken(live)
   await idle()
   const n = ++advances
   const moving: [string, number, ChildProcess][] = []
@@ -283,21 +304,30 @@ export function start(dir: string, argv: string[], env: Record<string, string> =
   })
   children.push(child)
   if (timeline !== undefined) { driven.add(child); dirOf.set(child, dir) }
-  // Each write counts until its callback, and the end of the input until the
-  // pipe has closed; a pipe that fails or closes holds nothing back.
-  let writing = 0, ending = false
+  // Each write counts its bytes, and the end of the input counts once, for
+  // the server to take up before the clock moves; an input that fails, or a
+  // server that exits, holds nothing back.
+  let written = 0, ending = false, failed = false
   const input = child.stdin
   const write = input.write.bind(input), finish = input.end.bind(input)
+  const bytes = (chunk: unknown, encoding: unknown) => typeof chunk === 'string'
+    ? Buffer.byteLength(chunk, typeof encoding === 'string' ? encoding as BufferEncoding : 'utf8')
+    : (chunk as Uint8Array).byteLength
   input.write = ((chunk: unknown, ...rest: unknown[]) => {
-    const callback = typeof rest[rest.length - 1] === 'function' ? rest.pop() as (err?: Error | null) => void : undefined
-    writing++
-    return write(chunk as never, ...(rest as []), (err?: Error | null) => { writing--; callback?.(err) })
+    written += bytes(chunk, rest[0])
+    return write(chunk as never, ...(rest as []))
   }) as typeof input.write
-  input.end = ((...args: unknown[]) => { ending = true; return finish(...(args as [])) }) as typeof input.end
-  input.once('close', () => { writing = 0; ending = false })
-  child.once('exit', () => { writing = 0; ending = false })
-  input.on('error', () => { writing = 0; ending = false })
-  unsent.set(child, () => writing > 0 || ending)
+  input.end = ((...args: unknown[]) => {
+    if (args[0] != null && typeof args[0] !== 'function') written += bytes(args[0], args[1])
+    ending = true
+    return finish(...(args as []))
+  }) as typeof input.end
+  input.on('error', () => { failed = true })
+  owedBy.set(child, () => {
+    if (failed || child.exitCode !== null || child.signalCode !== null || (written === 0 && !ending)) return undefined
+    const pid = serverPidOf(child)
+    return pid === undefined ? undefined : { pid, written, ending }
+  })
   let stderr = ''
   child.stderr.on('data', chunk => { stderr += chunk })
   stderrOf.set(child, () => stderr)
@@ -392,7 +422,7 @@ export async function cleanup(): Promise<void> {
   }
   driven.clear()
   dirOf.clear()
-  unsent.clear()
+  owedBy.clear()
   stderrOf.clear()
   epoch++
   if (timeline !== undefined) { timeline = undefined; setSystemTime() }
