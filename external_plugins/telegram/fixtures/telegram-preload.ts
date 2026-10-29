@@ -1,11 +1,15 @@
 // Never contact Telegram in subprocess tests, even if the shell has a token.
 import { mock } from 'bun:test'
-import { appendFileSync, existsSync, readFileSync, renameSync } from 'fs'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
+import { join } from 'path'
 import * as grammy from 'grammy'
 
 // A file upload goes as a multipart stream; its fields are logged as text and
 // each file as its name.
 async function payloadOf(options?: RequestInit): Promise<Record<string, unknown>> {
+  return attached(await fieldsOf(options))
+}
+async function fieldsOf(options?: RequestInit): Promise<Record<string, unknown>> {
   const body = options?.body
   if (body == null) return {}
   if (typeof body === 'string') return JSON.parse(body)
@@ -15,6 +19,26 @@ async function payloadOf(options?: RequestInit): Promise<Record<string, unknown>
   const form = await new Response(Buffer.concat(chunks), { headers: { 'content-type': type } }).formData()
   const out: Record<string, unknown> = {}
   for (const [key, value] of form) out[key] = typeof value === 'string' ? value : `file:${value.name}`
+  return out
+}
+// grammY sends each file as a part of its own, named in the field that
+// carries it as attach://<part>, an album's media included. The log shows the
+// file in that field, and no part of its own.
+function attached(form: Record<string, unknown>): Record<string, unknown> {
+  const parts = new Set<string>()
+  const file = (v: unknown) => {
+    if (typeof v !== 'string' || !v.startsWith('attach://')) return v
+    const part = v.slice('attach://'.length)
+    parts.add(part)
+    return form[part]
+  }
+  const out: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(form)) out[key] = file(value)
+  if (typeof form.media === 'string') {
+    const media = JSON.parse(form.media) as Record<string, unknown> | Record<string, unknown>[]
+    out.media = Array.isArray(media) ? media.map(m => ({ ...m, media: file(m.media) })) : { ...media, media: file(media.media) }
+  }
+  for (const part of parts) delete out[part]
   return out
 }
 
@@ -44,6 +68,9 @@ const users = JSON.parse(process.env.TELEGRAM_TEST_USERS || '{}') as Record<stri
 // - hold: the answer to the `send`-th send of the process waits `ms`.
 // - ids: every message the process sends to a numeric chat gets its own
 //   id, from `ids` on; unset, every message gets the same id, as before.
+// An album (sendMediaGroup) is one send: it counts once for `redirect`'s
+// `from` and for `hold`. Its first message gets an id as any send does, and
+// each other message the next one where ids are counted, else the same id.
 type Chats = {
   unopened?: number[]
   closed?: number[]
@@ -160,6 +187,14 @@ function recipient(chatId: unknown): { id: number; message_id: number } | undefi
   const user = holder(to.slice(1))
   return user && { id: user.id, message_id: 42 }
 }
+// The id of an album's next message: the next of the counter that numbered
+// its first, or the first's own where none counts.
+function nextOf(chatId: unknown, first: number): number {
+  const to = String(chatId)
+  if (!to.startsWith('@')) return nextId === undefined ? first : nextId++
+  if (redirect && lower(to.slice(1)) === redirect.username && redirect.ids !== undefined) return redirect.ids + redirectIds++
+  return first
+}
 
 function remember(updates: unknown[]): void {
   for (const u of updates as Record<string, { from?: User } | undefined>[]) {
@@ -193,12 +228,78 @@ async function holdPoll(payload: Record<string, unknown>, signal: AbortSignal | 
   }
 }
 
-const SENDS = ['sendMessage', 'sendPhoto', 'sendDocument', 'sendRichMessage']
+const SENDS = ['sendMessage', 'sendPhoto', 'sendDocument', 'sendRichMessage', 'sendMediaGroup']
 
-// Telegram refuses a text message, or a text edit, whose text is empty.
+// Telegram trims spaces and line breaks from both ends of a text or caption,
+// and refuses a text message, or a text edit, with nothing left.
+const trimmed = (text: string) => text.replace(/^[ \n]+|[ \n]+$/g, '')
 const EMPTY_TEXT = { error_code: 400, description: 'Bad Request: message text is empty' }
 const emptyText = (method: string, payload: Record<string, unknown>) =>
-  (method === 'sendMessage' || method === 'editMessageText') && payload.text === ''
+  (method === 'sendMessage' || method === 'editMessageText') && typeof payload.text === 'string' && trimmed(payload.text) === ''
+
+// The test's own Telegram identity: what getMe answers, and the sender of
+// every update the bridge delivers.
+const ME = { id: 123, is_bot: true, first_name: 'Test', username: 'test_bot' }
+
+// TELEGRAM_TEST_BRIDGE = { dir, username } hands another server what this one
+// sends to @username, as Telegram hands it to the receiving bot: each send the
+// fake takes to that username is written to dir, at the moment it is logged,
+// as one update per message, from ME in ME's private chat. A text or caption
+// arrives trimmed as Telegram trims it, a file as a document or a photo named
+// file-of-<its name>, an album's messages under one media_group_id, and a
+// reply target as reply_to_message. The bridge numbers the messages from 1.
+// TELEGRAM_TEST_BRIDGE = { dir } without a username delivers those updates in
+// order to this server's getUpdates, each once.
+const bridge = process.env.TELEGRAM_TEST_BRIDGE ? JSON.parse(process.env.TELEGRAM_TEST_BRIDGE) as { dir: string; username?: string } : undefined
+let bridged = 0
+function bridgeSend(method: string, payload: Record<string, unknown>): void {
+  if (!bridge?.username || lower(String(payload.chat_id)) !== `@${lower(bridge.username)}`) return
+  // A file upload carries its fields as text, an object field as JSON.
+  const field = (v: unknown) => typeof v === 'string' ? JSON.parse(v) : v
+  const replyTo = (field(payload.reply_parameters) as { message_id?: number } | undefined)?.message_id
+  const chat = { id: ME.id, type: 'private', first_name: ME.first_name, username: ME.username }
+  const file = (type: unknown, media: unknown, caption: unknown, n: number) => {
+    const name = String(media).replace(/^file:/, '')
+    const kept = typeof caption === 'string' ? trimmed(caption) : ''
+    return {
+      ...(type === 'photo'
+        ? { photo: [{ file_id: `file-of-${name}`, file_unique_id: `u${n}`, width: 1, height: 1 }] }
+        : { document: { file_id: `file-of-${name}`, file_unique_id: `u${n}`, file_name: name } }),
+      ...(kept ? { caption: kept } : {}),
+    }
+  }
+  const group = `album-of-${bridged + 1}`
+  const items: ((n: number) => object)[] =
+    method === 'sendMessage' ? [() => ({ text: trimmed(String(payload.text)) })]
+    : method === 'sendDocument' ? [n => file('document', payload.document, payload.caption, n)]
+    : method === 'sendPhoto' ? [n => file('photo', payload.photo, payload.caption, n)]
+    : method === 'sendMediaGroup' ? (payload.media as Record<string, unknown>[]).map(m => (n: number) => ({ ...file(m.type, m.media, m.caption, n), media_group_id: group }))
+    : []
+  mkdirSync(bridge.dir, { recursive: true })
+  for (const item of items) {
+    const n = ++bridged
+    const update = { update_id: 1000 + n, message: {
+      message_id: n, date: Math.floor(Date.now() / 1000), from: ME, chat,
+      ...(replyTo !== undefined ? { reply_to_message: { message_id: replyTo, date: 0, chat } } : {}),
+      ...item(n),
+    } }
+    const path = join(bridge.dir, `${String(n).padStart(6, '0')}.json`)
+    writeFileSync(`${path}.tmp`, JSON.stringify(update))
+    renameSync(`${path}.tmp`, path)
+  }
+}
+// The updates the bridge holds for this server, in order, each moved aside
+// once read.
+function bridgeUpdates(): unknown[] {
+  if (!bridge || bridge.username || !existsSync(bridge.dir)) return []
+  const out: unknown[] = []
+  for (const name of readdirSync(bridge.dir).filter(f => /^\d+\.json$/.test(f)).sort()) {
+    const file = join(bridge.dir, name)
+    out.push(JSON.parse(readFileSync(file, 'utf8')))
+    renameSync(file, `${file}.delivered`)
+  }
+  return out
+}
 
 const fakeFetch = (async (url: string | URL | Request, options?: RequestInit) => {
   const method = String(url).split('/').pop()!
@@ -211,20 +312,25 @@ const fakeFetch = (async (url: string | URL | Request, options?: RequestInit) =>
   if (rule?.preMs) await Bun.sleep(rule.preMs)
   const to = n && !refusal ? recipient(payload.chat_id) : undefined
   if (to && nextId !== undefined && !String(payload.chat_id).startsWith('@')) to.message_id = nextId++
+  const album = to && method === 'sendMediaGroup'
+    ? [to.message_id, ...(payload.media as unknown[]).slice(1).map(() => nextOf(payload.chat_id, to.message_id))]
+    : undefined
   appendFileSync(process.env.TELEGRAM_TEST_API_LOG!, JSON.stringify({
     pid: process.pid, method, payload, at: Date.now(),
-    ...(to ? { message_id: to.message_id } : {}),
+    ...(to ? album ? { message_ids: album } : { message_id: to.message_id } : {}),
     ...(refusal ? { refused: refusal.description } : {}),
   }) + '\n')
+  if (to) bridgeSend(method, payload)
   if (rule?.holdMs) await Bun.sleep(rule.holdMs)
   if (refusal) return json({ ok: false, ...refusal })
   if (rule?.drop) throw new TypeError('fetch failed: the connection was reset')
   let result: unknown = true
-  if (method === 'getMe') result = { id: 123, is_bot: true, first_name: 'Test', username: 'test_bot' }
+  if (method === 'getMe') result = ME
   if (n) {
     if (chats.hold?.send === n) await Bun.sleep(chats.hold.ms)
     if (!to) return json(notFound)
-    result = { message_id: to.message_id, date: 0, chat: { id: to.id, type: to.id < 0 ? 'supergroup' : 'private' } }
+    const sent = (album ?? [to.message_id]).map(message_id => ({ message_id, date: 0, chat: { id: to.id, type: to.id < 0 ? 'supergroup' : 'private' } }))
+    result = album ? sent : sent[0]
   }
   if (method === 'getChatMember') return json(member(Number(payload.user_id)))
   if (method === 'getChat') return json(chat(payload.chat_id))
@@ -242,6 +348,11 @@ const fakeFetch = (async (url: string | URL | Request, options?: RequestInit) =>
         result = updates
         remember(updates as unknown[])
       } catch {}
+    }
+    const fromBridge = bridgeUpdates()
+    if (fromBridge.length) {
+      result = [...(result as unknown[]), ...fromBridge]
+      remember(fromBridge)
     }
   }
   return json({ ok: true, result })

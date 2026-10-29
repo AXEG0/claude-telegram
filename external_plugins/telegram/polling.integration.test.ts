@@ -9,6 +9,7 @@ import { appendPermit, permitDetail, permitFile, permitText, type PermitEvent } 
 import { idleText, NO_OWNER, RECOVERED_TEXT, stuckText } from './alerts.ts'
 import { NO_ASKS } from './asks.ts'
 import { REFRESH_MS } from './typing.ts'
+import { MAX_WAIT_MS } from './batch.ts'
 import { API_CONSTANTS } from 'grammy'
 
 beforeEach(driveClock)
@@ -290,8 +291,9 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     expect(sent('to the bot')).toEqual([`@${BOT.username}`])
     const before = calls(dir).length
     expect((await reply(String(BOT.id), 'with files', [join(dir, 'inbox', 'chart.png'), join(dir, 'inbox', 'notes.txt')])).isError).not.toBe(true)
+    // The files go first, as one album of documents carrying the text.
     expect(calls(dir).slice(before).filter(c => c.method.startsWith('send')).map(c => [c.method, c.payload.chat_id])).toEqual([
-      ['sendMessage', `@${BOT.username}`], ['sendPhoto', `@${BOT.username}`], ['sendDocument', `@${BOT.username}`],
+      ['sendMediaGroup', `@${BOT.username}`],
     ])
     await reply('5', 'to the person')
     expect(sent('to the person')).toEqual(['5'])
@@ -921,7 +923,7 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     expect(result.content[0].text).not.toContain(MARK)
     return result.content[0].text
   }
-  const SENDS = ['sendMessage', 'sendPhoto', 'sendDocument', 'sendRichMessage']
+  const SENDS = ['sendMessage', 'sendPhoto', 'sendDocument', 'sendRichMessage', 'sendMediaGroup']
   const sends = (dir: string) => calls(dir).filter(c => SENDS.includes(c.method))
   const command = (from: { id: number }, message_id: number, name: string) => ({ message: {
     message_id, date: Math.floor(Date.now() / 1000), from, chat: { id: from.id, type: 'private' }, text: `/${name}`,
@@ -1041,15 +1043,18 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     await sender.close()
   }, 15000)
 
+  // The reply below goes as an album of two documents, then its text in two
+  // pieces, textChunkLimit aside; the album's messages count as sent together.
   test.each([
-    ['the first chunk', 1, 'reply failed after 1 of 4 message(s) sent (ids: 500): message 500 went to chat 9999, not 7010'],
-    ['a later chunk', 2, 'reply failed after 2 of 4 message(s) sent (ids: 500, 501): message 501 went to chat 9999, not 7010'],
-    ['the file', 4, 'reply failed after 4 of 4 message(s) sent (ids: 500, 501, 502, 503): message 503 went to chat 9999, not 7010'],
+    ['the album', 1, 'reply failed after 2 of 4 message(s) sent (ids: 500, 501): message 500 went to chat 9999, not 7010'],
+    ['the first text piece', 2, 'reply failed after 3 of 4 message(s) sent (ids: 500, 501, 502): message 502 went to chat 9999, not 7010'],
+    ['a later text piece', 3, 'reply failed after 4 of 4 message(s) sent (ids: 500, 501, 502, 503): message 503 went to chat 9999, not 7010'],
   ])('when %s of a reply to a bot went to another chat, nothing more goes, the bot keeps its notices away from its chat, and its username is checked before the next reply', async (_, from, line) => {
     const PEER10 = peerBot(7010, 'peer_ten_bot')
     const dir = state({ dmPolicy: 'allowlist', allowFrom: ['1', '7010'], textChunkLimit: 10 })
     mkdirSync(join(dir, 'inbox'))
     writeFileSync(join(dir, 'inbox', 'chart.png'), 'png')
+    writeFileSync(join(dir, 'inbox', 'notes.txt'), 'notes')
     writeFileSync(join(dir, 'inbound.json'), updates(dm(PEER10, 1, 'from the peer bot')))
     const channel = start(dir, fixture.argv, {
       TELEGRAM_ALERT_CHAT: '1',
@@ -1061,10 +1066,10 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     await until(() => channel.inbound().length === 1, 6000)
     const toPeer = () => sends(dir).filter(c => String(c.payload.chat_id).toLowerCase() === at(PEER10.username))
 
-    const result = await toolCall(channel, 'reply', { chat_id: '7010', text: 'a'.repeat(10) + 'b'.repeat(10) + 'c'.repeat(10), files: [join(dir, 'inbox', 'chart.png')] })
+    const result = await toolCall(channel, 'reply', { chat_id: '7010', text: 'a'.repeat(4096) + 'b'.repeat(904), files: [join(dir, 'inbox', 'chart.png'), join(dir, 'inbox', 'notes.txt')] })
     expect(failure(result)).toBe(`reply failed: ${line}`)
     expect(channel.stderr()).toContain(line)
-    expect(toPeer().map(c => c.method)).toEqual(['sendMessage', 'sendMessage', 'sendMessage', 'sendPhoto'].slice(0, from))
+    expect(toPeer().map(c => c.method)).toEqual(['sendMediaGroup', 'sendMessage', 'sendMessage'].slice(0, from))
 
     // An edit goes by numeric id, plain, with no lookup.
     const before = calls(dir).length
@@ -1129,14 +1134,204 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     for (const [chat_id, files] of [['7070', [join(dir, 'inbox', 'notes.txt')]], ['7070', []], ['5', []], ['6', []], ['-100', []], ['1', []]] as [string, string[]][]) {
       expect((await toolCall(channel, 'reply', { chat_id, text: `to ${chat_id}`, files })).isError).not.toBe(true)
     }
+    // The bot's file goes first, the text as its caption.
     expect(sends(dir).map(c => [c.method, c.payload.chat_id])).toEqual([
-      ['sendMessage', at(PEER70.username)], ['sendDocument', at(PEER70.username)], ['sendMessage', at(PEER70.username)],
+      ['sendDocument', at(PEER70.username)], ['sendMessage', at(PEER70.username)],
       ['sendMessage', '5'], ['sendMessage', '6'], ['sendMessage', '-100'], ['sendMessage', '1'],
     ])
+    expect(sends(dir)[0]!.payload.caption).toBe('to 7070')
     expect(calls(dir).filter(c => c.method === 'getChat')).toEqual([])
     expect(calls(dir).filter(c => c.method === 'getChatMember').map(c => c.payload.chat_id)).toEqual(['6', '1'])
     await channel.close()
   }, 15000)
+
+  // A reply with files to another bot goes files first, every file as a
+  // document, ten to an album and a single file left over by itself, and its
+  // text as the first file's caption, or after the files.
+  async function toPeerBot(access: object = {}, env: Record<string, string> = {}) {
+    const PEER = peerBot(7080, 'peer_eighty_bot')
+    const dir = state({ dmPolicy: 'allowlist', allowFrom: ['1', '7080'], ...access })
+    mkdirSync(join(dir, 'inbox'))
+    const sender = start(dir, ['claude', '-p', 'hello'], { TELEGRAM_TEST_USERS: JSON.stringify({ 7080: PEER }), ...env })
+    await sender.ready()
+    const file = (name: string) => { const path = join(dir, 'inbox', name); writeFileSync(path, name); return path }
+    const reply = (args: object) => toolCall(sender, 'reply', { chat_id: '7080', ...args })
+    return { dir, sender, file, reply, to: at(PEER.username) }
+  }
+  // What an album carries: each message's kind, file and caption.
+  const mediaOf = (c: { payload: any }) => c.payload.media.map((m: any) => [m.type, m.media, m.caption])
+  // An upload carries reply_parameters as JSON text.
+  const threadOf = (c: { payload: any }) => typeof c.payload.reply_parameters === 'string' ? JSON.parse(c.payload.reply_parameters) : c.payload.reply_parameters
+  // What the reply tool returns for the messages the fake logged.
+  const sentAs = (logged: { message_id?: number; message_ids?: number[] }[]) => {
+    const ids = logged.flatMap(c => c.message_ids ?? [c.message_id!])
+    return ids.length === 1 ? `sent (id: ${ids[0]})` : `sent ${ids.length} parts (ids: ${ids.join(', ')})`
+  }
+
+  test('to a bot, one file and a short text go as one document captioned with the text, threaded, and no text message follows', async () => {
+    const t = await toPeerBot()
+    const result = await t.reply({ text: 'the report', files: [t.file('report.pdf')], reply_to: '9' })
+    expect(result.isError).not.toBe(true)
+    expect(result.content[0].text).toBe(sentAs(sends(t.dir)))
+    expect(sends(t.dir).map(c => [c.method, c.payload.chat_id, c.payload.document, c.payload.caption, threadOf(c)])).toEqual([
+      ['sendDocument', t.to, 'file:report.pdf', 'the report', { message_id: 9 }],
+    ])
+    await t.sender.close()
+  }, 15000)
+
+  test('to a bot, a photo goes as a document, and a text empty once trimmed sends no text message, while an empty text alone is still refused', async () => {
+    const t = await toPeerBot()
+    for (const text of ['', ' \n ']) {
+      const from = sends(t.dir).length
+      expect((await t.reply({ text, files: [t.file('chart.png')] })).isError).not.toBe(true)
+      expect(sends(t.dir).slice(from).map(c => [c.method, c.payload.document, c.payload.caption])).toEqual([['sendDocument', 'file:chart.png', undefined]])
+    }
+    expect(failure(await t.reply({ text: '' }))).toContain('message text is empty')
+    expect(calls(t.dir).filter(c => c.method === 'sendPhoto')).toEqual([])
+    await t.sender.close()
+  }, 15000)
+
+  test('to a bot, three files, a photo among them, go as one threaded album of documents with the text as the first one\'s caption', async () => {
+    const t = await toPeerBot()
+    const result = await t.reply({ text: 'three files', files: [t.file('chart.png'), t.file('notes.txt'), t.file('data.csv')], reply_to: '9' })
+    expect(result.content[0].text).toBe(sentAs(sends(t.dir)))
+    expect(sends(t.dir)[0]!.message_ids).toHaveLength(3)
+    expect(sends(t.dir).map(c => [c.method, c.payload.chat_id, mediaOf(c), threadOf(c)])).toEqual([
+      ['sendMediaGroup', t.to, [['document', 'file:chart.png', 'three files'], ['document', 'file:notes.txt', undefined], ['document', 'file:data.csv', undefined]], { message_id: 9 }],
+    ])
+    await t.sender.close()
+  }, 15000)
+
+  test('to a bot, eleven files go as an album of ten and one document, and twelve as albums of ten and two, in order', async () => {
+    const t = await toPeerBot()
+    const names = Array.from({ length: 12 }, (_, i) => `f${i + 1}.txt`)
+    const files = names.map(t.file)
+    const result = await t.reply({ text: 'eleven', files: files.slice(0, 11) })
+    const eleven = sends(t.dir)
+    expect(result.content[0].text).toBe(sentAs(eleven))
+    expect(result.content[0].text).toStartWith('sent 11 parts')
+    expect(eleven.map(c => c.method)).toEqual(['sendMediaGroup', 'sendDocument'])
+    expect(mediaOf(eleven[0]!)).toEqual(names.slice(0, 10).map((n, i) => ['document', `file:${n}`, i === 0 ? 'eleven' : undefined]))
+    expect([eleven[1]!.payload.document, eleven[1]!.payload.caption]).toEqual(['file:f11.txt', undefined])
+    expect((await t.reply({ text: 'twelve', files })).isError).not.toBe(true)
+    const twelve = sends(t.dir).slice(2)
+    expect(twelve.map(c => c.method)).toEqual(['sendMediaGroup', 'sendMediaGroup'])
+    expect(twelve.flatMap(mediaOf)).toEqual(names.map((n, i) => ['document', `file:${n}`, i === 0 ? 'twelve' : undefined]))
+    await t.sender.close()
+  }, 15000)
+
+  test('to a bot, a long text follows the files in pieces of 4096 characters whatever chunkMode and textChunkLimit say, every line break kept, threaded as text chunks are', async () => {
+    const t = await toPeerBot({ chunkMode: 'newline', textChunkLimit: 1000 })
+    const text = 'a'.repeat(2000) + '\n\n' + 'b'.repeat(1500) + '\n' + 'c'.repeat(1497)
+    const result = await t.reply({ text, files: [t.file('a.txt'), t.file('b.txt')], reply_to: '9' })
+    const sent = sends(t.dir)
+    expect(result.content[0].text).toBe(sentAs(sent))
+    expect(result.content[0].text).toStartWith('sent 4 parts')
+    expect(sent.map(c => c.method)).toEqual(['sendMediaGroup', 'sendMessage', 'sendMessage'])
+    expect(mediaOf(sent[0]!)).toEqual([['document', 'file:a.txt', undefined], ['document', 'file:b.txt', undefined]])
+    expect(sent.slice(1).map(c => c.payload.text.length)).toEqual([4096, 904])
+    expect(sent.slice(1).map(c => c.payload.text).join('')).toBe(text)
+    expect(sent.map(threadOf)).toEqual([{ message_id: 9 }, { message_id: 9 }, undefined])
+    await t.sender.close()
+  }, 15000)
+
+  test('to a bot, a refused album fails the reply with nothing sent, and a text piece refused after an album counts every album message as sent', async () => {
+    const WRONG = { error_code: 400, description: 'Bad Request: wrong file identifier' }
+    const TOO_LONG = { error_code: 400, description: 'Bad Request: message is too long' }
+    const t = await toPeerBot({}, { TELEGRAM_TEST_RULES: JSON.stringify([{ method: 'sendMediaGroup', times: 1, error: WRONG }, { method: 'sendMessage', times: 1, error: TOO_LONG }]) })
+    const args = { text: 'x'.repeat(5000), files: [t.file('a.txt'), t.file('b.txt')] }
+    expect(failure(await t.reply(args))).toBe("reply failed: reply failed after 0 of 4 message(s) sent: Call to 'sendMediaGroup' failed! (400: Bad Request: wrong file identifier)")
+    const second = failure(await t.reply(args))
+    const album = sends(t.dir)[1]!.message_ids!
+    expect(second).toBe(`reply failed: reply failed after 2 of 4 message(s) sent (ids: ${album.join(', ')}): Call to 'sendMessage' failed! (400: Bad Request: message is too long)`)
+    expect(sends(t.dir).map(c => [c.method, c.refused])).toEqual([
+      ['sendMediaGroup', WRONG.description], ['sendMediaGroup', undefined], ['sendMessage', TOO_LONG.description],
+    ])
+    await t.sender.close()
+  }, 15000)
+
+  test('a photo whose download failed reaches Claude with its file reference, in one message with the text sent after it', async () => {
+    const dir = state(PEERS)
+    const now = Math.floor(Date.now() / 1000)
+    const photo = [{ file_id: 'small', file_unique_id: 'su', width: 1, height: 1 }, { file_id: 'p1', file_unique_id: 'pu1', width: 2, height: 2, file_size: 512 }]
+    // The offline Telegram's getFile gives no file path, so no download.
+    writeFileSync(join(dir, 'inbound.json'), updates(
+      { message: { message_id: 50, date: now, from: PERSON, chat: { id: PERSON.id, type: 'private' }, photo, caption: 'look' } },
+      dm(PERSON, 51, 'what is it?'),
+    ))
+    const channel = start(dir, fixture.argv)
+    await channel.ready()
+    await until(() => channel.inbound().length > 0, 6000)
+    await wait(MAX_WAIT_MS)
+    expect(channel.inbound()).toEqual([{ content: 'look\nwhat is it?', meta: expect.objectContaining({
+      message_ids: '50,51', attachment_kind: 'photo', attachment_file_id: 'p1', attachment_size: '512',
+    }) }])
+    expect(channel.inbound()[0]!.meta.image_path).toBeUndefined()
+    await channel.close()
+  }, 20000)
+
+  // What reaches Claude from a document, other than its joining a burst,
+  // stays as it was.
+  test('a document sent alone reaches Claude with the meta it always had, and the same person\'s text a second later reaches it as a message of its own', async () => {
+    const dir = state(PEERS)
+    const channel = start(dir, fixture.argv)
+    await channel.ready()
+    await until(() => channel.stderr().includes('polling as '))
+    const now = Math.floor(Date.now() / 1000)
+    const document = { file_id: 'd1', file_unique_id: 'du1', file_name: 'plan.pdf', mime_type: 'application/pdf', file_size: 2048 }
+    deliver(dir, [{ message: { message_id: 20, date: now, from: PERSON, chat: { id: PERSON.id, type: 'private' }, document } }])
+    await wait(1000)
+    deliver(dir, [dm(PERSON, 21, 'and one more thing')])
+    await until(() => channel.inbound().length === 2, 6000)
+    await wait(MAX_WAIT_MS)
+    expect(channel.inbound()).toEqual([
+      { content: '(document: plan.pdf)', meta: {
+        chat_id: '5', message_id: '20', user: 'manager', user_id: '5', ts: new Date(now * 1000).toISOString(),
+        attachment_kind: 'document', attachment_file_id: 'd1', attachment_size: '2048', attachment_mime: 'application/pdf', attachment_name: 'plan.pdf',
+      } },
+      { content: 'and one more thing', meta: expect.objectContaining({ message_id: '21', user_id: '5' }) },
+    ])
+    await channel.close()
+  }, 20000)
+
+  test('in a group, a member\'s text then another member\'s document, and that document then the first member\'s text, reach Claude in the order sent', async () => {
+    const dir = state({ dmPolicy: 'allowlist', allowFrom: ['1'], groups: { '-100': { requireMention: false, allowFrom: [] } } })
+    const now = Math.floor(Date.now() / 1000)
+    const chat = { id: -100, type: 'supergroup', title: 'g' }
+    const P = { id: 6, is_bot: false, first_name: 'P' }
+    const Q = { id: 7, is_bot: false, first_name: 'Q' }
+    // A piece of a long paste waits longest for what follows it.
+    const paste = 'p'.repeat(4096)
+    writeFileSync(join(dir, 'inbound.json'), updates(
+      { message: { message_id: 60, date: now, from: P, chat, text: paste } },
+      { message: { message_id: 61, date: now, from: Q, chat, document: { file_id: 'q1', file_unique_id: 'qu1', file_name: 'q.pdf' } } },
+      { message: { message_id: 62, date: now, from: P, chat, text: 'after the document' } },
+    ))
+    const channel = start(dir, fixture.argv)
+    await channel.ready()
+    await until(() => channel.inbound().length === 3, 6000)
+    await wait(MAX_WAIT_MS)
+    expect(channel.inbound().map(n => [n.meta.user_id, n.content])).toEqual([['6', paste], ['7', '(document: q.pdf)'], ['6', 'after the document']])
+    await channel.close()
+  }, 20000)
+
+  test('the owner\'s document, then a permission answer, reach Claude in that order', async () => {
+    const dir = state(PEERS)
+    const now = Math.floor(Date.now() / 1000)
+    writeFileSync(join(dir, 'inbound.json'), updates(
+      { message: { message_id: 30, date: now, from: OWNER, chat: { id: OWNER.id, type: 'private' }, document: { file_id: 'd3', file_unique_id: 'du3', file_name: 'log.txt' } } },
+      dm(OWNER, 31, 'yes abcde'),
+    ))
+    const channel = start(dir, fixture.argv, { TELEGRAM_ALERT_CHAT: '1' })
+    await channel.ready()
+    await until(() => answers(channel).length === 1, 6000)
+    await wait(1000)
+    const events = channel.notifications.filter(n => n.method.startsWith('notifications/claude/channel'))
+    expect(events.map(n => n.method === 'notifications/claude/channel/permission' ? n.params : n.params.content)).toEqual([
+      '(document: log.txt)', { request_id: 'abcde', behavior: 'allow' },
+    ])
+    await channel.close()
+  }, 20000)
 
   test('a chat id that is not numeric is refused before any call, constructor included, and a numeric one not allowlisted says only the owner allowlists it', async () => {
     const dir = state({ dmPolicy: 'allowlist', allowFrom: ['1'], groups: { '-100': { requireMention: true, allowFrom: [] } }, botUsernames: { '7050': 'fifty_peer_bot' } })

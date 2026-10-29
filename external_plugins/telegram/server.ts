@@ -16,7 +16,7 @@ import {
   CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
-import { API_CONSTANTS, Bot, GrammyError, InlineKeyboard, InputFile, type Context } from 'grammy'
+import { API_CONSTANTS, Bot, GrammyError, InlineKeyboard, InputFile, InputMediaBuilder, type Context } from 'grammy'
 import type { ReactionTypeEmoji } from 'grammy/types'
 import { randomBytes } from 'crypto'
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync } from 'fs'
@@ -35,7 +35,7 @@ import { createTextMemory, editEvent } from './edit.ts'
 import { opening, reactionEvent } from './reaction.ts'
 import { channelMode } from './polling.ts'
 import { alertConfig, createIdleAlarm, idleText, NO_OWNER, RECOVERED_TEXT, stuckText } from './alerts.ts'
-import { CHAT_ID, createBotLookup, createConfirm, createPeers, listed, noticeChat, plainObject, sendStyle } from './bots.ts'
+import { botReply, CHAT_ID, createBotLookup, createConfirm, createPeers, listed, noticeChat, plainObject, sendStyle } from './bots.ts'
 import { cleanFiles, createFailureWatch, failureFiles, HOLD_MS } from './failures.ts'
 import { askOwner, NO_ASKS, ownerAnswers } from './asks.ts'
 import { createPermitReader, permitDetail, permitFile, permitText, type PermitEvent } from './permit.ts'
@@ -718,7 +718,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           files: {
             type: 'array',
             items: { type: 'string' },
-            description: 'Absolute file paths to attach. Images send as photos (inline preview); other types as documents. Max 50MB each.',
+            description: 'Absolute file paths to attach. Images send as photos (inline preview); other types as documents. To a bot, every file goes as a document, before the text. Max 50MB each.',
           },
           format: formatSchema(RICH),
           buttons: {
@@ -745,7 +745,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'download_attachment',
-      description: 'Download a file attachment from a Telegram message to the local inbox. Use when the inbound <channel> meta shows attachment_file_id. Returns the local file path ready to Read. Telegram caps bot downloads at 20MB.',
+      description: 'Download a file attachment from a Telegram message to the local inbox. Use when the inbound <channel> meta shows attachment_file_id. A burst with several files lists every file_id in attachment_file_ids and their names in attachment_names, comma-separated, in message order. Returns the local file path ready to Read. Telegram caps bot downloads at 20MB.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -1022,6 +1022,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const mode = access.chunkMode ?? 'length'
         const replyMode = access.replyToMode ?? 'first'
         const chunks = chunk(text, limit, mode)
+        // A reply with files to another bot goes files first. See bots.ts.
+        const toBotPlan = toBot && files.length > 0 ? botReply(text, files) : undefined
         const sentIds: number[] = []
         const rich = RICH && style === 'rich' ? { ids: sentIds, done: 0, total: 0 } : undefined
         // Each message to a bot takes the bot's @username from the cache right
@@ -1029,10 +1031,14 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         // nothing more goes, and the next message to the bot waits for its
         // username to be checked again. See bots.ts.
         const dest = async () => toBot ? await peers.target(chat_id) : to
-        const total = chunks.length + files.length
+        const total = toBotPlan ? files.length + toBotPlan.pieces.length : chunks.length + files.length
         const ids = () => sentIds.length ? ` (ids: ${sentIds.join(', ')})` : ''
+        const sentText = () => sentIds.length === 1 ? `sent (id: ${sentIds[0]})` : `sent ${sentIds.length} parts (ids: ${sentIds.join(', ')})`
         const sentTo = (sent: { message_id: number; chat: { id: number } }, words: string) => {
           sentIds.push(sent.message_id)
+          wentTo(sent, words)
+        }
+        const wentTo = (sent: { message_id: number; chat: { id: number } }, words: string) => {
           if (!toBot || String(sent.chat.id) === chat_id) {
             sentWords.remember(String(sent.chat.id), sent.message_id, opening(words))
             return
@@ -1041,6 +1047,43 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           const line = `reply failed after ${sentIds.length} of ${total} message(s) sent${ids()}: message ${sent.message_id} went to chat ${sent.chat.id}, not ${chat_id}`
           process.stderr.write(`telegram channel: ${line}\n`)
           throw new WentElsewhere(line)
+        }
+
+        // To another bot: the files, then the text unless it rode as the first
+        // file's caption. Every file message and album carries the reply
+        // target, as the files below do, and the text's pieces as the text
+        // chunks below do. A bot's chat carries no buttons, so nothing is
+        // reserved.
+        if (toBotPlan) {
+          const replyTo = reply_to != null && replyMode !== 'off' ? { reply_parameters: { message_id: reply_to } } : {}
+          const failed = (err: unknown) => new Error(`reply failed after ${sentIds.length} of ${total} message(s) sent${ids()}: ${reason(err)}`)
+          for (const [g, group] of toBotPlan.groups.entries()) {
+            const caption = g === 0 ? toBotPlan.caption : undefined
+            const captioned = (i: number) => i === 0 && caption !== undefined ? { caption } : {}
+            let sent: { message_id: number; chat: { id: number } }[]
+            try {
+              sent = group.length === 1
+                ? [await bot.api.sendDocument(await dest(), new InputFile(group[0]!), { ...replyTo, ...captioned(0) })]
+                : await bot.api.sendMediaGroup(await dest(), group.map((f, i) => InputMediaBuilder.document(new InputFile(f), captioned(i))), replyTo)
+            } catch (err) {
+              throw failed(err)
+            }
+            // One call sent every message of an album, so all of them count
+            // as sent before any is checked.
+            for (const m of sent) sentIds.push(m.message_id)
+            sent.forEach((m, i) => wentTo(m, i === 0 && caption !== undefined ? caption : `(document: ${basename(group[i]!)})`))
+          }
+          for (const [i, piece] of toBotPlan.pieces.entries()) {
+            const threaded = reply_to != null && replyMode !== 'off' && (replyMode === 'all' || i === 0)
+            let sent: { message_id: number; chat: { id: number } }
+            try {
+              sent = await bot.api.sendMessage(await dest(), piece, threaded ? { reply_parameters: { message_id: reply_to } } : {})
+            } catch (err) {
+              throw failed(err)
+            }
+            sentTo(sent, piece)
+          }
+          return { content: [{ type: 'text', text: sentText() }] }
         }
 
         // The keyboard goes on the last message sent, a text part or a file,
@@ -1128,11 +1171,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         }
         if (keyboard !== undefined && carrier !== undefined) await joinKeyboard(chat_id, keyboard, carrier, sentIds)
 
-        const result =
-          (sentIds.length === 1
-            ? `sent (id: ${sentIds[0]})`
-            : `sent ${sentIds.length} parts (ids: ${sentIds.join(', ')})`) +
-          (carrier !== undefined ? `; buttons on message ${carrier}` : '')
+        const result = sentText() + (carrier !== undefined ? `; buttons on message ${carrier}` : '')
         return { content: [{ type: 'text', text: result }] }
       }
       case 'react': {
@@ -1514,12 +1553,13 @@ bot.on('message:text', async ctx => {
 
 bot.on('message:photo', async ctx => {
   const caption = ctx.message.caption ?? '(photo)'
+  // Largest size is last in the array.
+  const photos = ctx.message.photo
+  const best = photos[photos.length - 1]
   // Defer download until after the gate approves — any user can send photos,
   // and we don't want to burn API quota or fill the inbox for dropped messages.
+  // A photo that fails to download arrives as an attachment instead.
   await handleInbound(ctx, caption, async () => {
-    // Largest size is last in the array.
-    const photos = ctx.message.photo
-    const best = photos[photos.length - 1]
     try {
       const file = await ctx.api.getFile(best.file_id)
       if (!file.file_path) return undefined
@@ -1535,6 +1575,10 @@ bot.on('message:photo', async ctx => {
       process.stderr.write(`telegram channel: photo download failed: ${err}\n`)
       return undefined
     }
+  }, {
+    kind: 'photo',
+    file_id: best.file_id,
+    size: best.file_size,
   })
 })
 
@@ -1752,7 +1796,7 @@ async function handleInbound(
       ...replyMeta(ctx.message, botUsername),
       ...(imagePath ? { image_path: imagePath } : {}),
       ...(speech ? { transcribed_by: STT!.model, audio_path: speech.path, attachment_kind: attachment!.kind } : {}),
-      ...(attachment && !speech ? {
+      ...(attachment && !speech && !imagePath ? {
         attachment_kind: attachment.kind,
         attachment_file_id: attachment.file_id,
         ...(attachment.size != null ? { attachment_size: String(attachment.size) } : {}),
@@ -1761,7 +1805,9 @@ async function handleInbound(
       } : {}),
     } as Record<string, string>,
   }
-  const gap = batchGap({ text, photo: imagePath != null, other: downloadImage != null || attachment != null })
+  // A photo or a document joins the sender's batch; any other file goes alone.
+  const file = downloadImage != null || attachment?.kind === 'document'
+  const gap = batchGap({ text, file, other: !file && attachment != null, bot: from.is_bot })
   if (gap === undefined) batcher.flush(batchKey, item)
   else batcher.add(batchKey, chat_id, item, gap)
 }

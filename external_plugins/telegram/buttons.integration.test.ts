@@ -13,7 +13,7 @@ afterEach(cleanup)
 
 const OWNER = { id: 1, is_bot: false, first_name: 'Owner', username: 'owner' }
 const DM = { id: 1, type: 'private' }
-const SENDS = ['sendMessage', 'sendPhoto', 'sendDocument', 'sendRichMessage']
+const SENDS = ['sendMessage', 'sendPhoto', 'sendDocument', 'sendRichMessage', 'sendMediaGroup']
 const EDITS = ['editMessageText', 'editMessageReplyMarkup']
 const now = () => Math.floor(Date.now() / 1000)
 const TOO_MANY = { error_code: 429, description: 'Too Many Requests: retry after 5', parameters: { retry_after: 5 } }
@@ -194,8 +194,13 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
   test('non-empty buttons are refused in a bot’s chat and in a server that does not poll, while removing them is allowed in both', async () => {
     const BOT = { id: 7091, is_bot: true, first_name: 'Peer', username: 'peer_ninety_one_bot' }
     const dir = state({ dmPolicy: 'allowlist', allowFrom: ['1', String(BOT.id)] })
+    mkdirSync(join(dir, 'inbox'))
+    writeFileSync(join(dir, 'inbox', 'chart.png'), 'png')
+    writeFileSync(join(dir, 'inbox', 'notes.txt'), 'notes')
     const srv = await channel(dir, { env: { TELEGRAM_TEST_USERS: JSON.stringify({ [BOT.id]: BOT }) } })
     expect(failed(await tool(srv, 'reply', { chat_id: String(BOT.id), text: 'Q', buttons: [['Yes']] }))).toBe("reply failed: buttons are refused in a bot's chat: a bot cannot press one")
+    // With files, which go first to a bot, nothing goes either.
+    expect(failed(await tool(srv, 'reply', { chat_id: String(BOT.id), text: 'Q', buttons: [['Yes']], files: [join(dir, 'inbox', 'chart.png'), join(dir, 'inbox', 'notes.txt')] }))).toBe("reply failed: buttons are refused in a bot's chat: a bot cannot press one")
     expect(failed(await tool(srv, 'edit_message', { chat_id: String(BOT.id), message_id: '77', buttons: [['Yes']] }))).toBe("edit_message failed: buttons are refused in a bot's chat: a bot cannot press one")
     expect(calls(dir).filter(c => SENDS.includes(c.method) || EDITS.includes(c.method))).toEqual([])
     ok(await tool(srv, 'edit_message', { chat_id: String(BOT.id), message_id: '77', buttons: [] }))
