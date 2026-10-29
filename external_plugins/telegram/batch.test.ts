@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { batchGap, createBatcher, FRAGMENT_GAP_MS, MAX_MESSAGES, MAX_WAIT_MS, mergeInbound, PHOTO_GAP_MS, TEXT_GAP_MS, type Inbound } from './batch.ts'
+import { batchGap, BOT_FILE_GAP_MS, createBatcher, FRAGMENT_GAP_MS, MAX_MESSAGES, MAX_WAIT_MS, mergeInbound, PHOTO_GAP_MS, TEXT_GAP_MS, type Inbound } from './batch.ts'
 
 function harness() {
   let t = 0
@@ -104,9 +104,24 @@ describe('createBatcher', () => {
 
   test('anything else sends the batch first, then goes alone', () => {
     const h = harness()
-    h.b.add('k', 'c', msg(1, 'look at this'), TEXT_GAP_MS)
-    h.b.flush('k', msg(2, '(document: a.pdf)'))
-    expect(h.out).toEqual([msg(1, 'look at this'), msg(2, '(document: a.pdf)')])
+    h.b.add('k', 'c', msg(1, 'listen to this'), TEXT_GAP_MS)
+    h.b.flush('k', msg(2, '(voice message)', { attachment_kind: 'voice', attachment_file_id: 'v1' }))
+    expect(h.out).toEqual([msg(1, 'listen to this'), msg(2, '(voice message)', { attachment_kind: 'voice', attachment_file_id: 'v1' })])
+  })
+
+  test('another bot\'s files wait 3 s for the text sent after them, and go out with it as one message', () => {
+    const h = harness()
+    const doc = (id: number, name: string, extra: Record<string, string> = {}) =>
+      msg(id, `(document: ${name})`, { attachment_kind: 'document', attachment_file_id: `f${id}`, attachment_name: name, ...extra })
+    h.b.add('k', 'c', doc(1, 'a.txt'), BOT_FILE_GAP_MS)
+    h.b.add('k', 'c', doc(2, 'b.txt'), BOT_FILE_GAP_MS)
+    h.advance(BOT_FILE_GAP_MS - 1)
+    expect(h.out).toEqual([])
+    h.b.add('k', 'c', msg(3, 'both files attached'), TEXT_GAP_MS)
+    h.advance(TEXT_GAP_MS)
+    expect(h.out.map(o => [o.content, o.meta.message_ids, o.meta.attachment_file_ids])).toEqual([
+      ['(document: a.txt)\n(document: b.txt)\nboth files attached', '1,2,3', 'f1,f2'],
+    ])
   })
 
   test('in a group, another sender\'s message sends the waiting batch first, so the chat keeps its order', () => {
@@ -165,13 +180,20 @@ describe('createBatcher', () => {
 })
 
 describe('batchGap', () => {
-  test('photos and plain text batch; documents, voice, failed photos and commands go alone', () => {
-    expect(batchGap({ text: 'hi', photo: false, other: false })).toBe(TEXT_GAP_MS)
-    expect(batchGap({ text: 'x'.repeat(4096), photo: false, other: false })).toBe(FRAGMENT_GAP_MS)
-    expect(batchGap({ text: '(photo)', photo: true, other: true })).toBe(PHOTO_GAP_MS)
-    expect(batchGap({ text: '(photo)', photo: false, other: true })).toBeUndefined()
-    expect(batchGap({ text: '(document: a.pdf)', photo: false, other: true })).toBeUndefined()
-    expect(batchGap({ text: '/compact', photo: false, other: false })).toBeUndefined()
+  test('photos, documents and plain text batch, a bot\'s file waiting longest; voice, other files and a person\'s commands go alone', () => {
+    for (const bot of [false, true]) {
+      expect(batchGap({ text: 'hi', file: false, other: false, bot })).toBe(TEXT_GAP_MS)
+      expect(batchGap({ text: 'x'.repeat(4096), file: false, other: false, bot })).toBe(FRAGMENT_GAP_MS)
+      expect(batchGap({ text: '(voice message)', file: false, other: true, bot })).toBeUndefined()
+    }
+    // A photo, downloaded or not, and a document.
+    expect(batchGap({ text: '(photo)', file: true, other: false, bot: false })).toBe(PHOTO_GAP_MS)
+    expect(batchGap({ text: '(document: a.pdf)', file: true, other: false, bot: false })).toBe(PHOTO_GAP_MS)
+    expect(batchGap({ text: '(document: a.pdf)', file: true, other: false, bot: true })).toBe(BOT_FILE_GAP_MS)
+    expect(BOT_FILE_GAP_MS).toBe(3000)
+    // A person's command goes alone; a bot's text starting with / is text.
+    expect(batchGap({ text: '/compact', file: false, other: false, bot: false })).toBeUndefined()
+    expect(batchGap({ text: '/tmp/out.json is attached', file: false, other: false, bot: true })).toBe(TEXT_GAP_MS)
   })
 })
 
@@ -183,5 +205,24 @@ describe('mergeInbound', () => {
       msg(3, 'c', { reply_to_message_id: '41', reply_to_text: 'other' }),
     ])
     expect(merged.meta).toEqual({ chat_id: '1', message_id: '3', user: 'owner', ts: 't3', message_ids: '1,2,3', reply_to_message_id: '40', reply_to_user: 'this bot', reply_quote: 'q' })
+  })
+
+  test('a text and two files: the first file\'s attachment keys and none of the last one\'s, and every file\'s id and name in message order', () => {
+    const merged = mergeInbound([
+      msg(1, 'the report and its data'),
+      msg(2, '(document: report,final.pdf)', { attachment_kind: 'document', attachment_file_id: 'f1', attachment_name: 'report,final.pdf' }),
+      msg(3, '(document: file)', { attachment_kind: 'document', attachment_file_id: 'f2', attachment_size: '10', attachment_mime: 'text/csv' }),
+    ])
+    expect(merged).toEqual({
+      content: 'the report and its data\n(document: report,final.pdf)\n(document: file)',
+      meta: {
+        chat_id: '1', message_id: '3', user: 'owner', ts: 't3', message_ids: '1,2,3',
+        attachment_kind: 'document', attachment_file_id: 'f1', attachment_name: 'report,final.pdf',
+        attachment_file_ids: 'f1,f2', attachment_names: 'report_final.pdf,',
+      },
+    })
+    // One file: its keys, and no lists.
+    const one = mergeInbound([msg(1, 'look'), msg(2, '(document: a.txt)', { attachment_kind: 'document', attachment_file_id: 'f2', attachment_name: 'a.txt' })])
+    expect(one.meta).toEqual({ chat_id: '1', message_id: '2', user: 'owner', ts: 't2', message_ids: '1,2', attachment_kind: 'document', attachment_file_id: 'f2', attachment_name: 'a.txt' })
   })
 })

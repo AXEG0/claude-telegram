@@ -1,20 +1,24 @@
 // Messages a sender sends in quick succession reach Claude as one, as in
 // OpenClaw: a burst of short texts, a long paste Telegram split into
-// 4096-character pieces, and photos, an album's or a photo sent with its
-// question. Claude then answers the burst once, not its first message alone.
+// 4096-character pieces, and photos and documents, an album's or a file sent
+// with its question. Claude then answers the burst once, not its first message
+// alone.
 //
 // A batch goes out a gap after its last message, as soon as it is full, and
 // at the latest MAX_WAIT_MS after its first. Anything else from the sender (a
-// document, a voice note, a command) sends the batch first, then goes alone. A
-// message from someone else in the chat, or one replying to another message
-// than the batch's, also sends it first, so the chat keeps its order and each
-// message its reply.
+// voice note, audio, a video, a sticker, or a person's command) sends the
+// batch first, then goes alone. A message from someone else in the chat, or
+// one replying to another message than the batch's, also sends it first, so
+// the chat keeps its order and each message its reply.
 
 export const TEXT_GAP_MS = 300
 // A piece near Telegram's 4096 limit is likely followed by the rest of a paste.
 export const FRAGMENT_GAP_MS = 1500
 export const FRAGMENT_CHARS = 4000
 export const PHOTO_GAP_MS = 500
+// Another bot on this plugin sends a reply's files first and its text right
+// after them (see bots.ts), so its file waits for one text send.
+export const BOT_FILE_GAP_MS = 3000
 export const MAX_WAIT_MS = 7500
 export const MAX_MESSAGES = 12
 export const MAX_CHARS = 50_000
@@ -22,11 +26,15 @@ export const MAX_CHARS = 50_000
 export type Inbound = { content: string; meta: Record<string, string> }
 
 const REPLY_KEYS = ['reply_to_message_id', 'reply_to_user', 'reply_to_text', 'reply_to_kind', 'reply_quote']
+const ATTACHMENT_KEYS = ['attachment_kind', 'attachment_file_id', 'attachment_size', 'attachment_mime', 'attachment_name']
 
-// One message for a batch: the texts in order, joined by a line break, or by
-// nothing after a piece of a split paste. It carries the last message's id and
-// time, every id in message_ids, the first reply context, and every photo in
-// image_paths, the first also in image_path.
+// One message for a batch: the texts, captions and file labels in order,
+// joined by a line break, or by nothing after a piece of a split paste. It
+// carries the last message's id and time, every id in message_ids, the first
+// reply context, and every photo in image_paths, the first also in image_path.
+// Its attachment_* keys are the first file's; with two or more files, every
+// file's id is in attachment_file_ids and every file's name, empty where
+// Telegram gives none, in attachment_names, both in message order.
 export function mergeInbound(items: Inbound[]): Inbound {
   if (items.length === 1) return items[0]!
   let content = ''
@@ -43,15 +51,26 @@ export function mergeInbound(items: Inbound[]): Inbound {
   delete meta.image_path
   if (images.length > 0) meta.image_path = images[0]!
   if (images.length > 1) meta.image_paths = images.join(',')
+  for (const k of ATTACHMENT_KEYS) delete meta[k]
+  const files = items.filter(item => item.meta.attachment_file_id)
+  if (files.length > 0) for (const k of ATTACHMENT_KEYS) if (files[0]!.meta[k] !== undefined) meta[k] = files[0]!.meta[k]
+  if (files.length > 1) {
+    meta.attachment_file_ids = files.map(item => item.meta.attachment_file_id).join(',')
+    // The lists are comma-separated, so a comma in a name becomes _.
+    meta.attachment_names = files.map(item => (item.meta.attachment_name ?? '').replace(/,/g, '_')).join(',')
+  }
   return { content, meta }
 }
 
-// The gap a message joins its sender's batch with: a photo's, plain text's
-// (longer after a piece near the limit), or none for anything else, such as a
-// document, a voice note, a photo that failed to download, or a command.
-export function batchGap(m: { text: string; photo: boolean; other: boolean }): number | undefined {
-  if (m.photo) return PHOTO_GAP_MS
-  if (m.other || m.text.startsWith('/')) return undefined
+// The gap a message joins its sender's batch with: a file's (a photo or a
+// document, a photo that failed to download included), longer from another
+// bot; plain text's, longer after a piece near the limit; or none for
+// anything else, such as a voice note, a video or a person's command. A
+// bot's text starting with / joins like any text, so a reply that opens with
+// a path stays with its files.
+export function batchGap(m: { text: string; file: boolean; other: boolean; bot: boolean }): number | undefined {
+  if (m.file) return m.bot ? BOT_FILE_GAP_MS : PHOTO_GAP_MS
+  if (m.other || (!m.bot && m.text.startsWith('/'))) return undefined
   return m.text.length >= FRAGMENT_CHARS ? FRAGMENT_GAP_MS : TEXT_GAP_MS
 }
 

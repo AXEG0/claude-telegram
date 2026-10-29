@@ -159,6 +159,18 @@ whichever listed `format` Claude passes. The receiving plugin hands its session 
 message's text, caption or media, and a [rich message](#rich-messages) or
 its edit carries none of them. A person's chat keeps the format Claude passes.
 
+A reply with files to a bot sends the files first, every file as a document,
+so up to ten go as one album; more go as albums of ten, and a single file left
+over goes by itself. The text rides as the first file's caption when it is 1024
+characters or fewer. A longer text follows the files in pieces of up to 4096
+characters, each cut between two characters that are neither a space nor a line
+break, since Telegram trims those from both ends of a message. `textChunkLimit`
+and `chunkMode` do not apply to such a reply, and a text that is empty once
+trimmed sends no text message. Another copy of this plugin holds a bot's files
+for the text that follows them (see [Bursts](#bursts)), so the whole reply
+reaches its session as one message, however long the upload took. A reply to a
+person or a group sends its text first and then each file, as before.
+
 When the private chat that last wrote is a bot's, the [subagent
 message](#subagents-and-shells), the [stuck notice](#stuck-alerts) and "Back to
 normal" go to `TELEGRAM_ALERT_CHAT` instead, and nowhere when it is unset. So
@@ -171,7 +183,7 @@ can answer no prompt. The typing indicator still goes to the bot's chat.
 
 | Tool | Purpose |
 | --- | --- |
-| `reply` | Sends to a chat, and to [another bot](#other-bots) by its `@username`, as plain text. Takes a numeric `chat_id` and `text`, with `reply_to` (a message ID) for native threading and `files` (absolute paths) for attachments. Images (`.jpg`/`.jpeg`/`.png`/`.gif`/`.webp`) go as photos with an inline preview, other files as documents, up to 50MB each, after the text. `format` picks `text` or `markdownv2`, and with rich messages on also `rich`, which is then the default. Any other `format`, such as `markdown` or `null`, is refused with an error naming it and the formats, and nothing is sent. Long text goes out in several messages. `buttons` puts [answer buttons](#button-presses) under the last message sent, a text part or a file: 1 to 4 rows of 1 to 4 labels, each 1 to 40 characters and distinct across the keyboard, with single spaces between words and none of `"` `<` `>` `[` `]` `;`, control characters, or the invisible and combining characters Telegram would change. Buttons are refused in another bot's chat, in a server that does not poll the bot, and in one whose poll ended in a conflict (409) with no poll completed since. Returns the sent message IDs, and with buttons also the message that carries them; a reply that fails partway names the IDs already sent. |
+| `reply` | Sends to a chat, and to [another bot](#other-bots) by its `@username`, as plain text. Takes a numeric `chat_id` and `text`, with `reply_to` (a message ID) for native threading and `files` (absolute paths) for attachments. Images (`.jpg`/`.jpeg`/`.png`/`.gif`/`.webp`) go as photos with an inline preview, other files as documents, up to 50MB each, after the text. To [another bot](#other-bots), the files go first, every one as a document, with the text as the first file's caption or after the files, whatever `textChunkLimit` and `chunkMode` say. `format` picks `text` or `markdownv2`, and with rich messages on also `rich`, which is then the default. Any other `format`, such as `markdown` or `null`, is refused with an error naming it and the formats, and nothing is sent. Long text goes out in several messages. `buttons` puts [answer buttons](#button-presses) under the last message sent, a text part or a file: 1 to 4 rows of 1 to 4 labels, each 1 to 40 characters and distinct across the keyboard, with single spaces between words and none of `"` `<` `>` `[` `]` `;`, control characters, or the invisible and combining characters Telegram would change. Buttons are refused in another bot's chat, in a server that does not poll the bot, and in one whose poll ended in a conflict (409) with no poll completed since. Returns the sent message IDs, and with buttons also the message that carries them; a reply that fails partway names the IDs already sent. |
 | `react` | Adds an emoji reaction to a message by ID, from Telegram's fixed set of reaction emoji (👍 👎 ❤ 🔥 👀 and others). |
 | `download_attachment` | Downloads an attachment by the `attachment_file_id` on its message to the inbox and returns the local path. Telegram serves bot downloads up to 20MB. |
 | `edit_message` | Edits a message the bot sent, for progress updates such as "working…" turning into the result. Takes `text`, `buttons`, or both, and the same `format` as `reply`: any other is refused and nothing is edited, an edit of the buttons alone included. With `text`, the edit carries `buttons` in the same call, so a text edit without `buttons` leaves the message without buttons, a shown choice included. With `buttons` alone only the buttons change, under a file too, and an empty list removes them, which works from any server. An edit Telegram answers with "message is not modified" counts as done. An edit stays one message, so longer text goes in a new reply, and an edit sends no notification, so a finished task gets a new reply too. |
@@ -188,10 +200,11 @@ message carries.
 Photos download on arrival to the inbox, `inbox/` in the state directory, and
 `image_path` on the tag gives Claude the file to `Read`. Telegram compresses
 photos; to pass the original, send it as a file (long-press → Send as File).
-A document, video, video note or sticker, and a voice note or audio file that
-goes untranscribed, arrives with `attachment_file_id` and `attachment_kind`,
-plus `attachment_name`, `attachment_mime` and `attachment_size` when Telegram
-gives them, and Claude fetches it with `download_attachment`.
+A document, video, video note or sticker, a voice note or audio file that
+goes untranscribed, and a photo that fails to download, arrives with
+`attachment_file_id` and `attachment_kind`, plus `attachment_name`,
+`attachment_mime` and `attachment_size` when Telegram gives them, and Claude
+fetches it with `download_attachment`.
 
 ### Voice messages
 
@@ -207,21 +220,28 @@ holds the messages after it.
 
 ### Bursts
 
-Texts and photos one sender sends in quick succession reach Claude as one
-message, so Claude answers the burst once rather than its first message alone.
-Texts join with line breaks, a long paste that Telegram split into pieces joins
-back whole, and photos join their album or the question sent with them. The
-joined message carries the last message's ID, every ID in `message_ids`, and the
-first reply context. Its first photo is in `image_path`, and with several
-photos, every photo is in `image_paths`, comma-separated.
+Texts, photos and documents one sender sends in quick succession reach Claude
+as one message, so Claude answers the burst once rather than its first message
+alone. Texts join with line breaks, a long paste that Telegram split into pieces
+joins back whole, and photos and documents join their album or the text sent
+with them. The joined message carries the last message's ID, every ID in
+`message_ids`, and the first reply context. Its first photo is in `image_path`,
+and with several photos, every photo is in `image_paths`, comma-separated. Its
+`attachment_*` attributes are its first file's, and with several files, every
+file's `attachment_file_id` is in `attachment_file_ids` and every file's name in
+`attachment_names`, both comma-separated in message order, with an empty name
+where Telegram gives none and `_` for a comma in a name.
 
 A batch goes out a moment after its last message, at once when it reaches its
 message limit, and a few seconds after its first message at the latest. A
-message that would take it past its size limit starts a new batch. Any other
-message (a file, voice note, video, sticker, or a text starting with `/`) sends
-the waiting batch first and then goes alone. A message from another sender in
-the chat, or one replying to a different message than an earlier reply in the
-batch, sends the waiting batch first and starts its own.
+photo or document from another bot waits 3 seconds, for the text another copy
+of this plugin sends right after a reply's files (see [Other bots](#other-bots)).
+A message that would take it past its size limit starts a new batch. Any other
+message (a voice note, audio file, video, video note, sticker, or a person's
+text starting with `/`) sends the waiting batch first and then goes alone; a
+bot's text starting with `/` joins like any text. A message from another sender
+in the chat, or one replying to a different message than an earlier reply in
+the batch, sends the waiting batch first and starts its own.
 
 ### Replies and quotes
 

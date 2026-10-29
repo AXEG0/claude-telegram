@@ -32,6 +32,8 @@
 //
 // This file carries no dependencies beyond Node's.
 
+import { FRAGMENT_CHARS } from './batch.ts'
+
 export type Peer = { is_bot: boolean; username?: string }
 
 export type Peers = {
@@ -262,6 +264,63 @@ export function sendStyle(format: string, toBot: boolean): Style {
   if (toBot) return 'text'
   return format === 'rich' || format === 'markdownv2' ? format : 'text'
 }
+
+// How a reply with files goes to another bot. The receiving plugin holds a
+// sender's files in its burst for the text that follows them (see batch.ts),
+// so the files go first, the whole upload before anything else, and the text
+// right after them. Every file goes as a document, so up to ten files make one
+// album: more go as albums of ten, and a single file left over by itself. The
+// text, as Telegram keeps it once it trims spaces and line breaks from both
+// ends, rides as the first file's caption when it is 1024 characters or fewer
+// (Telegram's caption limit), and nothing goes for a text that is empty once
+// trimmed. A longer text follows the files in pieces of 4096 characters at
+// most (Telegram's text limit), whatever textChunkLimit and chunkMode say.
+export const BOT_ALBUM_MAX = 10
+export const BOT_CAPTION_MAX = 1024
+export const BOT_TEXT_MAX = 4096
+export type BotReply = { groups: string[][]; caption?: string; pieces: string[] }
+export function botReply(text: string, files: string[]): BotReply {
+  const groups: string[][] = []
+  for (let i = 0; i < files.length; i += BOT_ALBUM_MAX) groups.push(files.slice(i, i + BOT_ALBUM_MAX))
+  const kept = telegramTrim(text)
+  if (kept === '') return { groups, pieces: [] }
+  if (kept.length <= BOT_CAPTION_MAX) return { groups, caption: kept, pieces: [] }
+  return { groups, pieces: botTextPieces(kept) }
+}
+
+// Telegram removes spaces and line breaks from both ends of a text or caption
+// it is sent.
+const TRIMMED = /^[ \n]+|[ \n]+$/g
+export const telegramTrim = (text: string): string => text.replace(TRIMMED, '')
+
+// A text cut into pieces Telegram keeps whole, and the receiving plugin glues
+// back with nothing between them. Each cut falls between two characters that
+// are neither a space nor a line break, which Telegram would trim off the end
+// of one piece or the start of the next, and never inside a surrogate pair. It
+// is searched back from 4096 characters down to the receiver's FRAGMENT_CHARS,
+// since a shorter piece is glued with a line break and waited for only
+// briefly. Where no such cut exists in that span, a run of spaces and line
+// breaks or of single characters between them, the piece is cut at 4096, and
+// Telegram trims what is at that cut.
+export function botTextPieces(text: string): string[] {
+  const out: string[] = []
+  let rest = text
+  while (rest.length > BOT_TEXT_MAX) {
+    let cut = BOT_TEXT_MAX
+    while (cut > FRAGMENT_CHARS && !cuttable(rest, cut)) cut--
+    if (!cuttable(rest, cut)) cut = splitsPair(rest, BOT_TEXT_MAX) ? BOT_TEXT_MAX - 1 : BOT_TEXT_MAX
+    out.push(rest.slice(0, cut))
+    rest = rest.slice(cut)
+  }
+  out.push(rest)
+  return out
+}
+const trimmable = (c: string | undefined) => c === ' ' || c === '\n'
+const splitsPair = (s: string, i: number) => {
+  const high = s.charCodeAt(i - 1), low = s.charCodeAt(i)
+  return high >= 0xd800 && high <= 0xdbff && low >= 0xdc00 && low <= 0xdfff
+}
+const cuttable = (s: string, i: number) => !trimmable(s[i - 1]) && !trimmable(s[i]) && !splitsPair(s, i)
 
 // The chat a notice of the plugin's own goes to: the chat itself, or the owner
 // chat when the chat is a bot's. With no owner chat, a bot's notice goes nowhere.

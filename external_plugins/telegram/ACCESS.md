@@ -108,6 +108,8 @@ Configure outbound behavior with `/telegram:access set <key> <value>`.
 
 **`chunkMode`** chooses the split strategy: `length` cuts exactly at the limit; `newline` prefers paragraph boundaries.
 
+Neither applies to a reply with files to [another bot](#other-bots): its text rides as the first file's caption, or follows the files in pieces of up to 4096 characters, each cut where Telegram keeps every character, as the README's Other bots section describes.
+
 ## Skill reference
 
 | Command | Effect |

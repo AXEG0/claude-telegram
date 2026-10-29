@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
-import { BOT_USERNAME, CHAT_ID, createBotLookup, createConfirm, createPeers, listed, noticeChat, PeerError, plainObject, sendStyle, type Peer } from './bots.ts'
+import { BOT_TEXT_MAX, botReply, botTextPieces, BOT_USERNAME, CHAT_ID, createBotLookup, createConfirm, createPeers, listed, noticeChat, PeerError, plainObject, sendStyle, telegramTrim, type Peer } from './bots.ts'
+import { FRAGMENT_CHARS } from './batch.ts'
 
 // Another bot, made up for these tests.
 const OTHER_BOT = { id: 7491000, username: 'peer_7491_bot' }
@@ -660,5 +661,77 @@ describe('a lookup the caller bounds', () => {
     }))
     expect(await p.botChat('6')).toBe(false)
     expect(signals).toEqual([undefined])
+  })
+})
+
+describe('a reply with files to a bot', () => {
+  const files = (n: number) => Array.from({ length: n }, (_, i) => `/in/f${i + 1}.txt`)
+
+  test('goes as albums of ten, a single file left over going by itself', () => {
+    expect(botReply('t', files(1)).groups).toEqual([files(1)])
+    expect(botReply('t', files(3)).groups).toEqual([files(3)])
+    expect(botReply('t', files(10)).groups).toEqual([files(10)])
+    expect(botReply('t', files(11)).groups).toEqual([files(10), ['/in/f11.txt']])
+    expect(botReply('t', files(12)).groups).toEqual([files(10), files(12).slice(10)])
+    expect(botReply('t', files(21)).groups.map(g => g.length)).toEqual([10, 10, 1])
+  })
+
+  test('carries a text of up to 1024 characters as the first file\'s caption, a longer one after the files, and none that is empty once trimmed', () => {
+    expect(botReply('  the files\n', files(2))).toEqual({ groups: [files(2)], caption: 'the files', pieces: [] })
+    expect(botReply('x'.repeat(1024), files(1))).toEqual({ groups: [files(1)], caption: 'x'.repeat(1024), pieces: [] })
+    expect(botReply('x'.repeat(1025), files(1))).toEqual({ groups: [files(1)], pieces: ['x'.repeat(1025)] })
+    expect(botReply('', files(1))).toEqual({ groups: [files(1)], pieces: [] })
+    expect(botReply(' \n \n', files(1))).toEqual({ groups: [files(1)], pieces: [] })
+    // Telegram trims only spaces and line breaks.
+    expect(telegramTrim('\t a b \n')).toBe('\t a b')
+  })
+})
+
+describe('a long text to a bot', () => {
+  const glued = (pieces: string[]) => pieces.join('')
+
+  test('goes in pieces of 4096 characters when the cut falls between two characters Telegram keeps', () => {
+    const text = 'a'.repeat(2000) + '\n\n' + 'b'.repeat(2998)
+    const pieces = botTextPieces(text)
+    expect(pieces.map(p => p.length)).toEqual([4096, 904])
+    expect(glued(pieces)).toBe(text)
+  })
+
+  test('moves the cut back past spaces and line breaks, so no piece starts or ends with one, and the pieces glue back whole', () => {
+    // A line break at 4095 and a space at 4096: the cut moves back to 4094.
+    const text = 'w'.repeat(4091) + 'word\n end' + 'z'.repeat(900)
+    const pieces = botTextPieces(text)
+    expect(glued(pieces)).toBe(text)
+    expect(pieces[0]!.length).toBe(4094)
+    for (const p of pieces) expect(telegramTrim(p)).toBe(p)
+    // Prose: every cut between two letters of a word.
+    const prose = 'the quick brown fox jumps over the lazy dog\n'.repeat(400).trim()
+    const cut = botTextPieces(prose)
+    expect(glued(cut)).toBe(prose)
+    for (const p of cut) expect(telegramTrim(p)).toBe(p)
+    for (const p of cut.slice(0, -1)) {
+      expect(p.length).toBeLessThanOrEqual(BOT_TEXT_MAX)
+      expect(p.length).toBeGreaterThanOrEqual(FRAGMENT_CHARS)
+    }
+  })
+
+  test('never cuts inside a surrogate pair', () => {
+    const text = 'a'.repeat(4095) + '😀' + 'b'.repeat(10)
+    const pieces = botTextPieces(text)
+    expect(pieces).toEqual(['a'.repeat(4095), '😀' + 'b'.repeat(10)])
+    const emoji = '😀'.repeat(3000)
+    const split = botTextPieces(emoji)
+    expect(glued(split)).toBe(emoji)
+    expect(split.map(p => p.length)).toEqual([4096, 1904])
+  })
+
+  test('with no such cut from 4096 back to the receiver\'s piece size, cuts at 4096, never shorter', () => {
+    const text = 'a '.repeat(2500)
+    const pieces = botTextPieces(text)
+    expect(pieces.map(p => p.length)).toEqual([4096, 904])
+    expect(glued(pieces)).toBe(text)
+    // A clean cut at 3499 would make a piece the receiver glues with a line break.
+    const spaced = 'x'.repeat(3500) + ' a'.repeat(800)
+    expect(botTextPieces(spaced).map(p => p.length)).toEqual([4096, 1004])
   })
 })
