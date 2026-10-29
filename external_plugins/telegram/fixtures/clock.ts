@@ -9,7 +9,10 @@
 // awaited sleep's next step included, runs before the next timer. It writes
 // where it stopped to clock/<pid>.now. The test moves every server to the same
 // time, so a server that started while the clock was moving catches up on its
-// next move.
+// next move. What the server has taken from its input, in bytes, and whether
+// the input ended, it writes to clock/<pid>.input: the test moves the clock only
+// once each server has taken all it wrote, so a request is read at the time
+// the test wrote it.
 import './telegram-preload.ts'
 import { jest } from 'bun:test'
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
@@ -28,6 +31,33 @@ function stopped(n: number): void {
   writeFileSync(`${request}.now.tmp`, JSON.stringify({ n, now: Date.now() }))
   renameSync(`${request}.now.tmp`, `${request}.now`)
 }
+
+// Counted as the input hands each chunk, and its end, to the server's own
+// listeners, once they have run. A listener of its own here would start the
+// input flowing before the server listens, and lose what came first.
+const input = join(folder, `${process.pid}.input`)
+let taken = 0
+let ended = false
+function took(): void {
+  writeFileSync(`${input}.tmp`, JSON.stringify({ bytes: taken, ended }))
+  renameSync(`${input}.tmp`, input)
+}
+const emit = process.stdin.emit
+process.stdin.emit = function (this: typeof process.stdin, event: string | symbol, ...args: unknown[]) {
+  try {
+    return emit.call(this, event, ...args)
+  } finally {
+    if (event === 'data') {
+      const chunk = args[0] as string | Uint8Array
+      taken += typeof chunk === 'string' ? Buffer.byteLength(chunk) : chunk.byteLength
+      took()
+    }
+    if ((event === 'end' || event === 'close') && !ended) {
+      ended = true
+      took()
+    }
+  }
+} as typeof process.stdin.emit
 
 let moving = Promise.resolve()
 process.on('SIGUSR2', () => {
