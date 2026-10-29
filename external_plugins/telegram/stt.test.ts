@@ -1,8 +1,8 @@
-import { describe, expect, test } from 'bun:test'
-import { mkdtempSync, readFileSync } from 'fs'
+import { afterEach, describe, expect, jest, test } from 'bun:test'
+import { mkdtempSync, readFileSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { STT_MAX_BYTES, sttConfig, transcribe, transcribeTelegramFile, uploadName, type SttConfig } from './stt.ts'
+import { FILE_LIMIT_MS, fetchPhoto, STT_MAX_BYTES, sttConfig, transcribe, transcribeTelegramFile, uploadName, type SttConfig } from './stt.ts'
 
 const cfg: SttConfig = { apiKey: 'k', model: 'gpt-transcribe', endpoint: 'https://stt.test/v1' }
 
@@ -72,6 +72,7 @@ describe('transcribeTelegramFile', () => {
         : new Response('spoken words'),
     )
     const r = await transcribeTelegramFile({ api, token: 'TOKEN', inboxDir, fileId: 'f', mime: 'audio/ogg', size: 3, cfg, fetchImpl: f.impl })
+    expect(r.reason).toBeUndefined()
     expect(r?.text).toBe('spoken words')
     expect(r?.path.endsWith('-u1.ogg')).toBe(true)
     expect([...readFileSync(r!.path)]).toEqual([9, 9, 9])
@@ -84,36 +85,157 @@ describe('transcribeTelegramFile', () => {
       api: { getFile: async () => { asked = true; return {} } },
       token: 'T', inboxDir: mkdtempSync(join(tmpdir(), 'stt-')), fileId: 'f', size: STT_MAX_BYTES + 1, cfg,
     })
-    expect(r).toBeUndefined()
+    expect(r.text).toBeUndefined()
+    expect(r.reason).toBe(`file is ${STT_MAX_BYTES + 1} bytes`)
     expect(asked).toBe(false)
   })
 
-  test('a slow transcription gives up at the timeout', async () => {
+  test('a slow transcription gives up at the limit, with the saved file', async () => {
     const inboxDir = mkdtempSync(join(tmpdir(), 'stt-'))
     const impl = (async (input: string | URL | Request, init?: RequestInit) => {
       if (String(input).includes('api.telegram.org')) return new Response(new Uint8Array([1]))
       return new Promise<Response>((_, reject) => init?.signal?.addEventListener('abort', () => reject(init.signal!.reason)))
     }) as typeof fetch
     const t0 = Date.now()
-    const r = await transcribeTelegramFile({ api, token: 'T', inboxDir, fileId: 'f', mime: 'audio/ogg', cfg, timeoutMs: 200, fetchImpl: impl })
-    expect(r).toBeUndefined()
+    const r = await transcribeTelegramFile({ api, token: 'T', inboxDir, fileId: 'f', mime: 'audio/ogg', cfg, limitMs: 200, fetchImpl: impl })
+    expect(r.text).toBeUndefined()
+    expect(r.reason).toBe('transcription gave no answer within 0.2 s')
+    expect(r.path?.endsWith('-u1.ogg')).toBe(true)
     expect(Date.now() - t0).toBeLessThan(2000)
   })
 
-  test('an API error returns undefined, so the message goes through untranscribed', async () => {
+  test('an API error comes back as the reason, so the message goes through untranscribed', async () => {
     const inboxDir = mkdtempSync(join(tmpdir(), 'stt-'))
     const f = fakeFetch(url => (url.includes('api.telegram.org') ? new Response(new Uint8Array([1])) : new Response('no', { status: 500 })))
-    expect(await transcribeTelegramFile({ api, token: 'T', inboxDir, fileId: 'f', mime: 'audio/ogg', cfg, fetchImpl: f.impl })).toBeUndefined()
+    const r = await transcribeTelegramFile({ api, token: 'T', inboxDir, fileId: 'f', mime: 'audio/ogg', cfg, fetchImpl: f.impl })
+    expect(r.text).toBeUndefined()
+    expect(r.reason).toBe('transcription HTTP 500: no')
   })
 
-  test('a file lookup that hangs gives up at the timeout too', async () => {
+  test('a file lookup that hangs gives up at the limit too', async () => {
     const hanging = {
       getFile: (_id: string, signal?: AbortSignal) =>
         new Promise<{ file_path?: string }>((_, reject) => signal?.addEventListener('abort', () => reject(signal.reason))),
     }
     const t0 = Date.now()
-    const r = await transcribeTelegramFile({ api: hanging, token: 'T', inboxDir: mkdtempSync(join(tmpdir(), 'stt-')), fileId: 'f', mime: 'audio/ogg', cfg, timeoutMs: 200 })
-    expect(r).toBeUndefined()
+    const r = await transcribeTelegramFile({ api: hanging, token: 'T', inboxDir: mkdtempSync(join(tmpdir(), 'stt-')), fileId: 'f', mime: 'audio/ogg', cfg, limitMs: 200 })
+    expect(r.reason).toBe('getFile gave no answer within 0.2 s')
+    expect(r.path).toBeUndefined()
     expect(Date.now() - t0).toBeLessThan(2000)
+  })
+})
+
+// The file work under fake timers, with the default limit: each step's time
+// and reason, read from what comes back.
+describe('the file work and its limit', () => {
+  afterEach(() => jest.useRealTimers())
+  const later = <T>(ms: number, value: () => T) => new Promise<T>(resolve => setTimeout(() => resolve(value()), ms))
+  // Moves the fake clock from timer to timer until the work settles or the
+  // clock reaches `until`; returns whether it settled.
+  async function settle(work: Promise<unknown>, until: number): Promise<boolean> {
+    let done = false
+    void work.then(() => { done = true }, () => { done = true })
+    const end = Date.now() + until
+    // setImmediate is not faked: each turn lets the work's I/O and promise
+    // chains run before the clock moves.
+    const turns = async () => { for (let j = 0; j < 5 && !done; j++) await new Promise(r => setImmediate(r)) }
+    for (let i = 0; i < 10_000 && !done && Date.now() < end; i++) {
+      await turns()
+      if (done) break
+      jest.advanceTimersToNextTimer()
+    }
+    await turns()
+    return done
+  }
+  const inbox = () => mkdtempSync(join(tmpdir(), 'stt-'))
+  const file = (path = 'voice/file_1.oga') => ({ file_path: path, file_unique_id: 'u1' })
+
+  test('S1 getFile and the download answering at 45 s still give the transcript, with each step timed', async () => {
+    jest.useFakeTimers()
+    const slowApi = { getFile: () => later(45_000, () => file()) }
+    const impl = (async (input: string | URL | Request) =>
+      String(input).includes('api.telegram.org') ? later(45_000, () => new Response(new Uint8Array([7]))) : new Response('spoken')) as typeof fetch
+    const work = transcribeTelegramFile({ api: slowApi, token: 'T', inboxDir: inbox(), fileId: 'f', mime: 'audio/ogg', cfg, fetchImpl: impl })
+    expect(await settle(work, FILE_LIMIT_MS + 1000)).toBe(true)
+    const r = await work
+    expect(r.reason).toBeUndefined()
+    expect(r.text).toBe('spoken')
+    expect(r.steps.getFile).toBe(45_000)
+    expect(r.steps.download).toBe(45_000)
+  })
+
+  test('S2 the limit reached in each step names the step and the limit, with the saved file once the download finished', async () => {
+    jest.useFakeTimers()
+    const never = () => new Promise<never>(() => {})
+    const cases: [string, Parameters<typeof transcribeTelegramFile>[0]['api'], typeof fetch, boolean][] = [
+      ['getFile', { getFile: never }, (async () => new Response('x')) as typeof fetch, false],
+      ['download', { getFile: async () => file() }, (async () => never()) as typeof fetch, false],
+      ['transcription', { getFile: async () => file() }, (async (input: string | URL | Request) =>
+        String(input).includes('api.telegram.org') ? new Response(new Uint8Array([1])) : never()) as typeof fetch, true],
+    ]
+    for (const [step, stepApi, impl, saved] of cases) {
+      const t0 = Date.now()
+      const work = transcribeTelegramFile({ api: stepApi, token: 'T', inboxDir: inbox(), fileId: 'f', mime: 'audio/ogg', cfg, fetchImpl: impl })
+      expect(await settle(work, FILE_LIMIT_MS + 1000)).toBe(true)
+      const r = await work
+      expect(Date.now() - t0).toBe(FILE_LIMIT_MS)
+      expect(r.reason).toBe(`${step} gave no answer within 300 s`)
+      expect(r.path !== undefined).toBe(saved)
+    }
+    // A photo's download, the same.
+    const t0 = Date.now()
+    const photo = fetchPhoto({ api: { getFile: async () => file('photos/file_2.jpg') }, token: 'T', inboxDir: inbox(), fileId: 'p', fetchImpl: (async () => never()) as typeof fetch })
+    expect(await settle(photo, FILE_LIMIT_MS + 1000)).toBe(true)
+    expect((await photo).reason).toBe('download gave no answer within 300 s')
+    expect(Date.now() - t0).toBe(FILE_LIMIT_MS)
+  })
+
+  test('S3 a failed transcription, download, inbox write, empty transcript and file over 20 MB each come back with their reason whole, naming the step', async () => {
+    const body = 'x'.repeat(250)
+    const failing = (download: number, stt: Response) => (async (input: string | URL | Request) =>
+      String(input).includes('api.telegram.org') ? new Response(new Uint8Array([1]), { status: download }) : stt) as typeof fetch
+    const run = (impl: typeof fetch, size?: number) =>
+      transcribeTelegramFile({ api: { getFile: async () => file() }, token: 'T', inboxDir: inbox(), fileId: 'f', mime: 'audio/ogg', size, cfg, fetchImpl: impl })
+    expect((await run(failing(200, new Response(body, { status: 500 })))).reason).toBe(`transcription HTTP 500: ${body}`)
+    expect((await run(failing(404, new Response('unused'))))).toMatchObject({ reason: 'download HTTP 404' })
+    expect((await run(failing(404, new Response('unused')))).path).toBeUndefined()
+    expect((await run(failing(200, new Response('  \n'))))).toMatchObject({ reason: 'empty transcript' })
+    expect((await run(failing(200, new Response('  \n')))).path).toBeDefined()
+    expect((await run(failing(200, new Response('unused')), STT_MAX_BYTES + 1)).reason).toBe(`file is ${STT_MAX_BYTES + 1} bytes`)
+
+    // A call that throws outright says only what failed; the reason puts the
+    // running step in front of it.
+    const reset = () => { throw new TypeError('fetch failed: connection reset') }
+    const throwing = (where: 'download' | 'transcription') => (async (input: string | URL | Request) => {
+      const download = String(input).includes('api.telegram.org')
+      if ((where === 'download') === download) reset()
+      return download ? new Response(new Uint8Array([1])) : new Response('unused')
+    }) as typeof fetch
+    expect((await run(throwing('download'))).reason).toBe('download: fetch failed: connection reset')
+    expect((await run(throwing('transcription')))).toMatchObject({ reason: 'transcription: fetch failed: connection reset' })
+    expect((await run(throwing('transcription'))).path).toBeDefined()
+    const photo = await fetchPhoto({ api: { getFile: async () => file('photos/file_2.jpg') }, token: 'T', inboxDir: inbox(), fileId: 'p', fetchImpl: throwing('download') })
+    expect(photo.reason).toBe('download: fetch failed: connection reset')
+    // The inbox write is the download's last part: a folder that cannot be
+    // made, as on a full disk, names it too.
+    const blocked = join(inbox(), 'inbox')
+    writeFileSync(blocked, 'a file where the inbox should be')
+    const unsaved = await transcribeTelegramFile({ api: { getFile: async () => file() }, token: 'T', inboxDir: blocked, fileId: 'f', mime: 'audio/ogg', cfg, fetchImpl: failing(200, new Response('unused')) })
+    expect(unsaved.reason).toStartWith('download: ')
+    expect(unsaved.reason).toMatch(/EEXIST|ENOTDIR/)
+    expect(unsaved.path).toBeUndefined()
+  })
+
+  test('S4 a fetch that ignores its abort signal still ends at the limit', async () => {
+    jest.useFakeTimers()
+    // Answers only after twice the limit, whatever its signal says.
+    const deaf = (async () => later(2 * FILE_LIMIT_MS, () => new Response(new Uint8Array([1])))) as typeof fetch
+    const t0 = Date.now()
+    const work = transcribeTelegramFile({ api: { getFile: async () => file() }, token: 'T', inboxDir: inbox(), fileId: 'f', mime: 'audio/ogg', cfg, fetchImpl: deaf })
+    let at = 0
+    void work.then(() => { at = Date.now() })
+    expect(await settle(work, FILE_LIMIT_MS + 1000)).toBe(true)
+    expect(at - t0).toBe(FILE_LIMIT_MS)
+    expect((await work).reason).toBe('download gave no answer within 300 s')
   })
 })

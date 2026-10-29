@@ -27,7 +27,7 @@ export function state(access: object = { dmPolicy: 'allowlist', allowFrom: ['1']
 // Date.now(), pinned to it. Time on it moves only while the test waits, in
 // moves of STEP_MS, so the test sees what happened at most one move late,
 // while each server's timers fire at their own due times.
-const STEP_MS = 100
+export const STEP_MS = 100
 let timeline: number | undefined
 let advances = 0
 // Each test's waits belong to it: once it ends, a wait it left running moves
@@ -234,7 +234,7 @@ export async function until(check: () => boolean, timeout = 4000): Promise<void>
   }
 }
 
-export type Call = { pid: number; method: string; payload: any; at: number; message_id?: number; refused?: string }
+export type Call = { pid: number; method: string; payload: any; at: number; message_id?: number; refused?: string; started?: number[] }
 // Each call the fake logged. A line not yet ended is still being written,
 // and is read once it is.
 export function calls(dir: string): Call[] {

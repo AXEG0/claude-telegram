@@ -15,9 +15,12 @@ import { mkdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
 
 export const STT_KINDS = new Set(['voice', 'audio', 'video_note'])
-// The whole lookup, download and transcription. Updates are handled one at a
-// time, so this bounds how long a voice note can hold later messages.
-export const STT_TIMEOUT_MS = 30_000
+// A message's whole file work, its lookup, download and any transcription,
+// counted from its arrival, or from its replay. The work runs beside the
+// update loop, so this bounds how long one message can hold its own sender's
+// later messages; nothing else waits for it. The longest audio file the
+// transcription accepts took 65 s, and the slowest lookup seen took 55 s.
+export const FILE_LIMIT_MS = 300_000
 // The Bot API serves files up to this size.
 export const STT_MAX_BYTES = 20 * 1024 * 1024
 
@@ -100,42 +103,132 @@ type FileApi = {
   getFile(fileId: string, signal?: AbortSignal): Promise<{ file_path?: string; file_unique_id?: string }>
 }
 
-// Downloads a Telegram file into the inbox and transcribes it. Returns
-// undefined, after a line on stderr, whenever it cannot: the message then
-// reaches Claude as it would without STT.
-export async function transcribeTelegramFile(opts: {
+// Each file step's time in ms, for the record.
+export type Steps = { getFile?: number; download?: number; transcribe?: number }
+// A message's file work: the file saved, the transcript, or the reason it
+// went on without them, the step and the cause.
+export type FileWork = { path?: string; text?: string; reason?: string; steps: Steps }
+
+type Step = keyof Steps
+const STEP_NAMES: Record<Step, string> = { getFile: 'getFile', download: 'download', transcribe: 'transcription' }
+
+// The work's running step, timed, and the signal its calls take.
+type Job = { signal: AbortSignal; steps: Steps; step?: Step; since: number }
+
+// A step's error names the step: a call that throws outright, such as a
+// connection reset or a full disk, says only what failed, not where.
+async function timed<T>(job: Job, step: Step, run: () => Promise<T>): Promise<T> {
+  job.step = step
+  job.since = Date.now()
+  try {
+    return await run()
+  } catch (err) {
+    const text = err instanceof Error ? err.message : String(err)
+    throw new Error(text.includes(STEP_NAMES[step]) ? text : `${STEP_NAMES[step]}: ${text}`)
+  } finally {
+    job.steps[step] = Date.now() - job.since
+    job.step = undefined
+  }
+}
+
+// Runs the work until the limit, counted from `from`, as withinLimit does in
+// buttons.ts: the signal goes to every call, and the race ends the work at the
+// limit even when a call ignores its signal. The reason names the step the
+// limit cut.
+async function withinFileLimit(
+  from: number,
+  limitMs: number,
+  run: (job: Job) => Promise<Omit<FileWork, 'steps'>>,
+): Promise<FileWork> {
+  const controller = new AbortController()
+  const job: Job = { signal: controller.signal, steps: {}, since: Date.now() }
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const late = new Promise<Omit<FileWork, 'steps'>>(resolve => {
+    timer = setTimeout(() => {
+      const step = job.step
+      if (step) job.steps[step] = Date.now() - job.since
+      resolve({ reason: `${step ? STEP_NAMES[step] : 'the work'} gave no answer within ${limitMs / 1000} s` })
+      controller.abort()
+    }, Math.max(0, from + limitMs - Date.now()))
+  })
+  try {
+    const out = await Promise.race([run(job).catch(err => ({ reason: err instanceof Error ? err.message : String(err) })), late])
+    return { ...out, steps: job.steps }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+type FileOpts = {
   api: FileApi
   token: string
   inboxDir: string
   fileId: string
+  // The arrival, or the replay, that the limit counts from.
+  from?: number
+  limitMs?: number
+  fetchImpl?: typeof fetch
+}
+
+// getFile, then the download into the inbox, the inbox write included, each
+// timed: the one fetch of photos and speech alike. name gives the saved file's extension from
+// Telegram's file_path, or throws when the file cannot be used.
+async function fetchFile(job: Job, opts: FileOpts, ext: (filePath: string) => string, saved: (path: string) => void): Promise<{ path: string; bytes: Uint8Array }> {
+  const fetchImpl = opts.fetchImpl ?? fetch
+  const file = await timed(job, 'getFile', () => opts.api.getFile(opts.fileId, job.signal))
+  if (!file.file_path) throw new Error('getFile gave no file_path')
+  const suffix = ext(file.file_path)
+  const uniqueId = (file.file_unique_id ?? '').replace(/[^a-zA-Z0-9_-]/g, '') || 'file'
+  const path = join(opts.inboxDir, `${Date.now()}-${uniqueId}.${suffix}`)
+  const bytes = await timed(job, 'download', async () => {
+    const res = await fetchImpl(`https://api.telegram.org/file/bot${opts.token}/${file.file_path}`, { signal: job.signal })
+    if (!res.ok) throw new Error(`download HTTP ${res.status}`)
+    const body = new Uint8Array(await res.arrayBuffer())
+    mkdirSync(opts.inboxDir, { recursive: true })
+    writeFileSync(path, body)
+    return body
+  })
+  saved(path)
+  return { path, bytes }
+}
+
+// Downloads a photo into the inbox. Whenever it cannot, the reason comes back,
+// after a line on stderr, and the photo reaches Claude as an attachment.
+export async function fetchPhoto(opts: FileOpts): Promise<FileWork> {
+  const work = await withinFileLimit(opts.from ?? Date.now(), opts.limitMs ?? FILE_LIMIT_MS, async job => {
+    const { path } = await fetchFile(job, opts, filePath => (filePath.includes('.') ? filePath.split('.').pop()!.replace(/[^a-zA-Z0-9]/g, '') : '') || 'jpg', () => {})
+    return { path }
+  })
+  if (work.reason) process.stderr.write(`telegram channel: photo download failed: ${work.reason}\n`)
+  return work
+}
+
+// Downloads a Telegram file into the inbox and transcribes it. Whenever it
+// cannot, the reason comes back, after a line on stderr, with the saved file
+// when the download finished: the message then reaches Claude untranscribed,
+// with the reason.
+export async function transcribeTelegramFile(opts: FileOpts & {
   mime?: string
   size?: number
   cfg: SttConfig
-  timeoutMs?: number
-  fetchImpl?: typeof fetch
-}): Promise<{ path: string; text: string } | undefined> {
-  const fetchImpl = opts.fetchImpl ?? fetch
-  const signal = AbortSignal.timeout(opts.timeoutMs ?? STT_TIMEOUT_MS)
-  try {
+}): Promise<FileWork> {
+  let saved: string | undefined
+  const work = await withinFileLimit(opts.from ?? Date.now(), opts.limitMs ?? FILE_LIMIT_MS, async job => {
     if (opts.size != null && opts.size > STT_MAX_BYTES) throw new Error(`file is ${opts.size} bytes`)
-    const file = await opts.api.getFile(opts.fileId, signal)
-    if (!file.file_path) throw new Error('Telegram returned no file_path')
-    const name = uploadName(opts.mime, file.file_path)
-    if (!name) throw new Error(`no transcribable container for ${opts.mime ?? file.file_path}`)
-
-    const res = await fetchImpl(`https://api.telegram.org/file/bot${opts.token}/${file.file_path}`, { signal })
-    if (!res.ok) throw new Error(`download HTTP ${res.status}`)
-    const bytes = new Uint8Array(await res.arrayBuffer())
-    const uniqueId = (file.file_unique_id ?? '').replace(/[^a-zA-Z0-9_-]/g, '') || 'stt'
-    const path = join(opts.inboxDir, `${Date.now()}-${uniqueId}.${name.split('.').pop()}`)
-    mkdirSync(opts.inboxDir, { recursive: true })
-    writeFileSync(path, bytes)
-
-    const text = await transcribe(bytes, name, opts.cfg, signal, fetchImpl)
+    let name = ''
+    const { path, bytes } = await fetchFile(job, opts, filePath => {
+      const upload = uploadName(opts.mime, filePath)
+      if (!upload) throw new Error(`no transcribable container for ${opts.mime ?? filePath}`)
+      name = upload
+      return upload.split('.').pop()!
+    }, path => { saved = path })
+    const text = await timed(job, 'transcribe', () => transcribe(bytes, name, opts.cfg, job.signal, opts.fetchImpl ?? fetch))
     if (!text) throw new Error('empty transcript')
     return { path, text }
-  } catch (err) {
-    process.stderr.write(`telegram channel: speech to text failed: ${err}\n`)
-    return undefined
+  })
+  if (work.reason) {
+    process.stderr.write(`telegram channel: speech to text failed: ${work.reason}\n`)
+    return { ...(saved ? { path: saved } : {}), reason: work.reason, steps: work.steps }
   }
+  return work
 }
