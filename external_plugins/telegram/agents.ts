@@ -630,6 +630,9 @@ export function createAgentStream(opts: {
   records?: PanelRecords
   // The polling server's sweep, run on each tick until the stream closes.
   sweep?: (slots: SweepSlots) => void
+  // When the hold Telegram set on a chat ends, 0 when it is not held: a 429
+  // any call got there (see flood.ts). The chat gets nothing until then.
+  holdUntil?: (chatId: string) => number
 }): AgentStream {
   const now = opts.now ?? Date.now
   const readFile = opts.readFile ?? tailOf
@@ -651,6 +654,9 @@ export function createAgentStream(opts: {
   // its own message.
   const late = new Set<Batch>()
   const chatNext = new Map<string, number>()
+  // The chat's next slot, which every send and edit asks for: the later of
+  // the chat's own spacing, its own 429 waits included, and its hold.
+  const nextSlot = (chatId: string) => Math.max(chatNext.get(chatId) ?? 0, opts.holdUntil?.(chatId) ?? 0)
   let first = true
   let ticks = 0
   // The current tick's time, which the sweep's slots share with the flush.
@@ -726,7 +732,7 @@ export function createAgentStream(opts: {
     const frame = panel(b, agents, at)
     const finish = () => { late.delete(b); records?.remove(b.chatId, msgId) }
     if (frame.key === b.sentKey) return finish()
-    if (t < (chatNext.get(b.chatId) ?? 0)) return
+    if (t < nextSlot(b.chatId)) return
     chatNext.set(b.chatId, t + CHAT_GAP_MS)
     b.sending = true
     records?.write(b.chatId, msgId, closingText(b, at))
@@ -884,7 +890,7 @@ export function createAgentStream(opts: {
       return
     }
     const chatId = batch.chatId
-    if (t < (chatNext.get(chatId) ?? 0)) return
+    if (t < nextSlot(chatId)) return
     chatNext.set(chatId, t + CHAT_GAP_MS)
     batch.sending = true
     batch.lastEdit = t
@@ -939,17 +945,21 @@ export function createAgentStream(opts: {
   // The server's last edit of one live message. A send or edit still on its
   // way settles first, so the closing edit never races it, and a first send
   // gives the message its id. The edit then waits for the chat's next slot,
-  // and is not made when that slot comes after startBy. Rows that finished
-  // keep their lines; rows still running read as no longer followed.
+  // read again after each wait, so a hold set meanwhile counts, and is not
+  // made when that slot comes after startBy. Rows that finished keep their
+  // lines; rows still running read as no longer followed.
   async function closeBatch(batch: Batch, closedAt: number, startBy: number) {
     while (batch.sending) await batch.inflight?.catch(() => {})
     // A group whose final frame went out in that answer has ended, and its
     // message stays as it is.
     if (batch.gone || batch.msgId === undefined || batches.get(batch.chatId) !== batch) return
     const text = closeTexts.get(batch) ?? panel(batch, agents, closedAt, closedAt).text
-    const slot = Math.max(now(), chatNext.get(batch.chatId) ?? 0)
-    if (slot > startBy) return
-    if (slot > now()) await sleep(slot - now())
+    for (;;) {
+      const slot = Math.max(now(), nextSlot(batch.chatId))
+      if (slot > startBy) return
+      if (slot <= now()) break
+      await sleep(slot - now())
+    }
     chatNext.set(batch.chatId, now() + CHAT_GAP_MS)
     const msgId = batch.msgId
     try {
@@ -1064,7 +1074,7 @@ export function createAgentStream(opts: {
       // The tick's own time, as the flush uses: a slot taken a few
       // milliseconds into the tick must not cost the next tick's send.
       const t = tickAt
-      if (closing || t < (chatNext.get(chatId) ?? 0)) return false
+      if (closing || t < nextSlot(chatId)) return false
       chatNext.set(chatId, t + CHAT_GAP_MS)
       return true
     },

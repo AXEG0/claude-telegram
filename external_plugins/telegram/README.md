@@ -401,7 +401,10 @@ After 10 minutes with neither activity nor a turn end, leaving out the time a
 prompt waited, the indicator stops and the bot sends the [stuck
 notice](#stuck-alerts). An interrupt (Esc) runs no hook, so after one the
 indicator lasts until the next turn ends or the 10 minutes pass. A message that
-arrives while Claude is busy can wait for the next turn.
+arrives while Claude is busy can wait for the next turn. A chat Telegram has
+asked to wait gets no indicator until the wait ends ([flood
+control](#flood-control)), and it comes back at the next refresh if the turn
+still runs.
 
 ### Stuck alerts
 
@@ -612,7 +615,8 @@ to the bot since the server started, or to `TELEGRAM_ALERT_CHAT` when that chat
 is [another bot's](#other-bots). Agents stay in the chat where they first
 appeared. The stream checks every three seconds and sends at most one update
 per chat in that interval. The clocks move while nothing else changes, and a
-rate limit holds the chat for as long as Telegram asks. Long rows shorten to
+rate limit on any of the plugin's calls in the chat holds it for as long as
+Telegram asks ([flood control](#flood-control)). Long rows shorten to
 fit Telegram's message limit; a group too large for shortened rows shows a
 count of the additional agents, prioritizing new rows and unreported endings
 over finished history. An explicit interruption in the subagent's transcript
@@ -685,6 +689,41 @@ answers and edits after a tap run beside the update loop, so a call Telegram
 never answers holds up no message. A pairing reply still on its way when the
 server restarts is lost, and the sender writes again. Sends from the tools keep
 grammY's own limit of 500 seconds.
+
+## Flood control
+
+When Telegram refuses a call with 429 (Too Many Requests), the server writes one
+line to its log, whichever call it was: a reply, an edit, a reaction, typing,
+the [subagents message](#subagents-and-shells), a command reply, a lookup or a
+poll. The line names the call, the chat and how long Telegram asks it to wait,
+and when that wait ends:
+
+```
+telegram channel: flood control on sendMessage to chat <chat>: 429, retry after 1262 s, held until 09:26:46 UTC (Telegram: Too Many Requests: retry after 1262)
+```
+
+A call that names no chat, such as a poll or the answer to a tap, says `to no
+chat` and holds nothing, and a 429 without a wait says `no retry_after given`
+and holds nothing. A caller that already logs its failure, such as a command
+reply, an alert or a failed poll, keeps its own line beside this one.
+
+A 429 with a wait on a call to a chat holds that chat until the wait ends, a
+read such as the lookup of [another bot](#other-bots) included. While it is
+held, [typing](#typing) and the subagents message send nothing to it, and both
+come back on their own once the wait ends: typing at its next refresh if the
+turn still runs, the subagents message at its next update with what it shows
+then. A longer wait extends the hold, and a shorter one never shortens it.
+Another bot's chat is held under its `@username`, the name a reply to it goes
+by, and typing there checks both names.
+
+Everything else still goes to Telegram during a hold: replies, edits and
+reactions, command and pairing replies, the answers to taps, permission prompts
+and the plugin's own notices. Each is one call made on Claude's request or on an
+event, and Telegram's answer to it is the authority: a refused reply says not
+sent, with the wait Telegram asks for. Nothing is sent again or queued. The
+holds live in the server's memory, so a restart forgets them; the first typing
+and subagents call after it then meets Telegram's wait once more, writes its
+line and holds the chat again.
 
 ## Polling heartbeat
 
