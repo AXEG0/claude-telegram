@@ -26,6 +26,7 @@ import {
   type AgentEvent,
   type ShellEvent,
   type StreamEvent,
+  type SweepSlots,
 } from './agents.ts'
 import shellHooks from './fixtures/shell-hooks.json'
 import workflowHooks from './fixtures/workflow-hooks.json'
@@ -276,6 +277,12 @@ describe('progressFromTranscript', () => {
 describe('createAgentStream', () => {
   function harness(chat: string | null = '42') {
     let t = 1_000_000
+    // The hold Telegram set on each chat, as the server's flood watch keeps
+    // it, what runs once a sleep of the stream's has moved the clock, and the
+    // polling server's sweep, if the test gives one.
+    const holds = new Map<string, number>()
+    let afterSleep: (() => void) | undefined
+    let sweeping: ((slots: SweepSlots) => void) | undefined
     const events: StreamEvent[] = []
     const files = new Map<string, string>()
     const mtimes = new Map<string, number>()
@@ -308,7 +315,9 @@ describe('createAgentStream', () => {
         return names.size ? [...names] : undefined
       },
       now: () => t,
-      sleep: async ms => { t += ms },
+      sleep: async ms => { t += ms; afterSleep?.() },
+      holdUntil: c => holds.get(c) ?? 0,
+      sweep: slots => sweeping?.(slots),
       records: {
         write: (c, id, text) => { records.push({ at: t, op: 'write', chat: c, id, text }) },
         remove: (c, id) => { records.push({ at: t, op: 'remove', chat: c, id }) },
@@ -323,6 +332,9 @@ describe('createAgentStream', () => {
       advance: (ms: number) => { t += ms },
       now: () => t,
       setChat: (c: string | null) => { current = c },
+      holdChat: (c: string, until: number) => { holds.set(c, until) },
+      afterSleep: (run: () => void) => { afterSleep = run },
+      sweepWith: (run: (slots: SweepSlots) => void) => { sweeping = run },
       failEditWith: (e: unknown) => { failEdit = e },
       holdSend: () => { let release!: () => void; sendWait = new Promise<void>(r => { release = r }); return () => { sendWait = undefined; release() } },
       holdEdit: () => { let release!: () => void; editWait = new Promise<void>(r => { release = r }); return () => { editWait = undefined; release() } },
@@ -734,6 +746,94 @@ describe('createAgentStream', () => {
     expect(h.edits).toEqual([])
     h.advance(10_000); await h.tick()
     expect(h.edits.length).toBe(1)
+  })
+
+  // The hold the server's flood watch sets on a chat after a 429 any call got
+  // there (see flood.ts): every point that takes a slot in that chat waits for
+  // its end, the stream's own spacing aside.
+  test('a held chat gets no first send and no clock edit until its hold ends, then the current frame', async () => {
+    const h = harness('1001')
+    await h.tick()
+    h.holdChat('1001', h.now() + 30_000)
+    h.events.push(start(h))
+    await h.tick()
+    for (let i = 0; i < 9; i++) { h.advance(AGENT_TICK_MS); await h.tick() }
+    expect(h.sent).toEqual([])
+    h.advance(AGENT_TICK_MS); await h.tick()
+    expect(h.sent).toEqual([{ chat: '1001', text: '🤖 Subagents\n1. ⏳ general-purpose · Starting… · 30s' }])
+    h.holdChat('1001', h.now() + 25_000)
+    for (let i = 0; i < 8; i++) { h.advance(AGENT_TICK_MS); await h.tick() }
+    expect(h.edits).toEqual([])
+    h.advance(1_000); await h.tick()
+    expect(h.edits).toEqual([{ id: 7, text: '🤖 Subagents\n1. ⏳ general-purpose · Starting… · 55s' }])
+  })
+
+  test('a late stop\'s edit in a held chat waits for the hold to end', async () => {
+    const h = harness('1001')
+    await h.tick()
+    h.events.push(start(h, 'a1'))
+    h.write('/s/agent-a1.jsonl', line(userText('u-a1', h.now(), 'Job')))
+    await h.tick()
+    h.advance(CHAT_GAP_MS)
+    h.write('/s/agent-a1.jsonl', line(userText('u-a1', h.now() - CHAT_GAP_MS, 'Job')) + line(apiError('e-a1', h.now(), 'overloaded')))
+    await h.tick()
+    expect(h.edits.at(-1)).toEqual({ id: 7, text: '🤖 Subagents\n1. ❌ Failed after 3s (overloaded) · general-purpose' })
+    // The next tick confirms the failure and ends the group.
+    h.advance(CHAT_GAP_MS); await h.tick()
+    h.advance(CHAT_GAP_MS)
+    const edits = h.edits.length
+    h.holdChat('1001', h.now() + 20_000)
+    h.events.push({ t: h.now(), event: 'stop', agent_id: 'a1' })
+    await h.tick()
+    for (let i = 0; i < 6; i++) { h.advance(AGENT_TICK_MS); await h.tick() }
+    expect(h.edits.length).toBe(edits)
+    h.advance(2_000); await h.tick()
+    expect(h.edits.slice(edits)).toEqual([{ id: 7, text: '🤖 Subagents\n1. ✅ Done in 9s · general-purpose' }])
+  })
+
+  test('the sweep of a gone server\'s message takes no slot in a held chat until the hold ends', async () => {
+    const taken: number[] = []
+    const h = harness('1001')
+    h.sweepWith(slots => { if (slots.take('1001')) taken.push(slots.now()) })
+    h.holdChat('1001', h.now() + 10_000)
+    await h.tick()
+    for (let i = 0; i < 3; i++) { h.advance(AGENT_TICK_MS); await h.tick() }
+    expect(taken).toEqual([])
+    h.advance(1_000); await h.tick()
+    expect(taken).toEqual([h.now()])
+  })
+
+  test('the closing edit waits for a held chat, reads the hold again after its wait, and is not made when the hold runs past its time limit', async () => {
+    // A hold past the limit: no closing edit, and the record keeps the
+    // close-time text for the next server.
+    const past = harness('1001')
+    await past.tick()
+    past.events.push(start(past)); await past.tick()
+    past.advance(CHAT_GAP_MS)
+    past.holdChat('1001', past.now() + 20_000)
+    const before = past.records.length
+    await past.stream.close(past.now() + CHAT_GAP_MS)
+    expect(past.attempts).toEqual([])
+    expect(past.records.slice(before).map(r => r.op)).toEqual(['write'])
+
+    // A hold that ends within the limit, after the chat's own spacing: the
+    // edit goes as it ends.
+    const within = harness('1001')
+    await within.tick()
+    within.events.push(start(within)); await within.tick()
+    const sentAt = within.now()
+    within.holdChat('1001', sentAt + CHAT_GAP_MS + 1_000)
+    await within.stream.close(sentAt + CHAT_GAP_MS + 2_000)
+    expect(within.attempts.map(a => a.at)).toEqual([sentAt + CHAT_GAP_MS + 1_000])
+
+    // A hold set while the closing edit waits for the chat's spacing, past
+    // the limit: the edit is not made.
+    const during = harness('1001')
+    await during.tick()
+    during.events.push(start(during)); await during.tick()
+    during.afterSleep(() => during.holdChat('1001', during.now() + 20_000))
+    await during.stream.close(during.now() + CHAT_GAP_MS)
+    expect(during.attempts).toEqual([])
   })
 
   test('"message is not modified" counts as sent; a deleted panel is replaced', async () => {

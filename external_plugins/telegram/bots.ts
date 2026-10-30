@@ -41,6 +41,9 @@ export type Peers = {
   learn(user: { id: number; is_bot: boolean; username?: string }): void
   // Whether the chat is a bot's, from what the server has heard since it started.
   isBot(chatId: string): boolean
+  // The username of a chat known as a bot's, from the same entry isBot reads;
+  // undefined for any other chat. It asks Telegram nothing.
+  botUsername(chatId: string): string | undefined
   // Where a message to the chat goes: a bot's @username, or else the chat id.
   target(chatId: string): Promise<string>
   // Whether the chat is a bot's, asking Telegram about a private chat not
@@ -237,6 +240,10 @@ export function createPeers(lookup: (userId: string, signal?: AbortSignal) => Pr
     },
     isBot(chatId) {
       return known.get(chatId)?.is_bot === true
+    },
+    botUsername(chatId) {
+      const entry = known.get(chatId)
+      return entry?.is_bot === true ? entry.username : undefined
     },
     async target(chatId) {
       const p = await peerOf(chatId)

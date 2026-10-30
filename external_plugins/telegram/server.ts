@@ -32,6 +32,7 @@ import { editRichParsed, formatOf, formatSchema, RICH_INSTRUCTIONS, richEditPars
 import { metaText, replyMeta, richText } from './reply.ts'
 import { heartbeatTransformer } from './heartbeat.ts'
 import { deadlineTransformer, pollFetch } from './deadline.ts'
+import { createHolds, floodTransformer } from './flood.ts'
 import { outcomeOf, outcomeText, SendOutcome, stopped, UNKNOWN_EDIT } from './outcome.ts'
 import { batchGap, createBatcher } from './batch.ts'
 import { createTextMemory, editEvent } from './edit.ts'
@@ -187,6 +188,13 @@ bot.api.config.use(async (prev, method, payload, signal) => {
   }
   return res
 })
+// A log line for every 429 any call gets, and the hold on its chat that
+// typing and the subagents message read. Installed last, before polling
+// starts, so it sees every call's answer as Telegram gave it, each update's
+// own API included, which grammY gives the transformers installed here. See
+// flood.ts.
+const holds = createHolds()
+bot.api.config.use(floodTransformer({ holds, log: line => lastResort(`telegram channel: ${line}\n`) }))
 
 // "typing…" for the whole turn, not Telegram's 5 seconds. See typing.ts.
 const ancestors = ancestorPids()
@@ -235,8 +243,18 @@ function alert(chat_id: string, text: string): void {
 // this tick's checks: two chats can share the owner chat.
 const stuck = new Set<string>()
 const recovered = new Set<string>()
+// A chat Telegram asked to wait gets no typing until the wait ends. A bot's
+// chat is also held under its @username, the name a reply to it goes by.
+const typingHeld = (chat_id: string): boolean => {
+  if (holds.held(chat_id)) return true
+  const name = peers.botUsername(chat_id)
+  return name !== undefined && holds.held(`@${name}`)
+}
 const typing = createTyping({
-  send: chat_id => void bot.api.sendChatAction(chat_id, 'typing').catch(() => {}),
+  send: chat_id => {
+    if (typingHeld(chat_id)) return
+    void bot.api.sendChatAction(chat_id, 'typing').catch(() => {})
+  },
   turnEndedAt: () => readTurnEnd(turnEndFiles),
   busyAt: () => readBusyAt(busyMarkers),
   chat: () => lastChat,
@@ -302,6 +320,8 @@ const agentStream = createAgentStream({
   },
   records: panels,
   sweep: POLLING ? panels.sweep : undefined,
+  // A chat Telegram asked to wait gets nothing until the wait ends.
+  holdUntil: chat_id => holds.until(chat_id),
 })
 setInterval(() => agentStream.tick(), AGENT_TICK_MS).unref()
 

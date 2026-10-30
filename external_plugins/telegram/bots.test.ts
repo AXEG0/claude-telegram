@@ -24,6 +24,21 @@ describe('where a message goes', () => {
     expect(lookups).toEqual([])
   })
 
+  test('the username of a chat known as a bot\'s, from its message or a lookup, and of no other chat, with no call', async () => {
+    const { p, lookups } = peers({ '7777': { is_bot: true, username: 'quiet_bot' }, '6': { is_bot: false, username: 'someone' } })
+    p.learn({ ...OTHER_BOT, is_bot: true })
+    p.learn({ id: 3141592, is_bot: false, username: 'owner' })
+    expect(p.botUsername(String(OTHER_BOT.id))).toBe(OTHER_BOT.username)
+    expect(p.botUsername('3141592')).toBeUndefined()
+    expect(p.botUsername('7777')).toBeUndefined()
+    expect(lookups).toEqual([])
+    await p.target('7777')
+    await p.target('6')
+    expect(p.botUsername('7777')).toBe('quiet_bot')
+    expect(p.botUsername('6')).toBeUndefined()
+    expect(lookups).toEqual(['7777', '6'])
+  })
+
   test('a person with a username keeps the numeric id', async () => {
     const { p, lookups } = peers({ '6': { is_bot: false, username: 'someone' } })
     p.learn({ id: 3141592, is_bot: false, username: 'owner' })

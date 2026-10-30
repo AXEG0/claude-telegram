@@ -4,7 +4,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { flock, LOCK_EX, LOCK_NB } from './buttons.ts'
 import { createPanelStore } from './panels.ts'
-import type { SweepSlots } from './agents.ts'
+import { AGENT_TICK_MS, createAgentStream, type SweepSlots } from './agents.ts'
 
 const dirs: string[] = []
 afterEach(() => {
@@ -134,6 +134,30 @@ describe.skipIf(process.platform !== 'linux')('the panel records', () => {
     for (const m of [1, 2, 3]) delete answers[m]
     store.sweep(s)
     await settle()
+    expect(readdirSync(dir)).toEqual([])
+  })
+
+  test('a gone writer\'s record in a chat Telegram asked to wait is swept only once the hold ends, through the stream\'s slots', async () => {
+    const dir = folder()
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, '1-9.json'), JSON.stringify({ chat: '1', message: 9, text: 'closed', writer: writerA }))
+    writeFileSync(join(dir, `${writerA}.lock`), '')
+    let t = 1_000_000
+    const hold = t + 10_000
+    const made: number[] = []
+    const store = createPanelStore({ dir, writer: writerB })
+    const stream = createAgentStream({
+      readEvents: () => [], chat: () => undefined, now: () => t,
+      send: async () => undefined, edit: async (_c, message) => { made.push(message) },
+      sweep: store.sweep, holdUntil: chat => chat === '1' && t < hold ? hold : 0,
+    })
+    for (; t < hold; t += AGENT_TICK_MS) { stream.tick(); await settle() }
+    expect(made).toEqual([])
+    expect(readdirSync(dir).sort()).toEqual(['1-9.json', `${writerA}.lock`])
+    t = hold
+    stream.tick()
+    await settle()
+    expect(made).toEqual([9])
     expect(readdirSync(dir)).toEqual([])
   })
 })
