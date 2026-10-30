@@ -6,7 +6,7 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { createServer, type Server, type Socket } from 'node:net'
 import { Bot, HttpError } from 'grammy'
-import { deadlineOf, deadlineTransformer, pollError, POLL_MARGIN_MS, START_CALL_MS } from './deadline.ts'
+import { deadlineOf, deadlineTransformer, pollError, pollFetch, POLL_MARGIN_MS, START_CALL_MS } from './deadline.ts'
 
 const servers: Server[] = []
 const bots: Bot[] = []
@@ -113,12 +113,14 @@ describe('the deadline transformer', () => {
 
 // A raw HTTP/1.1 server on a local port that answers grammY as the test says:
 // each request goes to answer() with its socket's number; answer() writes the
-// answer or nothing. It records when each socket opened and closed.
+// answer or nothing. It records when each socket opened and closed, and the
+// methods of the requests it carried.
+type SocketRecord = { opened: number; closed?: number; methods: string[] }
 function rawServer(answer: (req: { socket: number; method: string; body: Record<string, unknown> }, reply: (body: object) => void) => void) {
-  const sockets: { opened: number; closed?: number }[] = []
+  const sockets: SocketRecord[] = []
   const server = createServer((socket: Socket) => {
     const id = sockets.length
-    const record: { opened: number; closed?: number } = { opened: performance.now() }
+    const record: SocketRecord = { opened: performance.now(), methods: [] }
     sockets.push(record)
     socket.on('close', () => { record.closed = performance.now() })
     socket.on('error', () => {})
@@ -134,6 +136,7 @@ function rawServer(answer: (req: { socket: number; method: string; body: Record<
         const text = buf.subarray(end + 4, end + 4 + length).toString()
         buf = buf.subarray(end + 4 + length)
         const method = head.split(' ')[1]!.split('/').pop()!
+        record.methods.push(method)
         const reply = (body: object) => {
           const json = JSON.stringify(body)
           socket.write(`HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: ${Buffer.byteLength(json)}\r\nconnection: keep-alive\r\n\r\n${json}`)
@@ -151,11 +154,21 @@ function rawServer(answer: (req: { socket: number; method: string; body: Record<
 const ME = { id: 1, is_bot: true, first_name: 'Test', username: 'test_bot' }
 
 describe('over a real socket', () => {
-  test('a poll with no answer is cut at its deadline: its socket closes then, and the next poll comes 3 s later from the same offset on another connection', async () => {
+  test('a poll with no answer is cut at its deadline: its socket closes then, and the next poll comes 3 s later from the same offset on a new connection, never on one of the idle connections the pool holds for every other call', async () => {
     const polls: { socket: number; at: number; offset: unknown }[] = []
+    const held: (() => void)[] = []
     const { root, sockets } = await rawServer((req, reply) => {
       if (req.method === 'getMe') return reply({ ok: true, result: ME })
       if (req.method === 'deleteWebhook') return reply({ ok: true, result: true })
+      if (req.method === 'sendMessage') {
+        // Three sends answered together: each holds a connection of its own
+        // until then, and the pool keeps all three open and idle afterwards.
+        // A later send is answered at once.
+        const n = held.push(() => reply({ ok: true, result: { message_id: n, date: 0, chat: { id: 1, type: 'private' }, text: 'sent' } }))
+        if (n === 3) for (const send of held.slice(0, 3)) send()
+        if (n > 3) held[n - 1]!()
+        return
+      }
       if (req.method !== 'getUpdates') return reply({ ok: true, result: true })
       // grammY's last poll on stop carries no poll time and is answered; a
       // long poll is not.
@@ -163,7 +176,7 @@ describe('over a real socket', () => {
       polls.push({ socket: req.socket, at: performance.now(), offset: req.body.offset })
     })
     const lines: string[] = []
-    const bot = new Bot('1:test', { client: { apiRoot: root } })
+    const bot = new Bot('1:test', { client: { apiRoot: root, fetch: pollFetch } })
     bots.push(bot)
     bot.api.config.use(deadlineTransformer({ pollMarginMs: 400, log: line => lines.push(line) }))
     void bot.start({ timeout: 1 }).catch(() => {})
@@ -174,6 +187,10 @@ describe('over a real socket', () => {
         await Bun.sleep(5)
       }
     }
+    await until(() => polls.length >= 1, 4000)
+    await Promise.all([1, 2, 3].map(() => bot.api.sendMessage(1, 'sent')))
+    const pooled = sockets.filter(s => s.methods.includes('sendMessage'))
+    expect(pooled).toHaveLength(3)
     await until(() => polls.length >= 2, 8000)
     const [first, second] = polls as [typeof polls[0], typeof polls[0]]
     const cut = sockets[first.socket]!.closed
@@ -184,12 +201,41 @@ describe('over a real socket', () => {
     // grammY's 3 s wait after a failed poll, counted from the cut.
     expect(second.at - first.at).toBeGreaterThanOrEqual(4390)
     expect(second.at - first.at).toBeLessThan(4800)
-    // Another live connection: one Bun's pool held open, or a new one.
-    expect(second.socket).not.toBe(first.socket)
-    expect(sockets[second.socket]!.closed).toBeUndefined()
+    // The three idle connections were still open when the next poll came.
+    for (const s of pooled) expect(s.closed === undefined || s.closed > second.at).toBe(true)
+    // Each poll had a connection of its own: the next one a new connection,
+    // opened after the cut, that carried nothing before it.
+    expect(sockets[first.socket]!.methods).toEqual(['getUpdates'])
+    expect(sockets[second.socket]!.methods).toEqual(['getUpdates'])
+    expect(sockets[second.socket]!.opened).toBeGreaterThanOrEqual(cut!)
     expect(second.offset).toEqual(first.offset)
+    // Every other call keeps the pool: a send now takes one of the three.
+    const opened = sockets.length
+    await bot.api.sendMessage(1, 'sent')
+    expect(sockets).toHaveLength(opened)
+    expect(pooled.flatMap(s => s.methods).filter(m => m === 'sendMessage')).toHaveLength(4)
     expect(lines).toEqual(['poll failed after 1.4 s: no answer within 1.4 s'])
   }, 15_000)
+
+  test('an answered poll closes its connection once its answer is read, and a send leaves its own in the pool', async () => {
+    const { root, sockets } = await rawServer((req, reply) => {
+      if (req.method === 'getUpdates') return reply({ ok: true, result: [] })
+      reply({ ok: true, result: { message_id: 1, date: 0, chat: { id: 1, type: 'private' }, text: 'sent' } })
+    })
+    const bot = new Bot('1:test', { client: { apiRoot: root, fetch: pollFetch } })
+    for (let i = 0; i < 2; i++) {
+      await bot.api.getUpdates({ timeout: 1 })
+      await bot.api.sendMessage(1, 'sent')
+    }
+    // The server never closes a connection, so each close here is the client's.
+    const end = performance.now() + 1000
+    while (sockets.some(s => s.methods.includes('getUpdates') && s.closed === undefined) && performance.now() < end) await Bun.sleep(5)
+    expect(sockets.map(s => [s.methods, s.closed !== undefined])).toEqual([
+      [['getUpdates'], true],
+      [['sendMessage', 'sendMessage'], false],
+      [['getUpdates'], true],
+    ])
+  })
 
   test('a getMe with no answer is cut at its deadline and grammY tries it again, so polling starts once Telegram answers', async () => {
     let getMes = 0

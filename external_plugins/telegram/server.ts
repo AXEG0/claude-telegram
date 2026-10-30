@@ -31,8 +31,8 @@ import { createPanelStore } from './panels.ts'
 import { editRichParsed, formatOf, formatSchema, RICH_INSTRUCTIONS, richEditParse, richEnabled, sendRich, type RawApi } from './rich.ts'
 import { metaText, replyMeta, richText } from './reply.ts'
 import { heartbeatTransformer } from './heartbeat.ts'
-import { deadlineTransformer } from './deadline.ts'
-import { outcomeOf, outcomeText, SendOutcome, stopped } from './outcome.ts'
+import { deadlineTransformer, pollFetch } from './deadline.ts'
+import { outcomeOf, outcomeText, SendOutcome, stopped, UNKNOWN_EDIT } from './outcome.ts'
 import { batchGap, createBatcher } from './batch.ts'
 import { createTextMemory, editEvent } from './edit.ts'
 import { opening, reactionEvent } from './reaction.ts'
@@ -145,7 +145,8 @@ process.on('uncaughtException', err => {
 // Strict: no bare yes/no (conversational), no prefix/suffix chatter.
 const PERMISSION_REPLY_RE = /^\s*(y|yes|n|no)\s+([a-km-z]{5})\s*$/i
 
-const bot = new Bot(TOKEN)
+// grammY's own fetch, each poll on a connection of its own. See deadline.ts.
+const bot = new Bot(TOKEN, { client: { fetch: pollFetch } })
 let botUsername = ''
 const arrivals = createArrivals(ARRIVALS_FILE)
 // The update ids the record holds from the last 24 hours, filled once the
@@ -862,10 +863,10 @@ async function unreserveKeyboard(chat_id: string, keyboard: number): Promise<voi
   }
 }
 
-// Joins the message id to the reply's reservation, unless a press joined it
-// first. If that cannot be written, the reply removes the keyboard it sent and
-// fails.
-async function joinKeyboard(chat_id: string, keyboard: number, message_id: number, sentIds: number[]): Promise<void> {
+// Joins the message id to the reply's reservation, with the message's text
+// when known, unless a press joined it first. If that cannot be written, the
+// reply removes the keyboard it sent and fails.
+async function joinKeyboard(chat_id: string, keyboard: number, message_id: number, sentIds: number[], text?: string): Promise<void> {
   let why: string | undefined
   const remove = async () => {
     try {
@@ -879,7 +880,7 @@ async function joinKeyboard(chat_id: string, keyboard: number, message_id: numbe
   try {
     await buttonStore.withLock(async held => {
       try {
-        held.update(rec => joinMessage(rec, chat_id, keyboard, message_id))
+        held.update(rec => joinMessage(rec, chat_id, keyboard, message_id, text))
       } catch (err) {
         why = reason(err)
         removed = await remove()
@@ -921,7 +922,7 @@ async function textEditDone(chat_id: string, message_id: number): Promise<void> 
           logButtons(`could not end the entry of message ${message_id} in chat ${chat_id}: ${reason(e)}`)
         }
       }
-      throw new Error(`the buttons another call gave message ${message_id} meanwhile could not be set again: ${reason(err)}`)
+      throw new Error(`the buttons another call gave message ${message_id} meanwhile could not be set again: ${reason(err)}`, { cause: err })
     }
   })
 }
@@ -930,7 +931,8 @@ async function textEditDone(chat_id: string, message_id: number): Promise<void> 
 const unlimited = <T>(run: (signal?: AbortSignal) => Promise<T>): Promise<T> => run()
 
 // Sets the message's keyboard to rows (none when undefined or empty) through
-// call. A text edit without buttons of a message the record does not hold
+// call, with text, the edit's new text (undefined when the text stays). A text
+// edit without buttons of a message the record does not hold
 // goes as before, with neither the lock nor the 10-second limit, then mends
 // what it may have removed: see textEditDone. Every other edit runs under the
 // lock with the limit: before the call, the record names the new id, or none,
@@ -940,6 +942,7 @@ async function changeKeyboard(
   message_id: number,
   rows: string[][] | undefined,
   call: (markup: Markup | undefined, limit: typeof limited) => Promise<unknown>,
+  text?: string,
 ): Promise<void> {
   const setting = rows !== undefined && rows.length > 0
   const peeked = buttonStore.peek()
@@ -955,6 +958,13 @@ async function changeKeyboard(
     try {
       await textEditDone(chat_id, message_id)
     } catch (err) {
+      // An edit whose outcome is unknown stays unknown, and so does a
+      // confirmed edit whose mending call got no answer: neither is a
+      // failure. See outcome.ts.
+      const edit = failed === undefined ? undefined : outcomeOf(failed)
+      if (edit?.sent === 'unknown') throw new SendOutcome(`${UNKNOWN_EDIT} (${edit.cause}); and ${reason(err)}`, edit)
+      const mend = outcomeOf((err as Error)?.cause)
+      if (failed === undefined && mend?.sent === 'unknown') throw new SendOutcome(`the text was edited, but ${reason(err)}`, mend)
       throw new Error(failed === undefined ? `the text was edited, but ${reason(err)}` : `${reason(failed)}; and ${reason(err)}`)
     }
     if (failed !== undefined) throw failed
@@ -967,8 +977,8 @@ async function changeKeyboard(
     if (touches) {
       try {
         change = held.update(rec => {
-          const keyboard = setting ? keyboardFor(rec, chat_id, message_id, rows!) : null
-          return { keyboard, was: replace(rec, chat_id, message_id, keyboard, setting ? rows : undefined) }
+          const keyboard = setting ? keyboardFor(rec, chat_id, message_id, rows!, text) : null
+          return { keyboard, was: replace(rec, chat_id, message_id, keyboard, setting ? rows : undefined, text) }
         })
       } catch (err) {
         throw new Error(`could not record the buttons, so nothing was edited: ${reason(err)}`)
@@ -1232,7 +1242,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           if (keyboard !== undefined && carrier === undefined && !kept) await unreserveKeyboard(chat_id, keyboard)
           throw err
         }
-        if (keyboard !== undefined && carrier !== undefined) await joinKeyboard(chat_id, keyboard, carrier, sentIds)
+        // The text goes with the keyboard when one message carries all of it.
+        if (keyboard !== undefined && carrier !== undefined) {
+          await joinKeyboard(chat_id, keyboard, carrier, sentIds, files.length === 0 && sentIds.length === 1 ? text : undefined)
+        }
 
         const result = sentText() + (carrier !== undefined ? `; buttons on message ${carrier}` : '')
         return { content: [{ type: 'text', text: result }] }
@@ -1305,7 +1318,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           : limit(signal => bot.api.editMessageText(chat_id, message_id, text, {
               ...(editParseMode ? { parse_mode: editParseMode } : {}),
               ...(markup ? { reply_markup: markup as never } : {}),
-            }, signal))))
+            }, signal)), text))
         // A reaction to the message then quotes its new text.
         sentWords.remember(chat_id, message_id, opening(text))
         return { content: [{ type: 'text', text: `edited (id: ${args.message_id})` }] }
@@ -1319,10 +1332,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     // A send or edit whose outcome is unknown did not fail as far as anyone
-    // knows: its result says what to do instead.
-    const unknown = err instanceof SendOutcome && err.outcome.sent === 'unknown'
+    // knows: its result is a normal one that says so and what to do instead.
+    if (err instanceof SendOutcome && err.outcome.sent === 'unknown') return { content: [{ type: 'text', text: msg }] }
     return {
-      content: [{ type: 'text', text: unknown ? `${req.params.name}: ${msg}` : `${req.params.name} failed: ${msg}` }],
+      content: [{ type: 'text', text: `${req.params.name} failed: ${msg}` }],
       isError: true,
     }
   }

@@ -21,6 +21,14 @@ const heartbeat = (dir: string): number => JSON.parse(readFileSync(join(dir, 'po
 const failedPolls = (stderr: string) => stderr.split('\n').filter(line => line.includes('poll failed'))
 
 describe.skipIf(process.platform !== 'linux')('the deadline on each poll', () => {
+  test('the server gives grammY\'s client the fetch that puts each poll on a connection of its own', async () => {
+    const dir = state()
+    const channel = start(dir, fixture.argv)
+    await channel.ready()
+    // The fake Telegram writes down which fetch the server gave grammY.
+    expect(JSON.parse(readFileSync(join(dir, 'test-client.json'), 'utf8'))).toEqual({ fetch: 'pollFetch' })
+  })
+
   test('a poll that never answers ends at 45 s, the next starts 3 s later from the same offset, no update is lost or handled twice, and each failed poll writes one log line', async () => {
     const dir = state()
     const channel = start(dir, fixture.argv, {

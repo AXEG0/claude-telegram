@@ -17,7 +17,7 @@
 // the clock's milliseconds when the record is new, so an id never repeats.
 
 import { closeSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
-import { randomBytes } from 'crypto'
+import { createHash, randomBytes } from 'crypto'
 import type { Inbound } from './batch.ts'
 import { metaText } from './reply.ts'
 
@@ -159,9 +159,10 @@ export async function withinLimit<T>(run: (signal: AbortSignal) => Promise<T>, m
 }
 
 // The record. An entry without a message is a reservation; keyboard null is a
-// removal under way; rows are the keyboard's labels, by row; taken is a swap
-// still pending.
-export type Entry = { chat: string; message?: number; keyboard: number | null; rows?: string[][]; taken?: string }
+// removal under way; rows are the keyboard's labels, by row; textSha is the
+// SHA-256 of the text the message holds with them, when the plugin knows it;
+// taken is a swap still pending.
+export type Entry = { chat: string; message?: number; keyboard: number | null; rows?: string[][]; textSha?: string; taken?: string }
 export type ButtonRecord = { next: number; entries: Entry[] }
 
 function validEntry(e: unknown): e is Entry {
@@ -170,8 +171,11 @@ function validEntry(e: unknown): e is Entry {
     && (x.message === undefined || Number.isSafeInteger(x.message))
     && (x.keyboard === null || Number.isSafeInteger(x.keyboard))
     && (x.rows === undefined || Array.isArray(x.rows) && x.rows.every(row => Array.isArray(row) && row.every(label => typeof label === 'string')))
+    && (x.textSha === undefined || typeof x.textSha === 'string')
     && (x.taken === undefined || typeof x.taken === 'string')
 }
+
+export const textSha = (text: string): string => createHash('sha256').update(text).digest('base64url')
 
 // Room for one more entry: the oldest go, with no Telegram call.
 function open(rec: ButtonRecord, entry: Entry): void {
@@ -183,14 +187,18 @@ export function newKeyboard(rec: ButtonRecord): number {
   return rec.next++
 }
 
-// The keyboard id for an edit that sets rows on message: the id of the
-// message's current keyboard when it is unpressed and holds the same rows, so
+// The keyboard id for an edit that sets rows on message, with text, or with
+// the text it holds when text is undefined: the id of the message's current
+// keyboard when it is unpressed and the edit repeats its rows and its text, so
 // an edit repeated after one whose outcome is unknown carries the same buttons
-// whichever copy lands; a new id otherwise.
-export function keyboardFor(rec: ButtonRecord, chat: string, message: number, rows: string[][]): number {
+// whichever copy lands; a new id otherwise, so a press made under other text
+// is closed. A message whose text the record does not know gets a new id for
+// any edit of its text.
+export function keyboardFor(rec: ButtonRecord, chat: string, message: number, rows: string[][], text?: string): number {
   const e = entryOf(rec, chat, message)
-  const same = e?.rows !== undefined && JSON.stringify(e.rows) === JSON.stringify(rows)
-  return e && e.keyboard !== null && e.taken === undefined && same ? e.keyboard : newKeyboard(rec)
+  const sameRows = e?.rows !== undefined && JSON.stringify(e.rows) === JSON.stringify(rows)
+  const sameText = text === undefined || e?.textSha !== undefined && e.textSha === textSha(text)
+  return e && e.keyboard !== null && e.taken === undefined && sameRows && sameText ? e.keyboard : newKeyboard(rec)
 }
 
 export function reserve(rec: ButtonRecord, chat: string, rows: string[][]): number {
@@ -207,13 +215,15 @@ function reservationOf(rec: ButtonRecord, chat: string, keyboard: number): Entry
   return rec.entries.find(e => e.chat === chat && e.message === undefined && e.keyboard === keyboard)
 }
 
-// Joins a reply's message to its reservation. A reservation a press already
-// joined, or one no longer held, is left as it is.
-export function join(rec: ButtonRecord, chat: string, keyboard: number, message: number): boolean {
+// Joins a reply's message to its reservation, with the message's text when
+// the plugin knows it. A reservation a press already joined, or one no longer
+// held, is left as it is.
+export function join(rec: ButtonRecord, chat: string, keyboard: number, message: number, text?: string): boolean {
   const r = reservationOf(rec, chat, keyboard)
   if (!r) return false
   rec.entries = rec.entries.filter(e => e === r || !(e.chat === chat && e.message === message))
   r.message = message
+  if (text !== undefined) r.textSha = textSha(text)
   return true
 }
 
@@ -253,13 +263,15 @@ export function drop(rec: ButtonRecord, chat: string, message: number, keyboard?
 }
 
 // Names a new keyboard with its rows, or none, as message's current one before
-// the call that sets it; returns what to put back if Telegram refuses the
-// change. An entry whose keyboard is set again moves to the newest place.
-export function replace(rec: ButtonRecord, chat: string, message: number, keyboard: number | null, rows?: string[][]): Entry | undefined {
+// the call that sets it, with the edit's text, or the text the entry knew when
+// the edit sets none; returns what to put back if Telegram refuses the change.
+// An entry whose keyboard is set again moves to the newest place.
+export function replace(rec: ButtonRecord, chat: string, message: number, keyboard: number | null, rows?: string[][], text?: string): Entry | undefined {
   const before = entryOf(rec, chat, message)
   const was = before && { ...before }
   if (before) rec.entries = rec.entries.filter(e => e !== before)
-  if (keyboard !== null) open(rec, { chat, message, keyboard, rows })
+  const sha = text !== undefined ? textSha(text) : before?.textSha
+  if (keyboard !== null) open(rec, { chat, message, keyboard, rows, ...(sha !== undefined ? { textSha: sha } : {}) })
   else if (before) open(rec, { chat, message, keyboard })
   return was
 }

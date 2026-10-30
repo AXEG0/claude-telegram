@@ -3,6 +3,7 @@ import { mock } from 'bun:test'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import * as grammy from 'grammy'
+import { pollFetch } from '../deadline.ts'
 
 // A file upload goes as a multipart stream; its fields are logged as text and
 // each file as its name.
@@ -452,10 +453,18 @@ const fakeFetch = (async (url: string | URL | Request, options?: RequestInit) =>
   return json({ ok: true, result })
 }) as unknown as typeof fetch
 
+// The fake takes the place of the fetch the server gives grammY's client, and
+// writes down which fetch that was, for a test to check the server's own.
 const RealBot = grammy.Bot
 mock.module('grammy', () => ({
   ...grammy,
   Bot: class extends RealBot {
-    constructor(token: string) { super(token, { client: { fetch: fakeFetch } }) }
+    constructor(token: string, options?: { client?: { fetch?: unknown } }) {
+      super(token, { client: { fetch: fakeFetch } })
+      const given = options?.client?.fetch
+      if (process.env.TELEGRAM_STATE_DIR) writeFileSync(join(process.env.TELEGRAM_STATE_DIR, 'test-client.json'), JSON.stringify({
+        fetch: given === undefined ? 'none' : given === pollFetch ? 'pollFetch' : 'other',
+      }))
+    }
   },
 }))

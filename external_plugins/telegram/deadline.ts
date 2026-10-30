@@ -5,10 +5,10 @@
 // getMe and deleteWebhook get START_CALL_MS. At the deadline the call is
 // aborted, which closes its connection, and it fails at once with grammY's own
 // HttpError, whether or not the abort is heard. grammY then asks again: a poll
-// 3 seconds later from the same offset, on a fresh connection; a start-up call
-// with its own growing wait. An answer that comes after the deadline is never
-// read, so nothing is lost or handled twice. Every other call keeps grammY's
-// limit.
+// 3 seconds later from the same offset, on a fresh connection (see pollFetch);
+// a start-up call with its own growing wait. An answer that comes after the
+// deadline is never read, so nothing is lost or handled twice. Every other
+// call keeps grammY's limit.
 //
 // Every failed poll writes one line to the log, with its error and how long it
 // took, so a stall shows whether Telegram hung or refused. A conflict (409) or
@@ -16,6 +16,7 @@
 // it there, and a poll grammY cancelled itself, as on stop, is no failure.
 
 import { HttpError } from 'grammy'
+import nodeFetch from 'node-fetch'
 
 export const POLL_MARGIN_MS = 15_000
 export const START_CALL_MS = 30_000
@@ -32,6 +33,24 @@ export function deadlineOf(method: string, payload: unknown, limits: Limits = {}
   }
   if (method === 'getMe' || method === 'deleteWebhook') return limits.startMs ?? START_CALL_MS
   return undefined
+}
+
+// The fetch grammY's client calls, which is grammY's own (Bun's node-fetch),
+// with each poll on a connection of its own: keepalive false, which Bun takes
+// per request, opens a new connection for the poll and closes it once the poll
+// is answered. The poll goes without the connection: keep-alive header grammY
+// puts on every call, which Bun 1.3 obeys over keepalive false, returning the
+// poll's connection to the pool once answered. Without this, the poll after a
+// cut could take an idle pooled connection opened before the stall, which
+// Telegram may have dropped meanwhile, and wait out another deadline on it,
+// once per such connection. Every other call goes through the pool as before.
+export const pollFetch = ((url: string | URL | Request, init?: RequestInit) =>
+  nodeFetch(url as never, (String(url).endsWith('/getUpdates') ? ownConnection(init) : init) as never)) as unknown as typeof fetch
+
+function ownConnection(init?: RequestInit): RequestInit {
+  const headers = new Headers(init?.headers)
+  headers.delete('connection')
+  return { ...init, headers, keepalive: false }
 }
 
 // What a failed poll's line says went wrong.
