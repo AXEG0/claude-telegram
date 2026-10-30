@@ -6,6 +6,34 @@ import { basename, join } from 'path'
 
 export const CHANNEL_ENTRY = 'plugin:telegram@claude-telegram'
 
+// The update kinds the polling server asks Telegram for, named here rather
+// than taken from grammY's default list, which grows with grammY: the twenty
+// kinds that list held up to grammY 1.41, and reactions, which Telegram sends
+// only to a bot that asks for them.
+export const UPDATE_KINDS = [
+  'message',
+  'edited_message',
+  'channel_post',
+  'edited_channel_post',
+  'business_connection',
+  'business_message',
+  'edited_business_message',
+  'deleted_business_messages',
+  'inline_query',
+  'chosen_inline_result',
+  'callback_query',
+  'shipping_query',
+  'pre_checkout_query',
+  'purchased_paid_media',
+  'poll',
+  'poll_answer',
+  'my_chat_member',
+  'chat_join_request',
+  'chat_boost',
+  'removed_chat_boost',
+  'message_reaction',
+] as const
+
 export type ChannelMode = { poll: boolean; warning?: string }
 
 export function channelMode(start: number = process.ppid, proc: string = '/proc'): ChannelMode {

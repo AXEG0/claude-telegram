@@ -4,7 +4,7 @@ import { join } from 'path'
 import fixture from './fixtures/channel-argv.json'
 import { calls, cleanup, deliver, driveClock, start, state, until, wait, type Call, type Server } from './fixtures/harness.ts'
 import { PASSING_LABELS, REFUSED_LABELS } from './fixtures/labels.ts'
-import { CLOSED, lock, NOT_ON_MESSAGE, PRESS_AGAIN, RECORD_MAX } from './buttons.ts'
+import { CLOSED, lock, NOT_ON_MESSAGE, PRESS_AGAIN, RECORD_MAX, textSha } from './buttons.ts'
 import { appendPermit, permitFile, permitText } from './permit.ts'
 import { AGENT_TICK_MS, agentEventFile, appendAgentEvent } from './agents.ts'
 
@@ -137,7 +137,7 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     await srv.close()
   }, 20000)
 
-  test('each button’s data is the prefix, an id from the record’s counter and its index, new for every keyboard, on the same message and after a restart', async () => {
+  test('each button’s data is the prefix, an id from the record’s counter and its index, new for every keyboard with other buttons, on the same message and after a restart', async () => {
     const dir = state()
     const first = await channel(dir)
     const before = Date.now()
@@ -149,7 +149,7 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     expect(k1).toBeGreaterThanOrEqual(before - 60_000)
     expect(k1).toBeLessThanOrEqual(Date.now())
     expect(record(dir).next).toBe(k1 + 1)
-    ok(await tool(first, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [['A', 'B'], ['C']] }))
+    ok(await tool(first, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [['A', 'B'], ['D']] }))
     expect(keyboard(m)).toEqual([`btn:${k1 + 1}:0`, `btn:${k1 + 1}:1`, `btn:${k1 + 1}:2`])
     await first.close()
     const second = await channel(dir, { ids: 200 })
@@ -292,11 +292,11 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     const sendsSince = (from: number) => calls(dir).slice(from).filter(c => SENDS.includes(c.method)).map(c => [c.method, !!c.refused])
     let from = calls(dir).length
     expect(failed(await tool(srv, 'reply', { chat_id: '1', text: '**KEYBOARD-BAD**', buttons: [['Yes']] }))).toBe(
-      "reply failed: reply failed after 0 of 1 part(s) sent: Call to 'sendRichMessage' failed! (400: Bad Request: REPLY_MARKUP_INVALID)")
+      'reply failed: not sent (Telegram answered 400: Bad Request: REPLY_MARKUP_INVALID)')
     expect(sendsSince(from)).toEqual([['sendRichMessage', true]])
     from = calls(dir).length
     expect(failed(await tool(srv, 'reply', { chat_id: '1', text: 'KEYBOARD-BAD', format: 'text', buttons: [['Yes']] }))).toBe(
-      "reply failed: reply failed after 0 of 1 chunk(s) sent: Call to 'sendMessage' failed! (400: Bad Request: BUTTON_DATA_INVALID)")
+      'reply failed: not sent (Telegram answered 400: Bad Request: BUTTON_DATA_INVALID)')
     expect(sendsSince(from)).toEqual([['sendMessage', true]])
     // A button refused in a rich body, on the call that carries the keyboard.
     from = calls(dir).length
@@ -326,9 +326,9 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
       { method: 'sendDocument', error: WRONG },
     ] })
     expect(failed(await tool(srv, 'reply', { chat_id: '1', text: 'aaabbbccc', buttons: [['Yes']] }))).toBe(
-      "reply failed: reply failed after 2 of 3 chunk(s) sent (ids: 100, 101): Call to 'sendMessage' failed! (400: Bad Request: message is too long)")
+      'reply failed: part 3 of 3: not sent (Telegram answered 400: Bad Request: message is too long); sent so far: 2 message(s) (ids: 100, 101); never tried: none')
     expect(failed(await tool(srv, 'reply', { chat_id: '1', text: 'aaa', files: [join(dir, 'inbox', 'chart.png'), join(dir, 'inbox', 'notes.txt')], buttons: [['Yes']] }))).toBe(
-      "reply failed: reply failed after 2 of 3 message(s) sent (ids: 102, 103): Call to 'sendDocument' failed! (400: Bad Request: wrong file identifier)")
+      'reply failed: part 3 of 3: not sent (Telegram answered 400: Bad Request: wrong file identifier); sent so far: 2 message(s) (ids: 102, 103); never tried: none')
     // A reply that sent no keyboard leaves no reservation.
     expect(record(dir).entries).toEqual([])
     await srv.close()
@@ -383,7 +383,7 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     expect(k2).toBe(k1 + 1)
     from = calls(dir).length
     expect(failed(await tool(srv, 'edit_message', { chat_id: '1', message_id: String(m), text: '**KEYBOARD-BAD**', buttons: [['Wait']] }))).toBe(
-      "edit_message failed: Call to 'editMessageText' failed! (400: Bad Request: REPLY_MARKUP_INVALID)")
+      'edit_message failed: not edited (Telegram answered 400: Bad Request: REPLY_MARKUP_INVALID)')
     edits = calls(dir).slice(from).filter(c => EDITS.includes(c.method))
     expect(edits.map(c => [c.payload.rich_message ? 'rich' : 'plain', !!c.refused])).toEqual([['rich', true]])
     // The keyboard Telegram kept is the one the record names.
@@ -596,6 +596,32 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     await srv.close()
   }, 15000)
 
+  test('an edit to other text with the same buttons takes a new keyboard id, so a press made under the old text gets the closed notice and delivers nothing, while an edit repeating the text and buttons keeps the id', async () => {
+    const dir = state()
+    const srv = await channel(dir)
+    const m = await ask(srv, 'Merge A?')
+    const old = shown(dir, m)
+    const k1 = entryOf(dir, m).keyboard
+    const edit = (text: string) => tool(srv, 'edit_message', { chat_id: '1', message_id: String(m), text, buttons: [['Yes', 'No']] })
+    ok(await edit('Merge A?'))
+    expect(entryOf(dir, m).keyboard).toBe(k1)
+    ok(await edit('Deploy B?'))
+    const k2 = entryOf(dir, m).keyboard
+    expect(k2).not.toBe(k1)
+    ok(await edit('Deploy B?'))
+    expect(entryOf(dir, m).keyboard).toBe(k2)
+    const stale = press(dir, m, 'Yes', { markup: old })
+    deliver(dir, [stale.update])
+    expect(await answerTo(dir, stale.id)).toBe(CLOSED)
+    await wait(300)
+    expect(pressed(srv)).toEqual([])
+    const current = press(dir, m, 'Yes')
+    deliver(dir, [current.update])
+    await until(() => pressed(srv).length === 1)
+    expect(pressed(srv)[0].meta.button).toBe('Yes')
+    await srv.close()
+  }, 15000)
+
   test('a press queued before a send-only server’s text edit removed the buttons delivers nothing and puts none back', async () => {
     const dir = state()
     const srv = await channel(dir)
@@ -687,12 +713,12 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     await srv.close()
   }, 15000)
 
-  test('after a restart, a press carrying the id the message had before its buttons were set again delivers nothing, and one on the new keyboard delivers', async () => {
+  test('after a restart, a press carrying the id the message had before its buttons were changed delivers nothing, and one on the new keyboard delivers', async () => {
     const dir = state()
     const first = await channel(dir)
     const m = await ask(first)
     const old = shown(dir, m)
-    ok(await tool(first, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [['Yes', 'No']] }))
+    ok(await tool(first, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [['Yes', 'No', 'Later']] }))
     await first.close()
     const second = await channel(dir, { ids: 200 })
     const stale = press(dir, m, 'Yes', { markup: old })
@@ -1002,7 +1028,7 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     const text = tool(s, 'edit_message', { chat_id: '1', message_id: String(m), text: 'PLAIN' })
     await wait(200)
     const setting = tool(p, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [['Yes', 'No']] })
-    expect(failed(await text)).toContain("Network request for 'editMessageText' failed")
+    expect(ok(await text)).toBe('edit outcome unknown; repeating the same edit is safe (fetch failed: the connection was reset)')
     ok(await setting)
     // The keyboard the second server set.
     const set = editLog(dir, m)[0]![2]!
@@ -1055,6 +1081,22 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     await p.close()
   }, 20000)
 
+  test('when the late text edit\'s connection drops and Telegram refuses the keyboard set again with a 429, the text edit says its outcome is unknown and why the buttons were not set again, in a result that is no failure', async () => {
+    const { dir, p, s, m } = await plainPair([{ ...PLAIN, preMs: 1500, drop: true }, { method: 'editMessageReplyMarkup', error: TOO_MANY }], [{ ...SET, holdMs: 3000 }])
+    const text = tool(s, 'edit_message', { chat_id: '1', message_id: String(m), text: 'PLAIN' })
+    await wait(200)
+    const setting = tool(p, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [['Yes', 'No']] })
+    expect(ok(await text)).toBe(`edit outcome unknown; repeating the same edit is safe (fetch failed: the connection was reset); and the buttons another call gave message ${m} meanwhile could not be set again: Call to 'editMessageReplyMarkup' failed! (429: Too Many Requests: retry after 5)`)
+    ok(await setting)
+    expect(editLog(dir, m).map(([who, method, , answer]) => [who, method, answer])).toEqual([
+      ['p', 'editMessageReplyMarkup', 'ok'],
+      ['s', 'editMessageText', 'ok'],
+      ['s', 'editMessageReplyMarkup', 'refused'],
+    ])
+    await s.close()
+    await p.close()
+  }, 20000)
+
   test('when Telegram answers the keyboard set again with message to edit not found, the text edit fails with that description and the entry ends', async () => {
     const gone = { error_code: 400, description: 'Bad Request: message to edit not found' }
     const { dir, p, s, m } = await plainPair([{ ...PLAIN, preMs: 1500 }, { method: 'editMessageReplyMarkup', error: gone }], [{ ...SET, holdMs: 3000 }])
@@ -1073,13 +1115,13 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     await p.close()
   }, 20000)
 
-  test('when the answer to the keyboard set again is held past 10 seconds, the text edit fails saying the change may still land', async () => {
+  test('when the answer to the keyboard set again is held past 10 seconds, the text edit says so and that the change may still land, in a result that is no failure', async () => {
     const { dir, p, s, m } = await plainPair([{ ...PLAIN, preMs: 1500 }, { method: 'editMessageReplyMarkup', holdMs: 11_000 }], [{ ...SET, holdMs: 3000 }])
     const text = tool(s, 'edit_message', { chat_id: '1', message_id: String(m), text: 'PLAIN' }, 25_000)
     await wait(200)
     const setting = tool(p, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [['Yes', 'No']] })
     ok(await setting)
-    expect(failed(await text)).toBe(`edit_message failed: the text was edited, but the buttons another call gave message ${m} meanwhile could not be set again: Telegram did not answer within 10 s; the change may still land`)
+    expect(ok(await text)).toBe(`the text was edited, but the buttons another call gave message ${m} meanwhile could not be set again: Telegram did not answer within 10 s; the change may still land`)
     expect(editLog(dir, m).map(([who, method]) => [who, method])).toEqual([
       ['p', 'editMessageReplyMarkup'],
       ['s', 'editMessageText'],
@@ -1135,19 +1177,19 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     const dir = state()
     const srv = await channel(dir, { rules: [{ method: 'editMessageReplyMarkup', holdMs: 11_000 }] })
     const m = Number(/^sent \(id: (\d+)\)$/.exec(ok(await tool(srv, 'reply', { chat_id: '1', text: 'working' })))![1])
-    expect(failed(await tool(srv, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [] }, 15_000))).toBe('edit_message failed: Telegram did not answer within 10 s; the change may still land')
+    expect(ok(await tool(srv, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [] }, 15_000))).toBe('edit outcome unknown; repeating the same edit is safe (Telegram did not answer within 10 s)')
     await srv.close()
   }, 25000)
 
-  test('an edit whose answer is held past 10 seconds fails saying the change may still land, and a press on the keyboard it replaced delivers nothing', async () => {
+  test('an edit whose answer is held past 10 seconds says its outcome is unknown and repeating it is safe, and a press on the keyboard it replaced delivers nothing', async () => {
     const dir = state()
     const srv = await channel(dir, { rules: [{ method: 'editMessageReplyMarkup', has: 'Ship', holdMs: 11_000 }] })
     const m = await ask(srv)
     const old = shown(dir, m)
     const k1 = entryOf(dir, m).keyboard
     const started = Date.now()
-    expect(failed(await tool(srv, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [['Ship']] }, 15_000))).toBe(
-      'edit_message failed: Telegram did not answer within 10 s; the change may still land')
+    expect(ok(await tool(srv, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [['Ship']] }, 15_000))).toBe(
+      'edit outcome unknown; repeating the same edit is safe (Telegram did not answer within 10 s)')
     expect(Date.now() - started).toBeGreaterThanOrEqual(9_900)
     expect(entryOf(dir, m).keyboard).toBe(k1 + 1)
     const stale = press(dir, m, 'Yes', { markup: old })
@@ -1189,7 +1231,7 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     const m = await ask(srv)
     const k1 = entryOf(dir, m).keyboard
     expect(failed(await tool(srv, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [['Refused']] }))).toContain('MESSAGE_ID_INVALID')
-    expect(entryOf(dir, m)).toEqual({ chat: '1', message: m, keyboard: k1, rows: [['Yes', 'No']] })
+    expect(entryOf(dir, m)).toEqual({ chat: '1', message: m, keyboard: k1, rows: [['Yes', 'No']], textSha: textSha('Merge now?') })
     deliver(dir, [press(dir, m, 'Yes').update])
     await until(() => pressed(srv).length === 1)
     const n = await ask(srv, 'Another?')

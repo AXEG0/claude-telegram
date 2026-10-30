@@ -4,8 +4,8 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import {
   buttonData, chosen, createButtonStore, drop, GaveUp, judge, join as joinMessage, keyboardOf, keyboardRefused,
-  labelProblem, lock, messageGone, notModified, onKeyboard, parseButtonData, parseButtons, pressEvent, RECORD_MAX,
-  replace, reserve, restore, take, unreserve, withinLimit, type ButtonRecord,
+  keyboardFor, labelProblem, lock, messageGone, notModified, onKeyboard, parseButtonData, parseButtons, pressEvent, RECORD_MAX,
+  replace, reserve, restore, take, textSha, unreserve, withinLimit, type ButtonRecord,
 } from './buttons.ts'
 import { metaText } from './reply.ts'
 import { cp, lone, PASSING_LABELS, REFUSED_LABELS } from './fixtures/labels.ts'
@@ -140,6 +140,48 @@ describe('the record', () => {
     expect(rec.entries).toEqual([])
   })
 
+  test('an edit setting the buttons the message carries, unpressed, keeps their keyboard id; other buttons, a pressed keyboard, a removal under way or no entry take a new one', () => {
+    const rec: ButtonRecord = { next: 10, entries: [
+      { chat: '1', message: 5, keyboard: 3, rows: [['Yes', 'No']] },
+      { chat: '1', message: 6, keyboard: 4, rows: [['Yes', 'No']], taken: 'Yes' },
+      { chat: '1', message: 7, keyboard: null },
+    ] }
+    expect(keyboardFor(rec, '1', 5, [['Yes', 'No']])).toBe(3)
+    expect(rec.next).toBe(10)
+    expect(keyboardFor(rec, '1', 5, [['Yes'], ['No']])).toBe(10)
+    expect(keyboardFor(rec, '1', 6, [['Yes', 'No']])).toBe(11)
+    expect(keyboardFor(rec, '1', 7, [['Yes', 'No']])).toBe(12)
+    expect(keyboardFor(rec, '1', 8, [['Yes', 'No']])).toBe(13)
+    expect(keyboardFor(rec, '2', 5, [['Yes', 'No']])).toBe(14)
+  })
+
+  test('an edit of the text keeps the keyboard id only when it repeats the text the message holds with the same buttons; an edit without text keeps the text the entry knew', () => {
+    const rec = fresh()
+    const k1 = reserve(rec, '1', YN)
+    expect(joinMessage(rec, '1', k1, 50, 'Merge A?')).toBe(true)
+    expect(rec.entries).toEqual([{ chat: '1', message: 50, keyboard: k1, rows: YN, textSha: textSha('Merge A?') }])
+    expect(keyboardFor(rec, '1', 50, YN, 'Merge A?')).toBe(k1)
+    expect(keyboardFor(rec, '1', 50, YN)).toBe(k1)
+    const k2 = keyboardFor(rec, '1', 50, YN, 'Deploy B?')
+    expect(k2).not.toBe(k1)
+    replace(rec, '1', 50, k2, YN, 'Deploy B?')
+    expect(rec.entries).toEqual([{ chat: '1', message: 50, keyboard: k2, rows: YN, textSha: textSha('Deploy B?') }])
+    expect(judge(rec, '1', 50, k1)).toBe('closed')
+    // Other buttons with the text unchanged: a new id, the text kept.
+    const k3 = keyboardFor(rec, '1', 50, LATER)
+    expect(k3).not.toBe(k2)
+    replace(rec, '1', 50, k3, LATER)
+    expect(rec.entries).toEqual([{ chat: '1', message: 50, keyboard: k3, rows: LATER, textSha: textSha('Deploy B?') }])
+    expect(keyboardFor(rec, '1', 50, LATER, 'Deploy B?')).toBe(k3)
+    // A message whose text the record does not know: any edit of its text
+    // takes a new id, and an edit of its buttons alone keeps it.
+    const k4 = reserve(rec, '1', YN)
+    joinMessage(rec, '1', k4, 51)
+    expect(rec.entries.find(e => e.message === 51)).toEqual({ chat: '1', message: 51, keyboard: k4, rows: YN })
+    expect(keyboardFor(rec, '1', 51, YN)).toBe(k4)
+    expect(keyboardFor(rec, '1', 51, YN, 'Merge A?')).not.toBe(k4)
+  })
+
   test('a new keyboard clears a pending swap, and a swap ends only the keyboard it showed', () => {
     const rec = fresh()
     const k1 = reserve(rec, '1', YN)
@@ -197,11 +239,14 @@ describe('the record file', () => {
     expect(readdirSync(dir).filter(f => f.startsWith('buttons.json.corrupt-'))).toHaveLength(1)
     expect(existsSync(join(dir, 'buttons.json'))).toBe(false)
     expect(lines).toEqual(['buttons.json is unreadable, moved aside. Starting fresh.'])
-    // So is one whose labels are not rows of labels.
+    // So is one whose labels are not rows of labels, or whose text's hash is
+    // not a string.
     writeFileSync(join(dir, 'buttons.json'), JSON.stringify({ next: 9, entries: [{ chat: '1', message: 2, keyboard: 3, rows: ['Yes'] }] }))
     expect(await s.withLock(held => held.read())).toEqual({ next: 9, entries: [] })
     expect(existsSync(join(dir, 'buttons.json'))).toBe(false)
-    expect(lines).toEqual(Array(2).fill('buttons.json is unreadable, moved aside. Starting fresh.'))
+    writeFileSync(join(dir, 'buttons.json'), JSON.stringify({ next: 9, entries: [{ chat: '1', message: 2, keyboard: 3, rows: [['Yes']], textSha: 7 }] }))
+    expect(await s.withLock(held => held.read())).toEqual({ next: 9, entries: [] })
+    expect(lines).toEqual(Array(3).fill('buttons.json is unreadable, moved aside. Starting fresh.'))
     for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true })
   })
 

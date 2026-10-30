@@ -516,7 +516,9 @@ export function richPartsAsync(text: string, limits?: Limits, ms = RICH_PARSE_MS
 // Sends text as rich messages; a part Telegram rejects, or one only plain
 // text keeps whole, goes out plain, cut by plainChunks. Message ids land in
 // progress.ids as they are sent, and progress.done counts finished parts of
-// progress.total, so a failure part way reports what already went out.
+// progress.total, so a failure part way reports what already went out;
+// with markup given, progress.carrying says whether the send in flight
+// carries it.
 // markup goes on the last message sent: the last part, or the last message
 // of its plain fallback. A call carrying it that Telegram refuses for the
 // keyboard fails at once, with no plain copy.
@@ -527,7 +529,7 @@ export async function sendRich(opts: {
   // The message to reply to for the nth message sent, if any.
   replyTo: (n: number) => number | undefined
   plainChunks: (text: string) => string[]
-  progress: { ids: number[]; done: number; total: number }
+  progress: { ids: number[]; done: number; total: number; carrying?: boolean }
   // Called for each message sent, with the text Claude wrote for it.
   sent?: (messageId: number, text: string) => void
   markup?: object
@@ -544,6 +546,7 @@ export async function sendRich(opts: {
     const markup = opts.markup && p === parts.length - 1 ? { reply_markup: opts.markup } : {}
     if (part.rich !== undefined) {
       try {
+        if (opts.markup) progress.carrying = 'reply_markup' in markup
         const sent = await raw.sendRichMessage({ chat_id: chatId, rich_message: { markdown: part.rich }, ...replyParams(), ...markup })
         progress.ids.push(sent.message_id)
         opts.sent?.(sent.message_id, part.plain)
@@ -558,6 +561,7 @@ export async function sendRich(opts: {
     const chunks = opts.plainChunks(part.plain)
     for (let i = 0; i < chunks.length; i++) {
       const text = chunks[i]!
+      if (opts.markup) progress.carrying = i === chunks.length - 1 && 'reply_markup' in markup
       const sent = await raw.sendMessage({ chat_id: chatId, text, ...replyParams(), ...(i === chunks.length - 1 ? markup : {}) })
       progress.ids.push(sent.message_id)
       opts.sent?.(sent.message_id, text)

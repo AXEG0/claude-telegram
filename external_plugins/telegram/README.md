@@ -183,10 +183,10 @@ can answer no prompt. The typing indicator still goes to the bot's chat.
 
 | Tool | Purpose |
 | --- | --- |
-| `reply` | Sends to a chat, and to [another bot](#other-bots) by its `@username`, as plain text. Takes a numeric `chat_id` and `text`, with `reply_to` (a message ID) for native threading and `files` (absolute paths) for attachments. Images (`.jpg`/`.jpeg`/`.png`/`.gif`/`.webp`) go as photos with an inline preview, other files as documents, up to 50MB each, after the text. To [another bot](#other-bots), the files go first, every one as a document, with the text as the first file's caption or after the files, whatever `textChunkLimit` and `chunkMode` say. `format` picks `text` or `markdownv2`, and with rich messages on also `rich`, which is then the default. Any other `format`, such as `markdown` or `null`, is refused with an error naming it and the formats, and nothing is sent. Long text goes out in several messages. `buttons` puts [answer buttons](#button-presses) under the last message sent, a text part or a file: 1 to 4 rows of 1 to 4 labels, each 1 to 40 characters and distinct across the keyboard, with single spaces between words and none of `"` `<` `>` `[` `]` `;`, control characters, or the invisible and combining characters Telegram would change. Buttons are refused in another bot's chat, in a server that does not poll the bot, and in one whose poll ended in a conflict (409) with no poll completed since. Returns the sent message IDs, and with buttons also the message that carries them; a reply that fails partway names the IDs already sent. |
+| `reply` | Sends to a chat, and to [another bot](#other-bots) by its `@username`, as plain text. Takes a numeric `chat_id` and `text`, with `reply_to` (a message ID) for native threading and `files` (absolute paths) for attachments. Images (`.jpg`/`.jpeg`/`.png`/`.gif`/`.webp`) go as photos with an inline preview, other files as documents, up to 50MB each, after the text. To [another bot](#other-bots), the files go first, every one as a document, with the text as the first file's caption or after the files, whatever `textChunkLimit` and `chunkMode` say. `format` picks `text` or `markdownv2`, and with rich messages on also `rich`, which is then the default. Any other `format`, such as `markdown` or `null`, is refused with an error naming it and the formats, and nothing is sent. Long text goes out in several messages. `buttons` puts [answer buttons](#button-presses) under the last message sent, a text part or a file: 1 to 4 rows of 1 to 4 labels, each 1 to 40 characters and distinct across the keyboard, with single spaces between words and none of `"` `<` `>` `[` `]` `;`, control characters, or the invisible and combining characters Telegram would change. Buttons are refused in another bot's chat, in a server that does not poll the bot, and in one whose poll ended in a conflict (409) with no poll completed since. Returns the sent message IDs, and with buttons also the message that carries them. A send Telegram refuses, with a 4xx or a 429 and the wait it asks for, or that never leaves, its connection refused or its host's name not found, says not sent. One Telegram answers with a 5xx, or never answers, says delivery unknown, in a result that is no error: Telegram may still deliver it, even minutes later, so Claude sends it again only if the recipient says it did not arrive, and the plugin never sends it again itself. A reply of several parts that stops names the parts sent with their IDs, the part it stopped at and the parts never tried; when the part whose outcome is unknown carries the buttons, they are kept, and a press on them counts once the message arrives. |
 | `react` | Adds an emoji reaction to a message by ID, from Telegram's fixed set of reaction emoji (👍 👎 ❤ 🔥 👀 and others). |
 | `download_attachment` | Downloads an attachment by the `attachment_file_id` on its message to the inbox and returns the local path. Telegram serves bot downloads up to 20MB. |
-| `edit_message` | Edits a message the bot sent, for progress updates such as "working…" turning into the result. Takes `text`, `buttons`, or both, and the same `format` as `reply`: any other is refused and nothing is edited, an edit of the buttons alone included. With `text`, the edit carries `buttons` in the same call, so a text edit without `buttons` leaves the message without buttons, a shown choice included. With `buttons` alone only the buttons change, under a file too, and an empty list removes them, which works from any server. An edit Telegram answers with "message is not modified" counts as done. An edit stays one message, so longer text goes in a new reply, and an edit sends no notification, so a finished task gets a new reply too. |
+| `edit_message` | Edits a message the bot sent, for progress updates such as "working…" turning into the result. Takes `text`, `buttons`, or both, and the same `format` as `reply`: any other is refused and nothing is edited, an edit of the buttons alone included. With `text`, the edit carries `buttons` in the same call, so a text edit without `buttons` leaves the message without buttons, a shown choice included. With `buttons` alone only the buttons change, under a file too, and an empty list removes them, which works from any server. An edit Telegram answers with "message is not modified" counts as done. An edit Telegram refuses says not edited, and one whose outcome is unknown says so and that repeating the same edit is safe, in a result that is no error: an edit that repeats the message's text, or sets no text, with the buttons the message already carries, unpressed, keeps their keyboard, so either copy carries the same buttons. An edit to other text gets a new keyboard, the same labels included, so a press made under the old text gets the closed notice. An edit stays one message, so longer text goes in a new reply, and an edit sends no notification, so a finished task gets a new reply too. |
 
 ## Messages Claude receives
 
@@ -350,9 +350,16 @@ So a press made while a server polls reaches Claude, on a message sent before a
 restart or a plugin reload too. The record holds 1000 entries; a press on
 buttons older than that gets a notice that the question is closed. A Telegram
 call that sets, removes or swaps buttons gives up after 10 seconds, and a tool
-call that gave up says the change may still land. A press waiting for the lock
-holds back that server's other inbound messages for up to 10 seconds per
-Telegram call made under it. When Telegram answers the swap to the disabled
+call that gave up says its outcome is unknown and that repeating the same edit
+is safe, in a result that is no error. Repeated as it was, the edit works
+whichever copy lands; with other text or other buttons, a first copy that lands
+late shows buttons that answer a press with the closed notice. An edit that never lands leaves the old buttons
+on the message, and a press on them gets that notice until a later edit of the
+message lands. A press is recorded and handed to Claude before the next poll
+confirms it to Telegram; its answer and the swap to the disabled button then
+run beside the update loop, so a call Telegram never answers holds up no other
+message. A press waiting for the lock holds back that server's other inbound
+messages for up to 10 seconds per Telegram call made under it. When Telegram answers the swap to the disabled
 button with a 429, the buttons stay live until the next press on them, which
 delivers nothing and shows the first choice, or until the polling server next
 starts. Telegram's Bot API server keeps an unread press for 150 seconds, so a
@@ -481,7 +488,9 @@ message tapped keeps the outcome. An answer goes after any burst waiting in the
 chat, but never waits for a message of the owner's still being prepared, such
 as a voice note in transcription. Anyone else on the allowlist, a person or
 [another bot](#other-bots), gets no prompt: a tap of theirs is refused, and
-their `yes <code>` reaches Claude as an ordinary message.
+their `yes <code>` reaches Claude as an ordinary message. The answer to a tap
+and the edits of the prompt run beside the update loop, the prompt's edits in
+the order of the taps, so **See more** then **✅ Allow** leaves the outcome.
 
 The owner chat is the owner's private chat, so its ID is the owner's user ID.
 Without `TELEGRAM_ALERT_CHAT`, or with a group's ID there, a prompt reaches no
@@ -652,6 +661,30 @@ including an orphan left by a crashed session.
 The server reads the ancestor tree through `/proc`. If it cannot read the tree,
 it logs a warning to stderr and polls as before. On hosts without readable
 `/proc`, use a separate `TELEGRAM_STATE_DIR` for probes and ordinary sessions.
+
+## Poll deadlines
+
+Each long poll (`getUpdates`) gets its 30-second poll time plus 15 seconds, and
+the start-up calls, `getMe` and `deleteWebhook`, 30 seconds. A poll Telegram
+has not answered by then is dropped and its connection closed, its answer never
+read, and the next poll goes 3 seconds later from the same offset, so no
+message is lost or handled twice. Each poll opens a connection of its own and
+closes it once answered, so the poll after a dropped one never waits on an idle
+connection opened before the stall, which Telegram may have dropped meanwhile;
+every other call shares the pooled connections. A start-up call that fails
+is tried again at once, then after a wait that doubles from 0.1 seconds up to 20
+minutes. Each failed poll writes one line to the server's log, with its error
+and how long it took, such as `telegram channel: poll failed after 45.0 s: no
+answer within 45 s`, so a stall shows whether Telegram hung or refused; a
+conflict (409) has its own line. The server asks Telegram for its own list of
+update kinds, the twenty grammY asked for up to version 1.41 and reactions, so a
+grammY release that adds kinds changes nothing it receives.
+
+The replies to `/start`, `/help` and `/status`, the pairing reply, and the
+answers and edits after a tap run beside the update loop, so a call Telegram
+never answers holds up no message. A pairing reply still on its way when the
+server restarts is lost, and the sender writes again. Sends from the tools keep
+grammY's own limit of 500 seconds.
 
 ## Polling heartbeat
 

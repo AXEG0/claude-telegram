@@ -8,6 +8,7 @@ import { join } from 'path'
 import fixture from './fixtures/channel-argv.json'
 import { calls, cleanup, CONFLICT, deliver, driveClock, EXIT_MS, start, state, STEP_MS, until, wait, type Server } from './fixtures/harness.ts'
 import { TEXT_GAP_MS } from './batch.ts'
+import { buttonData, lock } from './buttons.ts'
 import { row, session } from './fixtures/session.ts'
 import { metaText } from './reply.ts'
 
@@ -16,7 +17,6 @@ afterEach(cleanup)
 
 const OWNER = { id: 1, is_bot: false, first_name: 'Owner', username: 'owner' }
 const OTHER = { id: 2, is_bot: false, first_name: 'Other', username: 'other' }
-const STRANGER = { id: 3, is_bot: false, first_name: 'Stranger' }
 // The username getMe gives in the test fixture.
 const BOT = 'test_bot'
 const dmOf = (u: { id: number }) => ({ id: u.id, type: 'private' })
@@ -45,12 +45,19 @@ const reaction = (id: number, from: { id: number }, message_id: number, emoji: s
   ({ update_id: id, message_reaction: { chat: dmOf(from), message_id, user: from, date: seconds(), old_reaction: [], new_reaction: [{ type: 'emoji', emoji }] } })
 
 const PEOPLE = { dmPolicy: 'allowlist', allowFrom: ['1', '2'] }
-// Pairing mode, read live: a stranger's message gets a pairing reply, which a
-// rule holds, and the loop with it.
-const PAIRING_ACCESS = { dmPolicy: 'pairing', allowFrom: ['1'], groups: {}, pending: {} }
-const PAIRING = { TELEGRAM_ACCESS_MODE: '' }
-const holdPairing = (ms: number) => ({ method: 'sendMessage', has: 'Pairing required', holdMs: ms })
-const pairingHeld = (dir: string) => calls(dir).some(c => c.method === 'sendMessage' && String(c.payload.text).startsWith('Pairing required'))
+// The owner's press on a button of a message the record does not hold. grammY's
+// update loop waits on a press until it is judged, under the button lock, so
+// while the test holds that lock, the poll that would confirm the press's
+// round waits too. Let go, the press is answered closed and delivers nothing.
+const HELD = buttonData(1, 0)
+const heldPress = (update_id: number): Update => ({ update_id, callback_query: {
+  id: `cb${update_id}`, chat_instance: 'c', data: HELD, from: OWNER,
+  message: { message_id: 90, date: seconds(), chat: dmOf(OWNER), text: 'held', reply_markup: { inline_keyboard: [[{ text: 'Held', callback_data: HELD }]] } },
+} })
+const holdLoop = (dir: string) => lock(join(dir, 'buttons.lock'))
+// Whether no poll has asked past update id, so its round is unconfirmed.
+const unconfirmed = (dir: string, id: number) => !calls(dir).some(c => c.method === 'getUpdates' && (c.payload.offset ?? 0) > id)
+const startedLine = (dir: string, id: number) => record(dir).some(l => l.line === 'start' && l.update_id === id)
 
 function server(dir: string, rules: object[] = [], env: Record<string, string> = {}): Server {
   return start(dir, fixture.argv, {
@@ -440,19 +447,21 @@ describe.skipIf(process.platform !== 'linux')('the replay of the record at start
 
 describe.skipIf(process.platform !== 'linux')('delivery and order across a crash or a shutdown', () => {
   test('I17 a photo in its batch gap at a crash, with the round unconfirmed, arrives once in the next session', async () => {
-    const dir = state(PAIRING_ACCESS)
-    const channel = server(dir, [holdPairing(2000)], PAIRING)
+    const dir = state()
+    const channel = server(dir)
     await channel.ready()
-    const round = [photo(1, OWNER, 'p1'), text(2, STRANGER, 'let me in')]
+    const release = await holdLoop(dir)
+    const round = [photo(1, OWNER, 'p1'), heldPress(2)]
     deliver(dir, round)
     const inbox = join(dir, 'inbox')
     await until(() => existsSync(inbox) && readdirSync(inbox).some(f => f.endsWith('.jpg')), 4000)
     await wait(1)
-    expect(pairingHeld(dir)).toBe(true)
+    expect(unconfirmed(dir, 2)).toBe(true)
     await kill(channel)
+    release()
     expect(channel.inbound()).toEqual([])
     deliver(dir, round)
-    const next = server(dir, [], PAIRING)
+    const next = server(dir)
     await next.ready()
     await until(() => next.inbound().length > 0, 6000)
     await until(() => !existsSync(join(dir, 'inbound.json')), 4000)
@@ -463,17 +472,19 @@ describe.skipIf(process.platform !== 'linux')('delivery and order across a crash
   }, 30000)
 
   test('I17b a text in its batch gap behind a delivered note at a crash arrives once in the next session, after the note', async () => {
-    const dir = state(PAIRING_ACCESS)
-    const channel = server(dir, [{ method: 'download', holdMs: 1000 }, holdPairing(3000)], PAIRING)
+    const dir = state()
+    const channel = server(dir, [{ method: 'download', holdMs: 1000 }])
     await channel.ready()
-    const round = [voice(1, OWNER, 'v1'), text(2, OWNER, 'right after'), text(3, STRANGER, 'let me in')]
+    const release = await holdLoop(dir)
+    const round = [voice(1, OWNER, 'v1'), text(2, OWNER, 'right after'), heldPress(3)]
     deliver(dir, round)
     await until(() => contents(channel).includes(heard('v1')), 4000)
-    expect(pairingHeld(dir)).toBe(true)
+    expect(unconfirmed(dir, 3)).toBe(true)
     await kill(channel)
+    release()
     expect(contents(channel)).toEqual([heard('v1')])
     deliver(dir, round)
-    const next = server(dir, [], PAIRING)
+    const next = server(dir)
     await next.ready()
     await until(() => next.inbound().length > 0, 6000)
     await until(() => !existsSync(join(dir, 'inbound.json')), 4000)
@@ -483,17 +494,20 @@ describe.skipIf(process.platform !== 'linux')('delivery and order across a crash
   }, 30000)
 
   test('I18 a text and a note from one sender, cut by a crash before the confirming poll, arrive in order, each once', async () => {
-    const dir = state(PAIRING_ACCESS)
-    const channel = server(dir, [{ method: 'download', holdMs: 5000 }, holdPairing(3000)], PAIRING)
+    const dir = state()
+    const channel = server(dir, [{ method: 'download', holdMs: 5000 }])
     await channel.ready()
-    const round = [text(1, OWNER, 'listen to this'), voice(2, OWNER, 'v1'), text(3, STRANGER, 'let me in')]
+    const release = await holdLoop(dir)
+    const round = [text(1, OWNER, 'listen to this'), voice(2, OWNER, 'v1'), heldPress(3)]
     deliver(dir, round)
-    await until(() => pairingHeld(dir), 4000)
+    await until(() => startedLine(dir, 2), 4000)
     await wait(1000)
+    expect(unconfirmed(dir, 3)).toBe(true)
     await kill(channel)
+    release()
     expect(channel.inbound()).toEqual([])
     deliver(dir, round)
-    const next = server(dir, [], PAIRING)
+    const next = server(dir)
     await next.ready()
     await until(() => next.inbound().length >= 2, 10_000)
     await until(() => !existsSync(join(dir, 'inbound.json')), 4000)
@@ -503,15 +517,21 @@ describe.skipIf(process.platform !== 'linux')('delivery and order across a crash
   }, 30000)
 
   test('I18b a text and a note handled after a clean close began arrive in the next session in order, each once', async () => {
-    const dir = state(PAIRING_ACCESS)
-    const channel = server(dir, [{ method: 'download', holdMs: 5000 }, holdPairing(3000)], PAIRING)
+    const dir = state()
+    const channel = server(dir, [{ method: 'download', holdMs: 5000 }])
     await channel.ready()
     const first = channel.serverPid()
-    const round = [text(1, STRANGER, 'let me in'), text(2, OWNER, 'listen to this'), voice(3, OWNER, 'v1')]
+    const release = await holdLoop(dir)
+    const round = [heldPress(1), text(2, OWNER, 'listen to this'), voice(3, OWNER, 'v1')]
     deliver(dir, round)
-    await until(() => pairingHeld(dir), 4000)
+    await until(() => !existsSync(join(dir, 'inbound.json')), 4000)
     await wait(1000)
+    // The loop waits on the press: the text behind it is not handled yet.
+    expect(startedLine(dir, 2)).toBe(false)
+    // The text and the note are handled once the close has begun.
     channel.child.stdin.end()
+    await until(() => channel.stderr().includes('shutting down'), 4000)
+    release()
     await until(() => channel.exited(), EXIT_MS)
     expect(channel.inbound()).toEqual([])
     // Telegram still holds every update at or above the stopping server's
@@ -519,7 +539,7 @@ describe.skipIf(process.platform !== 'linux')('delivery and order across a crash
     const offset = Math.max(...calls(dir).filter(c => c.method === 'getUpdates' && c.pid === first).map(c => c.payload.offset ?? 0))
     expect(offset).toBe(2)
     deliver(dir, round.filter(u => u.update_id >= offset))
-    const next = server(dir, [], PAIRING)
+    const next = server(dir)
     await next.ready()
     await until(() => next.inbound().length >= 2, 10_000)
     await until(() => !existsSync(join(dir, 'inbound.json')), 4000)
