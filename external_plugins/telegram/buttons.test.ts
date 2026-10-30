@@ -4,7 +4,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import {
   buttonData, chosen, createButtonStore, drop, GaveUp, judge, join as joinMessage, keyboardOf, keyboardRefused,
-  labelProblem, lock, messageGone, notModified, onKeyboard, parseButtonData, parseButtons, pressEvent, RECORD_MAX,
+  keyboardFor, labelProblem, lock, messageGone, notModified, onKeyboard, parseButtonData, parseButtons, pressEvent, RECORD_MAX,
   replace, reserve, restore, take, unreserve, withinLimit, type ButtonRecord,
 } from './buttons.ts'
 import { metaText } from './reply.ts'
@@ -138,6 +138,21 @@ describe('the record', () => {
     // Removing buttons the record never held changes nothing.
     expect(replace(rec, '1', 43, null)).toBeUndefined()
     expect(rec.entries).toEqual([])
+  })
+
+  test('an edit setting the buttons the message carries, unpressed, keeps their keyboard id; other buttons, a pressed keyboard, a removal under way or no entry take a new one', () => {
+    const rec: ButtonRecord = { next: 10, entries: [
+      { chat: '1', message: 5, keyboard: 3, rows: [['Yes', 'No']] },
+      { chat: '1', message: 6, keyboard: 4, rows: [['Yes', 'No']], taken: 'Yes' },
+      { chat: '1', message: 7, keyboard: null },
+    ] }
+    expect(keyboardFor(rec, '1', 5, [['Yes', 'No']])).toBe(3)
+    expect(rec.next).toBe(10)
+    expect(keyboardFor(rec, '1', 5, [['Yes'], ['No']])).toBe(10)
+    expect(keyboardFor(rec, '1', 6, [['Yes', 'No']])).toBe(11)
+    expect(keyboardFor(rec, '1', 7, [['Yes', 'No']])).toBe(12)
+    expect(keyboardFor(rec, '1', 8, [['Yes', 'No']])).toBe(13)
+    expect(keyboardFor(rec, '2', 5, [['Yes', 'No']])).toBe(14)
   })
 
   test('a new keyboard clears a pending swap, and a swap ends only the keyboard it showed', () => {

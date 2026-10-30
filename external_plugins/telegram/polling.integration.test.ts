@@ -631,14 +631,22 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     return channel.inbound()
   }
 
-  test('the channel server asks Telegram for reactions beside every update type it got before', async () => {
+  test('the channel server asks Telegram for its own list: the twenty kinds it got before and reactions, none of the kinds grammY added later', async () => {
     const dir = state()
     const channel = start(dir, fixture.argv)
     await channel.ready()
     await until(() => calls(dir).some(c => c.method === 'getUpdates'))
     const asked = calls(dir).find(c => c.method === 'getUpdates')!.payload.allowed_updates
-    expect(asked).toEqual([...API_CONSTANTS.DEFAULT_UPDATE_TYPES, 'message_reaction'])
-    expect(asked).toEqual(expect.arrayContaining(['message', 'edited_message', 'callback_query']))
+    expect(asked).toEqual([
+      'message', 'edited_message', 'channel_post', 'edited_channel_post', 'business_connection', 'business_message',
+      'edited_business_message', 'deleted_business_messages', 'inline_query', 'chosen_inline_result', 'callback_query',
+      'shipping_query', 'pre_checkout_query', 'purchased_paid_media', 'poll', 'poll_answer', 'my_chat_member',
+      'chat_join_request', 'chat_boost', 'removed_chat_boost', 'message_reaction',
+    ])
+    for (const added of ['guest_message', 'stopped_message_generation', 'managed_bot', 'subscription']) {
+      expect(API_CONSTANTS.DEFAULT_UPDATE_TYPES).toContain(added)
+      expect(asked).not.toContain(added)
+    }
     await channel.close()
   }, 15000)
 
@@ -1240,10 +1248,10 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     const TOO_LONG = { error_code: 400, description: 'Bad Request: message is too long' }
     const t = await toPeerBot({}, { TELEGRAM_TEST_RULES: JSON.stringify([{ method: 'sendMediaGroup', times: 1, error: WRONG }, { method: 'sendMessage', times: 1, error: TOO_LONG }]) })
     const args = { text: 'x'.repeat(5000), files: [t.file('a.txt'), t.file('b.txt')] }
-    expect(failure(await t.reply(args))).toBe("reply failed: reply failed after 0 of 4 message(s) sent: Call to 'sendMediaGroup' failed! (400: Bad Request: wrong file identifier)")
+    expect(failure(await t.reply(args))).toBe('reply failed: part 1 of 3 (an album of 2 documents): not sent (Telegram answered 400: Bad Request: wrong file identifier); sent so far: none; never tried: parts 2 to 3')
     const second = failure(await t.reply(args))
     const album = sends(t.dir)[1]!.message_ids!
-    expect(second).toBe(`reply failed: reply failed after 2 of 4 message(s) sent (ids: ${album.join(', ')}): Call to 'sendMessage' failed! (400: Bad Request: message is too long)`)
+    expect(second).toBe(`reply failed: part 2 of 3: not sent (Telegram answered 400: Bad Request: message is too long); sent so far: 2 message(s) (ids: ${album.join(', ')}); never tried: part 3`)
     expect(sends(t.dir).map(c => [c.method, c.refused])).toEqual([
       ['sendMediaGroup', WRONG.description], ['sendMediaGroup', undefined], ['sendMessage', TOO_LONG.description],
     ])

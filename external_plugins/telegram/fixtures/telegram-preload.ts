@@ -92,7 +92,16 @@ let nextId = chats.ids
 // sent after it can arrive first; its answer waits `holdMs`, then is `error`
 // if set, else the usual answer, unless `drop` loses the connection after the
 // fake applied the call and before it answers. The log marks a call a rule
-// refuses with `refused`. The file host and the transcription endpoint (see
+// refuses with `refused`. With `lands`, the fake applies the call as usual and
+// then answers `error`, as Telegram does when it took a send but its answer
+// failed; the log marks it `answered`. `hang` never answers: the call ends
+// only when its request's signal aborts, logged as aborted. `network` fails
+// the connection with that error code before the call reaches the fake, as a
+// refused connection does: logged as `failed`, never applied. A held poll
+// (holdMs on getUpdates) answers once its hold ends, whatever its signal
+// says, and with `keep` the round it answers with stays for the next poll,
+// as Telegram keeps every update until a poll confirms it. The file host and
+// the transcription endpoint (see
 // TELEGRAM_TEST_FILES) obey rules too, under the methods `download` and
 // `transcribe`: their `error` answers with error_code as the HTTP status and
 // `body`, if set, as the raw body.
@@ -105,6 +114,10 @@ type Rule = {
   preMs?: number
   holdMs?: number
   drop?: boolean
+  lands?: boolean
+  hang?: boolean
+  network?: string
+  keep?: boolean
   error?: { error_code: number; description: string; parameters?: object }
   body?: string
 }
@@ -242,6 +255,29 @@ globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) =>
   throw new TypeError(`the test fixture refuses a fetch to ${url}`)
 }) as typeof fetch
 
+// Each taken entry in the button record, as its message and label, for each
+// poll's log line; a record missing or unreadable holds none.
+function taken(): string[] {
+  try {
+    const rec = JSON.parse(readFileSync(join(process.env.TELEGRAM_STATE_DIR!, 'buttons.json'), 'utf8')) as { entries: { message?: number; taken?: string }[] }
+    return rec.entries.filter(e => e.taken !== undefined).map(e => `${e.message}:${e.taken}`)
+  } catch {
+    return []
+  }
+}
+
+// A call that never answers: it ends when its request's signal aborts.
+function hang(method: string, payload: Record<string, unknown>, signal: AbortSignal | null | undefined): Promise<never> {
+  return new Promise<never>((_, reject) => {
+    const abort = () => {
+      appendFileSync(process.env.TELEGRAM_TEST_API_LOG!, JSON.stringify({ pid: process.pid, method, payload, at: Date.now(), aborted: true }) + '\n')
+      reject(signal?.reason ?? new DOMException('The operation was aborted.', 'AbortError'))
+    }
+    if (signal?.aborted) abort()
+    else signal?.addEventListener('abort', abort, { once: true })
+  })
+}
+
 // The update ids with a start line in the record, for each poll's log line;
 // a record missing or unreadable holds none.
 function started(): number[] {
@@ -355,7 +391,11 @@ const fakeFetch = (async (url: string | URL | Request, options?: RequestInit) =>
   // call with when it came.
   const n = SENDS.includes(method) ? ++sends : 0
   const rule = ruleFor(method, payload)
-  const refusal = emptyText(method, payload) ? EMPTY_TEXT : rule?.error
+  if (rule?.network) {
+    appendFileSync(process.env.TELEGRAM_TEST_API_LOG!, JSON.stringify({ pid: process.pid, method, payload, at: Date.now(), failed: rule.network }) + '\n')
+    throw Object.assign(new TypeError(`${rule.network}: Unable to connect. Is the computer able to access the url?`), { code: rule.network })
+  }
+  const refusal = emptyText(method, payload) ? EMPTY_TEXT : rule?.lands ? undefined : rule?.error
   if (rule?.preMs) await Bun.sleep(rule.preMs)
   const to = n && !refusal ? recipient(payload.chat_id) : undefined
   if (to && nextId !== undefined && !String(payload.chat_id).startsWith('@')) to.message_id = nextId++
@@ -366,11 +406,14 @@ const fakeFetch = (async (url: string | URL | Request, options?: RequestInit) =>
     pid: process.pid, method, payload, at: Date.now(),
     ...(to ? album ? { message_ids: album } : { message_id: to.message_id } : {}),
     ...(refusal ? { refused: refusal.description } : {}),
-    ...(method === 'getUpdates' ? { started: started() } : {}),
+    ...(rule?.lands && rule.error ? { answered: rule.error.description } : {}),
+    ...(method === 'getUpdates' ? { started: started(), taken: taken() } : {}),
   }) + '\n')
   if (to) bridgeSend(method, payload)
+  if (rule?.hang) await hang(method, payload, options?.signal)
   if (rule?.holdMs) await Bun.sleep(rule.holdMs)
   if (refusal) return json({ ok: false, ...refusal })
+  if (rule?.lands && rule.error) return json({ ok: false, ...rule.error })
   if (rule?.drop) throw new TypeError('fetch failed: the connection was reset')
   let result: unknown = true
   if (method === 'getMe') result = ME
@@ -385,16 +428,17 @@ const fakeFetch = (async (url: string | URL | Request, options?: RequestInit) =>
   if (method === 'getChatMember') return json(member(Number(payload.user_id)))
   if (method === 'getChat') return json(chat(payload.chat_id))
   if (method === 'getUpdates') {
-    if (LONG_POLL && payload.timeout !== undefined) await holdPoll(payload, options?.signal)
+    if (rule?.holdMs) {}
+    else if (LONG_POLL && payload.timeout !== undefined) await holdPoll(payload, options?.signal)
     else await Bun.sleep(25)
     result = []
     // Each round of updates the test writes is delivered once, then moved
-    // aside, so the test can write the next.
+    // aside, so the test can write the next; a kept round stays.
     const inbound = process.env.TELEGRAM_TEST_INBOUND
     if (inbound && existsSync(inbound)) {
       try {
         const updates = JSON.parse(readFileSync(inbound, 'utf8'))
-        renameSync(inbound, `${inbound}.${process.pid}.${++rounds}`)
+        if (!rule?.keep) renameSync(inbound, `${inbound}.${process.pid}.${++rounds}`)
         result = updates
         remember(updates as unknown[])
       } catch {}

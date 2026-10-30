@@ -136,14 +136,18 @@ export function messageGone(err: unknown): boolean {
 
 // A Telegram call made under the lock that did not answer in time. It counts
 // as not refused: it may still land.
-export class GaveUp extends Error {}
+export class GaveUp extends Error {
+  constructor(readonly ms: number) {
+    super(`Telegram did not answer within ${ms / 1000} s; the change may still land`)
+  }
+}
 
 export async function withinLimit<T>(run: (signal: AbortSignal) => Promise<T>, ms: number = LOCK_CALL_MS): Promise<T> {
   const controller = new AbortController()
   let timer: ReturnType<typeof setTimeout> | undefined
   const late = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
-      reject(new GaveUp(`Telegram did not answer within ${ms / 1000} s; the change may still land`))
+      reject(new GaveUp(ms))
       controller.abort()
     }, ms)
   })
@@ -177,6 +181,16 @@ function open(rec: ButtonRecord, entry: Entry): void {
 
 export function newKeyboard(rec: ButtonRecord): number {
   return rec.next++
+}
+
+// The keyboard id for an edit that sets rows on message: the id of the
+// message's current keyboard when it is unpressed and holds the same rows, so
+// an edit repeated after one whose outcome is unknown carries the same buttons
+// whichever copy lands; a new id otherwise.
+export function keyboardFor(rec: ButtonRecord, chat: string, message: number, rows: string[][]): number {
+  const e = entryOf(rec, chat, message)
+  const same = e?.rows !== undefined && JSON.stringify(e.rows) === JSON.stringify(rows)
+  return e && e.keyboard !== null && e.taken === undefined && same ? e.keyboard : newKeyboard(rec)
 }
 
 export function reserve(rec: ButtonRecord, chat: string, rows: string[][]): number {
