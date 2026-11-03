@@ -34,9 +34,10 @@ describe.skipIf(process.platform !== 'linux')('the deadline on each poll', () =>
     const channel = start(dir, fixture.argv, {
       TELEGRAM_TEST_LONG_POLL: '1',
       TELEGRAM_TEST_RULES: JSON.stringify([
-        // The second poll gets no answer until 46.5 s, past its deadline; that
-        // answer then brings the round the test wrote meanwhile, which stays
-        // for the next poll, as an unconfirmed update does.
+        // The second poll would get no answer until 46.5 s, past its deadline,
+        // so its abort at 45 s ends it, as a real fetch's would; the round the
+        // test wrote meanwhile stays for the next poll, as an unconfirmed
+        // update does.
         { method: 'getUpdates', skip: 1, times: 1, holdMs: 46_500, keep: true },
         // The third never answers: it ends only when its request is aborted.
         { method: 'getUpdates', skip: 1, times: 1, hang: true },

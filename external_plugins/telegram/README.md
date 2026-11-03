@@ -725,6 +725,113 @@ holds live in the server's memory, so a restart forgets them; the first typing
 and subagents call after it then meets Telegram's wait once more, writes its
 line and holds the chat again.
 
+### The call record
+
+Every Bot API call the server makes, except its polls, also writes one line to
+`logs/calls-<pid>.jsonl` in the state directory, beside the
+[server log](#server-log): replies, edits, reactions, typing, the subagents
+message, the stuck and idle notices, permission prompts and notices, the
+answers to taps, button changes, `getFile` and the start-up calls, whether
+Telegram accepted them, refused them or never answered. Every server on the
+state directory writes its own file, a send-only one in another session
+included, and each line is appended synchronously when the answer comes or the
+call fails, so the record answers what the bot sent before a block:
+
+```
+{"at":"2026-11-02T09:05:44.000Z","pid":1234,"version":"0.0.7-axeg0.34","call":"sendRichMessage","chat":"<chat>","ms":230,"ok":false,"error_code":429,"retry_after":1262}
+```
+
+| Field | What |
+| --- | --- |
+| `at`, `pid`, `version` | When the answer came or the call failed, in UTC; the server process; the plugin version. |
+| `call` | The method, such as `editMessageText`. |
+| `chat` | The chat the call names, a number or a `@username`; left out for a call that names none, such as `getMe` or the answer to a tap. |
+| `ms` | How long the call took; `at` minus `ms` is when it left. |
+| `ok` | `true` accepted, `false` refused, `null` no answer. |
+| `message_id`, `message_ids` | A send's id from Telegram's answer, and an album's every id in order; for an edit, a reaction or a keyboard change, the id it names. |
+| `silent` | `true` for a send without a notification: today only the subagents message's. |
+| `error_code`, `retry_after` | On a refusal, Telegram's code, and its wait in seconds when it gives one. |
+| `not_modified` | `true` when Telegram refused an edit as unchanged. |
+| `error` | With no answer, the error's name, such as `HttpError/ECONNRESET`, `HttpError/AbortError` or `HttpError/Error` for a call past its time limit. |
+| `lost` | How many call lines this server failed to write since the last one it wrote. |
+
+No line holds a message's text, a caption, entities, a keyboard, rich-message
+markdown, a file's name or contents, Telegram's error description, an error's
+message or the bot token. Each field is written only in its shape, a number, a
+boolean, a method name, a chat id or `@username`, or an identifier, and a value
+out of shape is left out, or reads `unknown` for `call` and the parts of
+`error`. The file still shows which chats the bot wrote to and when, so it is
+0600 in the owner-only `logs/` folder. A typing line takes about 140 bytes, a
+subagents message edit about 160.
+
+A file past 16 MiB moves to `calls-<pid>.jsonl.1`, replacing the one there, so
+a server keeps at most about 32 MiB: at least about two days at the fastest
+steady pace, the subagents message every 3 seconds and typing every 4 in one
+chat. The turn-end hook's week-old sweep of `logs/` deletes call files too. A
+line that cannot be written is dropped and counted in the next line's `lost`;
+the call, its hold and every log line go on as before.
+
+Not in the record: the polls, whose latest accepted one the
+[heartbeat](#polling-heartbeat) keeps and whose failures write their lines to
+the log; the file downloads after `getFile`, which are no Bot API calls; calls
+another program, another machine or another state directory makes with the
+same token; and a call still under way when a server is forced to exit.
+
+To read the day before a block, run `calls.ts` on the bot's machine, or ask a
+session there to:
+
+```
+bun "$(ls -d "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/*/telegram/*/calls.ts | sort -V | tail -n 1)"
+```
+
+It reads the state directory the server uses, or the one `--state <folder>`
+names, merges every server's files and their `.1` by time, and lists every hold:
+a chain of 429s with a wait in one chat. It picks the latest hold whose longest
+wait ran past 5 minutes, or else the latest, and prints the 24 hours before its
+first refusal in that chat: calls per kind, accepted, refused by code
+(Telegram's not-modified answers apart) and with no answer, the subagents
+message's edits apart from other edits, totals for other chats and for calls
+naming none, calls per UTC hour, and the last 20 calls. `--chat <id or @name>`,
+given once or more, reads those chats; `--to <UTC time>` ends the window there,
+as `2026-11-02 21:00` or `2026-11-02T21:00:00Z`, a time with no zone being
+UTC; `--hours <n>` sets the window's length. It warns when rotation has cut a
+server's lines out of the window, and counts a line it could not parse and
+lists a file it could not read. It reads only, and prints to stdout:
+
+```
+state folder: <path>
+  calls-1234.jsonl: 2772 lines, 2026-11-02T06:50:02.000Z to 2026-11-02T09:06:30.000Z
+  lines skipped: 0; lines lost: 0
+holds:
+  chat <chat>: from 2026-11-02T09:05:44.000Z to 2026-11-02T09:26:46Z, longest wait 1262 s, 2 refusals
+block: chat <chat>, first refusal 2026-11-02T09:05:44.000Z (sendRichMessage, wait 1262 s, ends 2026-11-02T09:26:46Z), lifts 2026-11-02T09:26:46Z
+window: 2026-11-01T09:05:44Z to 2026-11-02T09:05:44Z, chat <chat>
+per call: accepted, refused by code, no answer
+  editMessageText (list): 1404 accepted, 174 400 not modified, 0 no answer
+  sendChatAction: 1185 accepted, 0 refused, 0 no answer
+  sendMessage: 2 accepted, 0 refused, 0 no answer
+  sendRichMessage: 2 accepted, 0 refused, 0 no answer
+  other chats: 0 calls, 0 accepted, 0 refused, 0 no answer
+  no chat: 3 calls, 3 accepted, 0 refused, 0 no answer
+per UTC hour:
+  2026-11-02T07:00Z: sendChatAction 375, sendMessage 1, editMessageText (list) 499, sendRichMessage 1
+  2026-11-02T08:00Z: sendChatAction 750, sendMessage 1, editMessageText (list) 999
+  2026-11-02T09:00Z: sendChatAction 60, editMessageText (list) 80, sendRichMessage 1
+first call in the window: 2026-11-02T07:05:00.120Z sendChatAction
+last calls before the end:
+  2026-11-02T09:03:28.120Z sendChatAction ok
+  2026-11-02T09:03:29.000Z editMessageText (list) ok
+  ...
+  2026-11-02T09:03:59.000Z editMessageText (list) ok
+  2026-11-02T09:04:00.000Z sendRichMessage ok
+```
+
+The subagents message's edits are those of a message its silent send got, by
+chat and id, while that send is still in the files; an edit of a message an
+earlier server sent counts under other edits. Another bot's chat can appear
+under its number and its `@username`; give both with `--chat` to read them
+together.
+
 ## Polling heartbeat
 
 After every completed `getUpdates` long-poll, the server rewrites
@@ -798,6 +905,10 @@ stderr's far end has gone, as when Claude Code exits first, lines still land in
 the file, `shutting down` among them. Before the state directory exists, as when
 no token was ever set, a line goes to stderr only; Claude Code keeps it, since the
 server then exits before it connects.
+
+Beside it, `logs/calls-<pid>.jsonl` holds the [call record](#the-call-record):
+a line for each Bot API call the server makes, except its polls, and never on
+stderr.
 
 The file does not hold Bun's own output for a crash before the log starts or a
 runtime panic, `bun install`'s output at start, which Claude Code keeps, or what

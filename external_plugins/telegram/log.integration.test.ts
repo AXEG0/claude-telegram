@@ -31,7 +31,8 @@ describe.skipIf(process.platform !== 'linux')('the server log', () => {
       expect(Number.isNaN(Date.parse(hit[0].at))).toBe(false)
       expect(count(channel.stderr(), part)).toBe(1)
     }
-    expect(readdirSync(join(dir, 'logs'))).toEqual([`server-${pid}.jsonl`])
+    // Beside it, the call record of the same server (see flood.ts).
+    expect(readdirSync(join(dir, 'logs')).sort()).toEqual([`calls-${pid}.jsonl`, `server-${pid}.jsonl`])
   }, 30000)
 
   test('a log that cannot be written changes nothing else', async () => {

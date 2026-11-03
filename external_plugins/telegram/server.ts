@@ -28,7 +28,7 @@ import { fetchPhoto, STT_KINDS, sttConfig, transcribeTelegramFile, type FileWork
 import { createArrivals, type DoneSeed, type StartLine } from './arrivals.ts'
 import { AGENT_TICK_MS, agentEventFile, CHAT_GAP_MS, CLOSING_EDIT_MS, createAgentStream, createEventReader } from './agents.ts'
 import { createPanelStore } from './panels.ts'
-import { setupLog } from './log.ts'
+import { logCall, setupLog } from './log.ts'
 import { editRichParsed, formatOf, formatSchema, RICH_INSTRUCTIONS, richEditParse, richEnabled, sendRich, type RawApi } from './rich.ts'
 import { metaText, replyMeta, richText } from './reply.ts'
 import { heartbeatTransformer } from './heartbeat.ts'
@@ -192,13 +192,15 @@ bot.api.config.use(async (prev, method, payload, signal) => {
   }
   return res
 })
-// A log line for every 429 any call gets, and the hold on its chat that
-// typing and the subagents message read. Installed last, before polling
-// starts, so it sees every call's answer as Telegram gave it, each update's
-// own API included, which grammY gives the transformers installed here. See
-// flood.ts.
+// A line in the call record for every call but a poll (logs/calls-<pid>.jsonl,
+// see log.ts), a log line for every 429 any call gets, and the hold on its
+// chat that typing and the subagents message read. Installed last, before
+// polling starts and outside it, on a polling server and a send-only one
+// alike, so it sees every call's answer as Telegram gave it, or the failure of
+// any layer inside it, each update's own API included, which grammY gives the
+// transformers installed here. See flood.ts.
 const holds = createHolds()
-bot.api.config.use(floodTransformer({ holds, log: line => lastResort(`telegram channel: ${line}\n`) }))
+bot.api.config.use(floodTransformer({ holds, log: line => lastResort(`telegram channel: ${line}\n`), record: logCall }))
 
 // "typing…" for the whole turn, not Telegram's 5 seconds. See typing.ts.
 const ancestors = ancestorPids()
