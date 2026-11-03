@@ -35,12 +35,12 @@ try {
   writeTurnEnd(markerFiles(dir, sessionId, pids))
 
   const now = Date.now()
-  for (const folder of ['turns', 'outcomes']) {
+  for (const folder of ['turns', 'outcomes', 'logs']) {
     let names: string[]
     try { names = readdirSync(join(dir, folder)) } catch { continue }
     for (const name of names) {
       const f = join(dir, folder, name)
-      if (now - statSync(f).mtimeMs > WEEK_MS) rmSync(f, { force: true })
+      try { if (now - statSync(f).mtimeMs > WEEK_MS) rmSync(f, { force: true }) } catch {}
     }
   }
 } catch {}
