@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, jest, test } from 'bun:test'
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'fs'
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import failureHooks from './fixtures/failure-hooks.json'
@@ -103,6 +103,23 @@ describe('the turn-end hook\'s records', () => {
     utimesSync(join(dir, 'outcomes', 'failures-pid-7.jsonl'), old, old)
     expect(runHook({ session_id: 'sess-1', hook_event_name: 'SessionEnd' }, { TELEGRAM_STATE_DIR: dir, CLAUDE_PID: '4242' }).exitCode).toBe(0)
     expect(readdirSync(join(dir, 'outcomes'))).toEqual(['clean-pid-8'])
+  })
+
+  test("the hook deletes a server's week-old log files, and a file gone mid-sweep skips only itself", () => {
+    const dir = scratch()
+    mkdirSync(join(dir, 'logs'))
+    mkdirSync(join(dir, 'outcomes'))
+    mkdirSync(join(dir, 'turns'))
+    for (const name of ['server-7.jsonl', 'server-7.jsonl.1', 'server-8.jsonl']) writeFileSync(join(dir, 'logs', name), '{}\n')
+    writeFileSync(join(dir, 'outcomes', 'clean-pid-9'), '{}')
+    symlinkSync(join(dir, 'nowhere'), join(dir, 'turns', 'a-dangling-link'))
+    const old = (Date.now() - 8 * 24 * 60 * 60 * 1000) / 1000
+    for (const name of ['server-7.jsonl', 'server-7.jsonl.1']) utimesSync(join(dir, 'logs', name), old, old)
+    utimesSync(join(dir, 'outcomes', 'clean-pid-9'), old, old)
+    expect(runHook({ session_id: 'sess-1', hook_event_name: 'SessionEnd' }, { TELEGRAM_STATE_DIR: dir, CLAUDE_PID: '4242' }).exitCode).toBe(0)
+    expect(readdirSync(join(dir, 'logs'))).toEqual(['server-8.jsonl'])
+    expect(readdirSync(join(dir, 'turns'))).toContain('a-dangling-link')
+    expect(readdirSync(join(dir, 'outcomes'))).toEqual([])
   })
 
   test('the reader returns each record once, in time order across files, skipping a malformed line and a line not yet ended', () => {

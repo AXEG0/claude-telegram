@@ -138,7 +138,7 @@ with "chat not found". The server then opens the chat by the username stored
 with `bot`, and the username serves only that: the reply goes out only when
 Telegram returns the allowlisted ID for that username, then describes the chat
 as a bot, and returns the same ID for the username it gives the bot, which the
-reply goes to. The log shows `opened chat <id> by @<username>`. A check that
+reply goes to. The [server's log](#server-log) shows `opened chat <id> by @<username>`. A check that
 fails sends nothing, and the reply fails with an error that names the IDs
 involved and no text Telegram returned. Without a stored username, such a bot
 is reached once it has written. With `TELEGRAM_ACCESS_MODE=static`, a bot added
@@ -467,8 +467,8 @@ turn. So:
   terminal started tells nobody, and neither does a subagent's or a helper
   query's failure.
 - When a Claude Code release changes the transcript so the turn's start cannot
-  be found, the failure tells nobody, and the reason goes to the server's
-  stderr and to `failure-run.json` in the state directory.
+  be found, the failure tells nobody, and the reason goes to the [server's
+  log](#server-log) and to `failure-run.json` in the state directory.
 
 The notice comes 4 to 8 seconds after the failure, or up to about half a
 minute later while Claude Code finishes writing the turn. A notice or back to
@@ -477,7 +477,7 @@ allows, unless Telegram refuses that chat for good; when Telegram took a
 message but its answer was lost, the chat can get that message twice.
 `failure-run.json` keeps the run, the chats told and Telegram's answers, so a
 restart loses none of them; a `failure-run.json` that holds no run state, cut
-short or edited by hand, is replaced by an empty one, with a line on stderr. A turn that ends on an API error without running
+short or edited by hand, is replaced by an empty one, with a line in the [server's log](#server-log). A turn that ends on an API error without running
 any hook, which some Claude Code releases do, gets no notice; it ends in the
 stuck notice instead.
 
@@ -498,7 +498,7 @@ the order of the taps, so **See more** then **✅ Allow** leaves the outcome.
 The owner chat is the owner's private chat, so its ID is the owner's user ID.
 Without `TELEGRAM_ALERT_CHAT`, or with a group's ID there, a prompt reaches no
 one on Telegram and waits for an answer in the terminal; the server says so in
-its log when it starts.
+its [log](#server-log) when it starts.
 
 A session in bypass mode has already told Claude Code to ask nothing, yet
 Claude Code still asks before a Bash command it cannot check, such as a
@@ -514,7 +514,7 @@ Push job archive to rental and check environment
 **See more** adds the command. The hook cannot tell Claude Code's checks apart,
 so a removal of a home or working folder also runs with only this notice.
 Without `TELEGRAM_ALERT_CHAT`, the hook still allows the ask and no one gets
-the notice; the server says so in its log when it starts. Any
+the notice; the server says so in its [log](#server-log) when it starts. Any
 other mode, a session that is not the channel, any other tool, and a hook that
 fails all leave the ask as above.
 
@@ -663,7 +663,7 @@ poller in place. A new channel session still replaces the previous holder,
 including an orphan left by a crashed session.
 
 The server reads the ancestor tree through `/proc`. If it cannot read the tree,
-it logs a warning to stderr and polls as before. On hosts without readable
+it writes a warning to its [log](#server-log) and polls as before. On hosts without readable
 `/proc`, use a separate `TELEGRAM_STATE_DIR` for probes and ordinary sessions.
 
 ## Poll deadlines
@@ -677,7 +677,7 @@ closes it once answered, so the poll after a dropped one never waits on an idle
 connection opened before the stall, which Telegram may have dropped meanwhile;
 every other call shares the pooled connections. A start-up call that fails
 is tried again at once, then after a wait that doubles from 0.1 seconds up to 20
-minutes. Each failed poll writes one line to the server's log, with its error
+minutes. Each failed poll writes one line to the [server's log](#server-log), with its error
 and how long it took, such as `telegram channel: poll failed after 45.0 s: no
 answer within 45 s`, so a stall shows whether Telegram hung or refused; a
 conflict (409) has its own line. The server asks Telegram for its own list of
@@ -693,7 +693,7 @@ grammY's own limit of 500 seconds.
 ## Flood control
 
 When Telegram refuses a call with 429 (Too Many Requests), the server writes one
-line to its log, whichever call it was: a reply, an edit, a reaction, typing,
+line to its [log](#server-log), whichever call it was: a reply, an edit, a reaction, typing,
 the [subagents message](#subagents-and-shells), a command reply, a lookup or a
 poll. The line names the call, the chat and how long Telegram asks it to wait,
 and when that wait ends:
@@ -705,7 +705,7 @@ telegram channel: flood control on sendMessage to chat <chat>: 429, retry after 
 A call that names no chat, such as a poll or the answer to a tap, says `to no
 chat` and holds nothing, and a 429 without a wait says `no retry_after given`
 and holds nothing. A caller that already logs its failure, such as a command
-reply, an alert or a failed poll, keeps its own line beside this one.
+reply, an alert or a failed poll, keeps its own line in the log beside this one.
 
 A 429 with a wait on a call to a chat holds that chat until the wait ends, a
 read such as the lookup of [another bot](#other-bots) included. While it is
@@ -760,7 +760,49 @@ never lost. Once the file passes 1 MiB, it is copied to `arrivals.jsonl.1`, and
 the file keeps only the messages still on their way; the next copy waits until
 the file has grown by another 1 MiB. The file holds the messages' text, under
 the state directory's owner-only permissions. A failure to read or write it
-goes to stderr, and the message carries on to Claude.
+goes to the [server's log](#server-log), and the message carries on to Claude.
+
+## Server log
+
+Claude Code keeps what a plugin's server prints to stderr only until the server
+has connected. So the server also writes every line it prints to its own file,
+`logs/server-<pid>.jsonl` in the state directory, one file per server process,
+before and after it connects. Each line there is one JSON record with the time,
+the server's pid, the plugin's version and the text in `log`; a text of several
+lines stays one record:
+
+```
+{"at":"2026-11-03T13:28:33.120Z","pid":1234,"version":"0.0.7-axeg0.33","log":"telegram channel: shutting down"}
+```
+
+The file holds the plugin's own lines, the errors and warnings its libraries
+print with `console.error` and `console.warn`, and Bun's process warnings. The
+server prints each warning once, as Bun 1.4 prints it with `--trace-warnings`:
+its code, its message, where it came from and its detail. The plugin prints
+every warning that reaches it, so `NODE_NO_WARNINGS`, `--no-warnings`,
+`--disable-warning` and `NODE_REDIRECT_WARNINGS` do not apply to it. An error
+passed to the console prints as its name, message and frames, never its own
+fields, so the message a failed send carried stays out.
+
+Before a line is written anywhere, the bot token, `TELEGRAM_STT_OPENAI_KEY` and
+any text shaped like a bot token read `<masked>`, in the file and on stderr
+alike. The lines still carry chat and message IDs, usernames and Telegram's
+error texts, which can quote part of a message, so the folder is owner-only
+(0700) and each file 0600.
+
+A file past 1 MiB moves to `server-<pid>.jsonl.1`, replacing the one there, so
+a server keeps about 2 MiB. The turn-end hook deletes log files untouched for a
+week, as it does under `turns/` and `outcomes/`. A line that cannot be written
+to the file still goes to stderr, and the server carries on as before. Once
+stderr's far end has gone, as when Claude Code exits first, lines still land in
+the file, `shutting down` among them. Before the state directory exists, as when
+no token was ever set, a line goes to stderr only; Claude Code keeps it, since the
+server then exits before it connects.
+
+The file does not hold Bun's own output for a crash before the log starts or a
+runtime panic, `bun install`'s output at start, which Claude Code keeps, or what
+the [rich messages](#rich-messages) parser's worker thread prints, which today
+is nothing.
 
 ## No history or search
 

@@ -28,6 +28,7 @@ import { fetchPhoto, STT_KINDS, sttConfig, transcribeTelegramFile, type FileWork
 import { createArrivals, type DoneSeed, type StartLine } from './arrivals.ts'
 import { AGENT_TICK_MS, agentEventFile, CHAT_GAP_MS, CLOSING_EDIT_MS, createAgentStream, createEventReader } from './agents.ts'
 import { createPanelStore } from './panels.ts'
+import { setupLog } from './log.ts'
 import { editRichParsed, formatOf, formatSchema, RICH_INSTRUCTIONS, richEditParse, richEnabled, sendRich, type RawApi } from './rich.ts'
 import { metaText, replyMeta, richText } from './reply.ts'
 import { heartbeatTransformer } from './heartbeat.ts'
@@ -65,6 +66,9 @@ try {
     if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2]
   }
 } catch {}
+// From here on, every line the server prints also lands in its own file,
+// logs/server-<pid>.jsonl in the state folder. See log.ts.
+setupLog(STATE_DIR)
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN
 const STATIC = process.env.TELEGRAM_ACCESS_MODE === 'static'
@@ -77,6 +81,8 @@ if (!TOKEN) {
   )
   process.exit(1)
 }
+// Made before the next line, so every line from here on lands in the log.
+mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 })
 const INBOX_DIR = join(STATE_DIR, 'inbox')
 const PID_FILE = join(STATE_DIR, 'bot.pid')
 // Rewritten after every completed getUpdates; see heartbeat.ts.
@@ -97,7 +103,6 @@ if (!POLLING) process.stderr.write('telegram channel: send-only (Claude session 
 // session crashed (SIGKILL, terminal closed) its server.ts grandchild can
 // survive as an orphan and hold the slot forever, so every new session sees
 // 409 Conflict. Kill any stale holder before we start polling.
-mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 })
 if (POLLING) {
   try {
     const stale = parseInt(readFileSync(PID_FILE, 'utf8'), 10)
@@ -122,12 +127,11 @@ if (POLLING) {
 // that error reaches the uncaughtException handler below, whose own write to
 // stderr fails again, and the loop starves the event loop: no closing edit, no
 // forced exit, a process spinning at full CPU. So each output stream takes its
-// own errors, and the handlers write nothing to a stream that has failed.
-let stderrFailed = false
+// own errors: stdout here, stderr in the log's writer (log.ts), which writes
+// nothing more to stderr once it has failed and still puts the line in the
+// server's log file.
 process.stdout.on('error', () => {})
-process.stderr.on('error', () => { stderrFailed = true })
 const lastResort = (line: string) => {
-  if (stderrFailed || process.stderr.destroyed) return
   try { process.stderr.write(line) } catch {}
 }
 
