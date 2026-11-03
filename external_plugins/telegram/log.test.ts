@@ -1,7 +1,7 @@
 // The writer, run in a child process on a temporary state folder, so the test
 // runner's own stderr and console stay untouched.
 import { afterEach, describe, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 
@@ -22,6 +22,7 @@ const read = (f: string) => { try { return readFileSync(f, 'utf8') } catch { ret
 const records = (f: string) => read(f).split('\n').filter(Boolean).map(l => JSON.parse(l))
 const count = (text: string, part: string) => text.split(part).length - 1
 const logFile = (dir: string, pid: number) => join(dir, 'logs', `server-${pid}.jsonl`)
+const callFile = (dir: string, pid: number) => join(dir, 'logs', `calls-${pid}.jsonl`)
 
 describe('the writer', () => {
   test('each kind of line lands once in the file and once on stderr', async () => {
@@ -152,4 +153,43 @@ describe('the writer', () => {
       'telegram channel: shutting down',
     ])
   }, 15000)
+})
+
+describe('the call record', () => {
+  test('a call line lands in its own file with the envelope, 0600, never in the server log and never on stderr', async () => {
+    const dir = fresh()
+    const r = await run(dir, 'calls')
+    expect(r.code).toBe(0)
+    const recs = records(callFile(dir, r.pid))
+    expect(recs).toEqual([{ at: expect.any(String), pid: r.pid, version: VERSION, call: 'sendMessage', chat: '1', ms: 5, ok: true, message_id: 7 }])
+    expect(Number.isNaN(Date.parse(recs[0].at))).toBe(false)
+    expect(statSync(callFile(dir, r.pid)).mode & 0o777).toBe(0o600)
+    expect(existsSync(logFile(dir, r.pid))).toBe(false)
+    expect(r.err).toBe('')
+  })
+
+  test('each file keeps its own bound: the call file moves to .1 past 16 MiB, the server log past 1 MiB', async () => {
+    const dir = fresh()
+    const r = await run(dir, 'call-bounds')
+    expect(JSON.parse(r.out)).toEqual({
+      past: { calls: true, moved: false },
+      atBound: { calls: false, moved: true },
+      server: { server: false, moved: true },
+    })
+  })
+
+  test('a call line that cannot be written is counted, and the next line that lands carries lost once', async () => {
+    const dir = fresh()
+    const r = await run(dir, 'calls-lost')
+    expect(records(callFile(dir, r.pid)).map(x => [x.call, x.lost])).toEqual([['b', 1], ['c', undefined]])
+    expect(r.err).toBe('')
+  })
+
+  test('before setup a call line is written nowhere', async () => {
+    const dir = fresh()
+    const r = await run(dir, 'call-before-setup')
+    expect(JSON.parse(r.out)).toEqual({ logs: false })
+    expect(r.err).toBe('')
+    expect(readdirSync(dir)).toEqual([])
+  })
 })

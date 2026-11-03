@@ -2,6 +2,7 @@
 // only Telegram's HTTP replaced offline by telegram-preload.ts. Shared by the
 // integration tests; these tests never use the owner's bot.
 import { setSystemTime } from 'bun:test'
+import { callLogDiff } from './call-log.ts'
 import { spawn, type ChildProcess } from 'child_process'
 import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
@@ -402,7 +403,9 @@ export function killServers(dir: string): void {
 }
 
 // Each test file runs this after each test: it ends the servers the test
-// started and removes their state folders.
+// started, checks each state folder's call record against what the fake
+// Telegram answered (see call-log.ts), removes the folders, and then fails the
+// test on any difference.
 export async function cleanup(): Promise<void> {
   for (const child of children.splice(0)) {
     if (child.exitCode === null && child.signalCode === null) {
@@ -415,6 +418,10 @@ export async function cleanup(): Promise<void> {
     }
   }
   for (const dir of dirs) killServers(dir)
+  const callLogDiffs: string[] = []
+  for (const dir of dirs) {
+    try { callLogDiffs.push(...callLogDiff(dir)) } catch (err) { callLogDiffs.push(`${dir}: ${err}`) }
+  }
   for (const dir of dirs.splice(0)) {
     // A test may leave its state folder read-only.
     try { chmodSync(dir, 0o700) } catch {}
@@ -426,4 +433,5 @@ export async function cleanup(): Promise<void> {
   stderrOf.clear()
   epoch++
   if (timeline !== undefined) { timeline = undefined; setSystemTime() }
+  if (callLogDiffs.length) throw new Error(`the call record differs from what the fake Telegram answered:\n${callLogDiffs.join('\n')}`)
 }

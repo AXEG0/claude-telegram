@@ -98,10 +98,12 @@ let nextId = chats.ids
 // failed; the log marks it `answered`. `hang` never answers: the call ends
 // only when its request's signal aborts, logged as aborted. `network` fails
 // the connection with that error code before the call reaches the fake, as a
-// refused connection does: logged as `failed`, never applied. A held poll
-// (holdMs on getUpdates) answers once its hold ends, whatever its signal
-// says, and with `keep` the round it answers with stays for the next poll,
-// as Telegram keeps every update until a poll confirms it. The file host and
+// refused connection does: logged as `failed`, never applied. A call whose
+// request's signal aborts rejects at the abort, as a real fetch does, whatever
+// the fake was still doing for it, which runs on: a held poll (holdMs on
+// getUpdates) aborted before its hold ends answers nothing, and with `keep`
+// the round it would have answered with stays for the next poll, as Telegram
+// keeps every update until a poll confirms it. The file host and
 // the transcription endpoint (see
 // TELEGRAM_TEST_FILES) obey rules too, under the methods `download` and
 // `transcribe`: their `error` answers with error_code as the HTTP status and
@@ -385,9 +387,8 @@ function bridgeUpdates(): unknown[] {
   return out
 }
 
-const fakeFetch = (async (url: string | URL | Request, options?: RequestInit) => {
+const answerCall = (async (url: string | URL | Request, options: RequestInit | undefined, payload: Record<string, unknown>) => {
   const method = String(url).split('/').pop()!
-  const payload = await payloadOf(options)
   // A send is logged with the id it gets, unless it is refused, and every
   // call with when it came.
   const n = SENDS.includes(method) ? ++sends : 0
@@ -451,6 +452,39 @@ const fakeFetch = (async (url: string | URL | Request, options?: RequestInit) =>
     }
   }
   return json({ ok: true, result })
+})
+
+// Each call but a poll, once the fake has answered it or failed it, in
+// answers.jsonl beside the call log: what the server was answered, which the
+// harness checks the server's call record against (call-log.ts). A call still
+// waiting when its server exits has no line.
+const fakeFetch = (async (url: string | URL | Request, options?: RequestInit) => {
+  const method = String(url).split('/').pop()!
+  const payload = await payloadOf(options)
+  const note = (outcome: object) => {
+    if (method === 'getUpdates') return
+    appendFileSync(join(process.env.TELEGRAM_TEST_API_LOG!, '..', 'answers.jsonl'), JSON.stringify({ pid: process.pid, method, payload, at: Date.now(), ...outcome }) + '\n')
+  }
+  // An aborted call rejects at its abort, as a real fetch does.
+  const signal = options?.signal
+  const aborted = new Promise<never>((_, reject) => {
+    if (!signal) return
+    const go = () => reject(signal.reason ?? new DOMException('The operation was aborted.', 'AbortError'))
+    if (signal.aborted) go()
+    else signal.addEventListener('abort', go, { once: true })
+  })
+  let res: Response
+  try {
+    res = await Promise.race([answerCall(url, options, payload), aborted])
+  } catch (err) {
+    note({ ok: null })
+    throw err
+  }
+  const body = await res.clone().json() as { ok: boolean; result?: any; error_code?: number; parameters?: { retry_after?: number } }
+  const ids = Array.isArray(body.result) ? { message_ids: body.result.map((m: any) => m?.message_id) }
+    : typeof body.result?.message_id === 'number' ? { message_id: body.result.message_id } : {}
+  note(body.ok ? { ok: true, ...ids } : { ok: false, error_code: body.error_code, retry_after: body.parameters?.retry_after })
+  return res
 }) as unknown as typeof fetch
 
 // The fake takes the place of the fetch the server gives grammY's client, and

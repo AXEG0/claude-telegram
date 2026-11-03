@@ -105,19 +105,19 @@ describe('the turn-end hook\'s records', () => {
     expect(readdirSync(join(dir, 'outcomes'))).toEqual(['clean-pid-8'])
   })
 
-  test("the hook deletes a server's week-old log files, and a file gone mid-sweep skips only itself", () => {
+  test("the hook deletes a server's week-old log and call files, and a file gone mid-sweep skips only itself", () => {
     const dir = scratch()
     mkdirSync(join(dir, 'logs'))
     mkdirSync(join(dir, 'outcomes'))
     mkdirSync(join(dir, 'turns'))
-    for (const name of ['server-7.jsonl', 'server-7.jsonl.1', 'server-8.jsonl']) writeFileSync(join(dir, 'logs', name), '{}\n')
+    for (const name of ['server-7.jsonl', 'server-7.jsonl.1', 'server-8.jsonl', 'calls-7.jsonl', 'calls-7.jsonl.1', 'calls-8.jsonl']) writeFileSync(join(dir, 'logs', name), '{}\n')
     writeFileSync(join(dir, 'outcomes', 'clean-pid-9'), '{}')
     symlinkSync(join(dir, 'nowhere'), join(dir, 'turns', 'a-dangling-link'))
     const old = (Date.now() - 8 * 24 * 60 * 60 * 1000) / 1000
-    for (const name of ['server-7.jsonl', 'server-7.jsonl.1']) utimesSync(join(dir, 'logs', name), old, old)
+    for (const name of ['server-7.jsonl', 'server-7.jsonl.1', 'calls-7.jsonl', 'calls-7.jsonl.1']) utimesSync(join(dir, 'logs', name), old, old)
     utimesSync(join(dir, 'outcomes', 'clean-pid-9'), old, old)
     expect(runHook({ session_id: 'sess-1', hook_event_name: 'SessionEnd' }, { TELEGRAM_STATE_DIR: dir, CLAUDE_PID: '4242' }).exitCode).toBe(0)
-    expect(readdirSync(join(dir, 'logs'))).toEqual(['server-8.jsonl'])
+    expect(readdirSync(join(dir, 'logs')).sort()).toEqual(['calls-8.jsonl', 'server-8.jsonl'])
     expect(readdirSync(join(dir, 'turns'))).toContain('a-dangling-link')
     expect(readdirSync(join(dir, 'outcomes'))).toEqual([])
   })

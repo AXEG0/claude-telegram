@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
-import { chatKey, createHolds, FLOOD_LINE, floodTransformer, type Holds } from './flood.ts'
+import { HttpError } from 'grammy'
+import { type CallLine, chatKey, createHolds, FLOOD_LINE, floodTransformer, type Holds } from './flood.ts'
 
 const T0 = Date.UTC(2026, 9, 30, 9, 5, 44)
 const TOO_MANY = (n?: number) => ({
@@ -13,7 +14,7 @@ function watched(answer: object, o: { holds?: Holds; log?: (line: string) => voi
   const now = () => t
   const holds = o.holds ?? createHolds(now)
   const lines: string[] = []
-  const transform = floodTransformer({ holds, log: o.log ?? (line => { lines.push(line) }), now })
+  const transform = floodTransformer({ holds, log: o.log ?? (line => { lines.push(line) }), record: () => {}, now })
   const call = (method: string, payload: object) =>
     transform(async () => answer as { ok: boolean }, method, payload)
   return { call, holds, lines, advance: (ms: number) => { t += ms }, now }
@@ -100,7 +101,7 @@ describe('the flood watch', () => {
     await w.call('sendMessage', { chat_id: '1', text: 'hello' })
     w.advance(29_999)
     expect(w.holds.held('1')).toBe(true)
-    const ok = floodTransformer({ holds: w.holds, log: () => {}, now: w.now })
+    const ok = floodTransformer({ holds: w.holds, log: () => {}, record: () => {}, now: w.now })
     await ok(async () => ({ ok: true }), 'sendMessage', { chat_id: '1' })
     expect(w.holds.held('1')).toBe(true)
     w.advance(1)
@@ -115,8 +116,121 @@ describe('the flood watch', () => {
     const failingRecord = watched(TOO_MANY(7), { holds: broken })
     expect(await failingRecord.call('sendMessage', { chat_id: '1', text: 'hello' })).toEqual(TOO_MANY(7))
     // A call that fails outright fails as it would without the watch.
-    const transform = floodTransformer({ holds: createHolds(), log: () => {} })
+    const transform = floodTransformer({ holds: createHolds(), log: () => {}, record: () => {} })
     const err = new Error('Network request failed')
     expect(transform(async () => { throw err }, 'sendMessage', { chat_id: '1' })).rejects.toBe(err)
+  })
+})
+
+// The call record: the watch's line for each call, on a fake call that takes
+// 250 ms and then answers as given, or throws.
+const MARK = 'MARKER-q7Zt'
+const TOKEN = '1234567:AAHsecretsecretsecretsecretsecret12'
+function recorded(answer: object | (() => never), o: { record?: (l: CallLine) => void; log?: (line: string) => void; holds?: Holds } = {}) {
+  let t = T0
+  const now = () => t
+  const lines: CallLine[] = []
+  const logLines: string[] = []
+  const holds = o.holds ?? createHolds(now)
+  const transform = floodTransformer({ holds, log: o.log ?? (l => { logLines.push(l) }), record: o.record ?? (l => { lines.push(l) }), now })
+  const call = (method: string, payload: object) =>
+    transform(async () => { t += 250; if (typeof answer === 'function') answer(); return answer as { ok: boolean } }, method, payload)
+  return { call, lines, logLines, holds }
+}
+
+describe('the call record', () => {
+  test("a send records its call, chat, time taken, outcome and the answer's message id", async () => {
+    const w = recorded({ ok: true, result: { message_id: 77, chat: { id: 1 }, text: MARK } })
+    await w.call('sendMessage', { chat_id: 1, text: MARK })
+    expect(w.lines).toEqual([{ call: 'sendMessage', chat: '1', ms: 250, ok: true, message_id: 77 }])
+  })
+
+  test("an edit, a reaction and a keyboard change record the payload's message id; a silent send records silent", async () => {
+    const w = recorded({ ok: true, result: true })
+    await w.call('editMessageText', { chat_id: '1', message_id: 5, text: MARK })
+    await w.call('setMessageReaction', { chat_id: '1', message_id: 6, reaction: [{ type: 'emoji', emoji: '👍' }] })
+    await w.call('editMessageReplyMarkup', { chat_id: '1', message_id: 7, reply_markup: { inline_keyboard: [[{ text: MARK, callback_data: MARK }]] } })
+    await w.call('sendMessage', { chat_id: '1', text: MARK, disable_notification: true })
+    expect(w.lines.map(l => [l.call, l.message_id, l.silent])).toEqual([
+      ['editMessageText', 5, undefined], ['setMessageReaction', 6, undefined], ['editMessageReplyMarkup', 7, undefined], ['sendMessage', undefined, true],
+    ])
+    expect(JSON.stringify(w.lines)).not.toContain(MARK)
+  })
+
+  test('an album records every id in order', async () => {
+    const w = recorded({ ok: true, result: [{ message_id: 3 }, { message_id: 4 }, { message_id: 5 }] })
+    await w.call('sendMediaGroup', { chat_id: '@Some_Peer', media: [] })
+    expect(w.lines).toEqual([{ call: 'sendMediaGroup', chat: '@some_peer', ms: 250, ok: true, message_ids: [3, 4, 5] }])
+  })
+
+  test('a 429 records its code and wait, a 400 its code and whether the edit was unchanged, and neither its description; the hold and the line still happen', async () => {
+    const w = recorded(TOO_MANY(28728))
+    await w.call('sendMessage', { chat_id: '1', text: MARK })
+    expect(w.lines).toEqual([{ call: 'sendMessage', chat: '1', ms: 250, ok: false, error_code: 429, retry_after: 28728 }])
+    expect(w.logLines).toHaveLength(1)
+    expect(w.holds.held('1')).toBe(true)
+    const n = recorded({ ok: false, error_code: 400, description: 'Bad Request: message is not modified: specified new message content and reply markup are exactly the same' })
+    await n.call('editMessageText', { chat_id: '1', message_id: 9, text: MARK })
+    expect(n.lines).toEqual([{ call: 'editMessageText', chat: '1', ms: 250, ok: false, message_id: 9, error_code: 400, not_modified: true }])
+    const q = recorded({ ok: false, error_code: 400, description: `Bad Request: can't parse entities: Unsupported start tag "${MARK}" at byte offset 0` })
+    await q.call('sendMessage', { chat_id: '1', text: `<${MARK}>` })
+    expect(JSON.stringify(q.lines)).not.toContain(MARK)
+    expect(q.lines).toEqual([{ call: 'sendMessage', chat: '1', ms: 250, ok: false, error_code: 400 }])
+  })
+
+  test("a call that throws records no answer and the error's name, and its caller gets the very same error", async () => {
+    const err = new HttpError(`Network request for 'sendMessage' failed! ${TOKEN} ${MARK}`, Object.assign(new TypeError(`Unable to connect https://api.telegram.org/bot${TOKEN}/sendMessage ${MARK}`), { code: 'ECONNREFUSED', path: `https://api.telegram.org/bot${TOKEN}` }))
+    const w = recorded(() => { throw err })
+    let caught: unknown
+    try { await w.call('sendMessage', { chat_id: '1', text: MARK }) } catch (e) { caught = e }
+    expect(caught).toBe(err)
+    expect(w.lines).toEqual([{ call: 'sendMessage', chat: '1', ms: 250, ok: null, error: 'HttpError/ECONNREFUSED' }])
+    // An abort keeps the fetch's error by its name.
+    const aborted = recorded(() => { throw new HttpError("Network request for 'editMessageReplyMarkup' failed!", new DOMException('The operation was aborted.', 'AbortError')) })
+    await aborted.call('editMessageReplyMarkup', { chat_id: '1', message_id: 3 }).catch(() => {})
+    expect(aborted.lines).toEqual([{ call: 'editMessageReplyMarkup', chat: '1', ms: 250, ok: null, message_id: 3, error: 'HttpError/AbortError' }])
+    // A name that holds text, outside or inside, reads unknown.
+    const odd = recorded(() => { throw Object.assign(new Error('x'), { name: `${TOKEN} ${MARK}` }) })
+    await odd.call('sendMessage', { chat_id: '1' }).catch(() => {})
+    expect(odd.lines[0]!.error).toBe('unknown')
+    const inner = recorded(() => { throw new HttpError('x', Object.assign(new Error(MARK), { name: `${TOKEN} ${MARK}`, code: `${MARK} 1` })) })
+    await inner.call('sendMessage', { chat_id: '1' }).catch(() => {})
+    expect(inner.lines[0]!.error).toBe('HttpError/unknown')
+    expect(JSON.stringify([...w.lines, ...odd.lines, ...inner.lines])).not.toContain(MARK)
+  })
+
+  test('a poll records nothing; getMe records a line with no chat; a chat not shaped like an id or @username is left out', async () => {
+    const w = recorded({ ok: true, result: [] })
+    await w.call('getUpdates', { offset: 1, timeout: 30 })
+    await w.call('getMe', {})
+    await w.call('sendMessage', { chat_id: `hello ${MARK}`, text: MARK })
+    expect(w.lines).toEqual([{ call: 'getMe', ms: 250, ok: true }, { call: 'sendMessage', ms: 250, ok: true }])
+  })
+
+  test('a record that throws leaves the answer, the hold and the flood line intact; a watch that throws still records', async () => {
+    const w = recorded(TOO_MANY(7), { record: () => { throw new Error('ENOSPC') } })
+    expect(await w.call('sendMessage', { chat_id: '1', text: 'x' })).toEqual(TOO_MANY(7))
+    expect(w.logLines).toHaveLength(1)
+    expect(w.holds.held('1')).toBe(true)
+    const v = recorded(TOO_MANY(7), { log: () => { throw new Error('EPIPE') } })
+    await v.call('sendMessage', { chat_id: '1', text: 'x' })
+    expect(v.lines).toHaveLength(1)
+  })
+})
+
+describe('the call record, by shape', () => {
+  test('a call whose every field holds text or an out-of-shape number writes none of it', async () => {
+    const send = recorded({ ok: true, result: { message_id: `${MARK}` } })
+    await send.call(`send ${MARK}`, { chat_id: 1, message_id: `${MARK}`, disable_notification: `${MARK}` })
+    const album = recorded({ ok: true, result: [{ message_id: 1 }, { message_id: `${MARK}` }] })
+    await album.call('sendMediaGroup', { chat_id: 1 })
+    const refused = recorded({ ok: false, error_code: `${MARK}`, description: MARK, parameters: { retry_after: `${MARK}` } })
+    await refused.call('editMessageText', { chat_id: 1, message_id: 4 })
+    expect(send.lines).toEqual([{ call: 'unknown', chat: '1', ms: 250, ok: true }])
+    expect(album.lines).toEqual([{ call: 'sendMediaGroup', chat: '1', ms: 250, ok: true }])
+    expect(refused.lines).toEqual([{ call: 'editMessageText', chat: '1', ms: 250, ok: false, message_id: 4 }])
+    const odd = recorded({ ok: false, error_code: 1.5, parameters: { retry_after: Infinity } })
+    await odd.call('sendMessage', { chat_id: 1, message_id: 2 ** 60 })
+    expect(odd.lines).toEqual([{ call: 'sendMessage', chat: '1', ms: 250, ok: false }])
   })
 })
