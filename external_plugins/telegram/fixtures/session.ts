@@ -3,13 +3,13 @@
 // the subagents message. Only Telegram's HTTP is fake.
 import { appendFileSync, existsSync, mkdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
-import { AGENT_TICK_MS, agentEventFile, appendAgentEvent, type AgentEvent } from '../agents.ts'
+import { AGENT_TICK_MS, agentEventFile, appendAgentEvent, CHAT_GAP_MS, type AgentEvent } from '../agents.ts'
 import fixture from './channel-argv.json'
 import { calls, start, state, until, type Call } from './harness.ts'
 import { line } from './transcript.ts'
 
 // Long enough for a tick, the chat's spacing and the fake's answer.
-export const WAIT_MS = 2 * AGENT_TICK_MS + 2000
+export const WAIT_MS = AGENT_TICK_MS + CHAT_GAP_MS + 2000
 
 // The owner's message, which makes the owner's chat the one the subagents
 // message goes to.

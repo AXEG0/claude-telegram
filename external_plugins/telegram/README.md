@@ -579,7 +579,7 @@ row stays as it was. The server shuts down when its session ends, when the
 plugin reloads, and when a running workflow moves to a background session, and
 it cannot tell these apart, so the line says only that the row is no longer
 followed. The edit keeps the chat's spacing, after any send or edit still on
-its way, so the server takes up to five seconds to exit.
+its way, so the server takes up to eight seconds to exit.
 
 A server can die before that edit goes out: killed, or with the edit refused,
 lost or out of time. So each open message keeps a record under `panels/` in
@@ -613,10 +613,13 @@ that line. A successful `TaskStop` of a shell also ends its row.
 The message goes, without a notification, to the private chat that last wrote
 to the bot since the server started, or to `TELEGRAM_ALERT_CHAT` when that chat
 is [another bot's](#other-bots). Agents stay in the chat where they first
-appeared. The stream checks every three seconds and sends at most one update
-per chat in that interval. The clocks move while nothing else changes, and a
-rate limit on any of the plugin's calls in the chat holds it for as long as
-Telegram asks ([flood control](#flood-control)). Long rows shorten to
+appeared. The stream checks every three seconds and sends or edits the message
+into a chat at most once every six seconds, 600 times an hour, a pace at which
+other installations' bots were never held by Telegram; a new step or token
+count shows at the next of those slots. The clocks move at least every 12
+seconds while nothing else changes, and a rate limit on any of the plugin's
+calls in the chat holds it for as long as Telegram asks
+([flood control](#flood-control)). Long rows shorten to
 fit Telegram's message limit; a group too large for shortened rows shows a
 count of the additional agents, prioritizing new rows and unreported endings
 over finished history. An explicit interruption in the subagent's transcript
@@ -765,8 +768,8 @@ out of shape is left out, or reads `unknown` for `call` and the parts of
 subagents message edit about 160.
 
 A file past 16 MiB moves to `calls-<pid>.jsonl.1`, replacing the one there, so
-a server keeps at most about 32 MiB: at least about two days at the fastest
-steady pace, the subagents message every 3 seconds and typing every 4 in one
+a server keeps at most about 32 MiB: at least about three days at the fastest
+steady pace, the subagents message every 6 seconds and typing every 4 in one
 chat. The turn-end hook's week-old sweep of `logs/` deletes call files too. A
 line that cannot be written is dropped and counted in the next line's `lost`;
 the call, its hold and every log line go on as before.

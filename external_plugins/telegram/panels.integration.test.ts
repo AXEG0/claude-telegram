@@ -106,7 +106,7 @@ describe.skipIf(process.platform !== 'linux')('the records of open subagents mes
     expect(first.message_id).toBe(7)
     s.write('a1', toolCall('c1', Date.now(), 'Checking gate', 900))
     // Five refused edits in a row and the message is gone.
-    await until(() => edits(s.dir, 7).filter(c => c.refused).length === 5, 7 * AGENT_TICK_MS)
+    await until(() => edits(s.dir, 7).filter(c => c.refused).length === 5, 5 * CHAT_GAP_MS + 2 * AGENT_TICK_MS)
     s.stop('a1')
     const goneFile = join(panelsDir(s.dir), '1-7.json')
     await until(() => existsSync(goneFile) && JSON.parse(readFileSync(goneFile, 'utf8')).text.includes('✅ Done'), WAIT_MS)
