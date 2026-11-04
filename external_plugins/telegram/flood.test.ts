@@ -125,7 +125,9 @@ describe('the flood watch', () => {
 // The call record: the watch's line for each call, on a fake call that takes
 // 250 ms and then answers as given, or throws.
 const MARK = 'MARKER-q7Zt'
-const TOKEN = '1234567:AAHsecretsecretsecretsecretsecret12'
+// The bot token in an error's text and URL; any text serves, so it is no
+// token's shape.
+const TOKEN = 'test-bot-token'
 function recorded(answer: object | (() => never), o: { record?: (l: CallLine) => void; log?: (line: string) => void; holds?: Holds } = {}) {
   let t = T0
   const now = () => t
