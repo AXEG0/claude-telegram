@@ -98,4 +98,25 @@ describe.skipIf(process.platform !== 'linux')('the format of reply and edit_mess
       await srv.close()
     }, 20000)
   }
+
+  test('with rich messages on, a table right under a paragraph gets a blank line in a reply and an edit; a bot gets the text as written', async () => {
+    const { dir, srv } = await sender(true)
+    const text = '**The real risks**\n| Risk | Impact |\n|---|---|\n| a | b |'
+    const fixed = '**The real risks**\n\n| Risk | Impact |\n|---|---|\n| a | b |'
+    for (const [name, args] of [
+      ['reply', { chat_id: '1', text }],
+      ['edit_message', { chat_id: '1', message_id: '7', text }],
+      ['reply', { chat_id: String(BOT.id), text }],
+      ['edit_message', { chat_id: String(BOT.id), message_id: '7', text }],
+    ] as [string, any][]) {
+      const from = calls(dir).length
+      const r = await tool(srv, name, args)
+      expect(r.isError).not.toBe(true)
+      const made = calls(dir).slice(from).filter(c => c.method !== 'getChatMember')
+      expect(made).toHaveLength(1)
+      if (args.chat_id === '1') expect(made[0]!.payload.rich_message).toEqual({ markdown: fixed })
+      else expect([styleOf(made[0]!), made[0]!.payload.text]).toEqual(['text', text])
+    }
+    await srv.close()
+  }, 20000)
 })

@@ -1,7 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'fs'
 import { join } from 'path'
-import { editRich, plainFallback, RICH_INSTRUCTIONS, richEnabled, richMarkdown, richParts, richPartsAsync, sendRich, type RawApi } from './rich.ts'
+import { fromMarkdown } from 'mdast-util-from-markdown'
+import { gfmFromMarkdown } from 'mdast-util-gfm'
+import { gfm } from 'micromark-extension-gfm'
+import { editRich, plainFallback, RICH_INSTRUCTIONS, richEditParse, richEnabled, richMarkdown, richParts, richPartsAsync, sendRich, type RawApi } from './rich.ts'
 
 describe('richEnabled', () => {
   test('on only when asked', () => {
@@ -356,5 +359,444 @@ describe('editRich', () => {
     const f = fakeRaw()
     await expect(editRich({ raw: f.raw, chatId: '42', messageId: 9, text: 'a'.repeat(20_000) + '\n\n' + 'b'.repeat(20_000) })).rejects.toThrow('too long')
     expect(f.calls).toEqual([])
+  })
+})
+
+// The block tree GFM reads: types and leaf text, no positions, no spread.
+const tree = (md: string): unknown => {
+  const shape = (n: any): unknown =>
+    'value' in n ? [n.type, n.value] : [n.type, ...(n.children ?? []).map(shape)]
+  return shape(fromMarkdown(md, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] }))
+}
+
+const q = (n: number) => '> '.repeat(n)
+const cols = (n: number, cell = ' c |') => '|' + cell.repeat(n)
+const delim = (n: number) => '|' + '---|'.repeat(n)
+
+// [text, the line inserted] for each shape the rule fires on.
+const FIRES: [string, string][] = [
+  ['**The real risks**\n| Risk | Impact |\n|---|---|\n| a | b |', '\n'],
+  ['> para\n> | a | b |\n> |---|---|', '\n>'],
+  ['> > para\n> > | a | b |\n> > |---|---|', '\n> >'],
+  ['> > > para\n> > > | a | b |\n> > > |---|---|', '\n> > >'],
+  ['- a\n  | x | y |\n  |---|---|\n  | 1 | 2 |\n- b\n- c', '\n'],
+  ['* a\n  | x | y |\n  |---|---|', '\n'],
+  ['+ a\n  | x | y |\n  |---|---|', '\n'],
+  ['1. a\n   | x | y |\n   |---|---|', '\n'],
+  ['1) a\n   | x | y |\n   |---|---|', '\n'],
+  ['- [ ] a\n  | x | y |\n  |---|---|', '\n'],
+  ['- a\n  - b\n    | x | y |\n    |---|---|', '\n'],
+  ['> - a\n>   | x | y |\n>   |---|---|', '\n>'],
+  ['- > a\n  > | x | y |\n  > |---|---|', '\n  >'],
+  ['line one\nline two\n| a | b |\n|---|---|', '\n'],
+  ['> para\nlazy\n> | a | b |\n> |---|---|', '\n>'],
+  ['para\n | a | b |\n |---|---|', '\n'],
+  ['para\n   | a | b |\n   |---|---|', '\n'],
+  ['para\na | b\n--|--', '\n'],
+  ['para\n1234567890. a | b\n--|--', '\n'],
+  ['para\n**Risk** | Impact\n--|--', '\n'],
+  ['para\n*a* | b\n--|--', '\n'],
+  ['para\n-x | y\n--|--', '\n'],
+  ['para\n+1 | y\n--|--', '\n'],
+  ['para\n3.5 | x\n--|--', '\n'],
+  ['para\n. a | b\n--|--', '\n'],
+  ['para\n) a | b\n--|--', '\n'],
+  ['para\n3)x | y\n--|--', '\n'],
+  ['para\n*\u00a0a | b\n--|--', '\n'],
+  ['para\n| a | b |\n|:--|--:|', '\n'],
+  ['para  \n| a | b |\n|---|---|', '\n'],
+  ['para\t\n| a | b |\n|---|---|', '\n'],
+  ['Intro\r\n| Risk | Impact |\r\n|---|---|\r\n| a | b |', '\r\n'],
+  ['Intro\r\n| Risk | Impact |\n|---|---|\n| a | b |', '\r\n'],
+  ['> para\r\n> | a | b |\r\n> |---|---|', '\r\n>'],
+  ['- a\r\n  | x | y |\r\n  |---|---|', '\r\n'],
+  ['para\n| a | b |\n|---|---|\r\n', '\n'],
+  ['>para\n>| a | b |\n>|---|---|', '\n>'],
+  ['>\tpara\n>\t| a | b |\n>\t|---|---|', '\n>'],
+  ['- a\n\t| x | y |\n\t|---|---|', '\n'],
+  // Telegram's limits: 20 columns, 16 levels (12 quotes, the table, its row, its cell and an entity in its text).
+  ['para\n' + cols(20) + '\n' + delim(20), '\n'],
+  [q(12) + 'para\n' + q(12) + '| a | b |\n' + q(12) + '|---|---|', '\n' + q(12).trimEnd()],
+  [q(12) + 'para\n' + q(12) + '| @someone | b |\n' + q(12) + '|---|---|', '\n' + q(12).trimEnd()],
+  [q(11) + 'para\n' + q(11) + '| **a** | b |\n' + q(11) + '|---|---|', '\n' + q(11).trimEnd()],
+  [q(10) + 'para\n' + q(10) + '| <b>a</b> | b |\n' + q(10) + '|---|---|', '\n' + q(10).trimEnd()],
+  [q(10) + 'para\n' + q(10) + '| ==a== | b |\n' + q(10) + '|---|---|', '\n' + q(10).trimEnd()],
+  [q(10) + 'para\n' + q(10) + '| \\|\\|a\\|\\| | b |\n' + q(10) + '|---|---|', '\n' + q(10).trimEnd()],
+  [q(11) + 'para\n' + q(11) + '| a[^1] | b |\n' + q(11) + '|---|---|\n\n[^1]: note', '\n' + q(11).trimEnd()],
+  // Raw HTML and pairs closed where they open, a tag that closes nothing, and no element open around the paragraph.
+  ['para <b>x</b> ==y==\n| a | b |\n|---|---|', '\n'],
+  ['<p>x</p>\n\npara\n| a | b |\n|---|---|', '\n'],
+  ['<hr>\n\npara\n| a | b |\n|---|---|', '\n'],
+  ['<tg-map lat="1" long="2"/>\n\npara\n| a | b |\n|---|---|', '\n'],
+  ['para\n| <b>a</b><br>==m== | b |\n|---|---|', '\n'],
+  // A comment opens no element; a pair closed across formatting in the paragraph and in a cell.
+  ['<!-- note -->\n\npara\n| a | b |\n|---|---|', '\n'],
+  ['para ==a **b** c==\n| ==x *y* z== | b |\n|---|---|', '\n'],
+  // Each cell's count even, though main's text pairs a mark across the pipe (sent live: main highlights `z | w`).
+  ['Intro\n| a | b |\n|---|---|\n| x == y ==z | w== v == u |', '\n'],
+]
+
+const SAME: string[] = [
+  '# H\n| a | b |\n|---|---|',
+  '```\nx\n```\n| a | b |\n|---|---|',
+  '| a | b |\n|---|---|',
+  '- | a | b |\n  |---|---|',
+  '[^1]: note\n    | a | b |\n    |---|---|\n\nText[^1]',
+  '[^1]: note\n    > q\n    > | a | b |\n    > |---|---|\n\nText[^1]',
+  '[^1]: note\n    - q\n      | a | b |\n      |---|---|\n\nText[^1]',
+  'para\r| a | b |\r|---|---|',
+  '> para\n| a | b |\n> |---|---|',
+  '- a\n| x | y |\n  |---|---|',
+  '1. a\n  | x | y |\n   |---|---|',
+  '> > para\n> | a | b |\n> > |---|---|',
+  '> - a\n| x | y |\n>   |---|---|',
+  '> para\na | b\n> --|--',
+  'para\n  | a | b |\n|---|---|',
+  '> para\n>| a | b |\n> |---|---|',
+  '- p\n\n  # H\n  | a | b |\n  |---|---|',
+  'para\n- a', 'para\n> q', 'para\n# H', 'para\n```\nx\n```', 'para\n***', 'para\n<div>x</div>',
+  'para\n```\n| a | b |\n|---|---|\n```',
+  'para\n<div>\n| a | b |\n|---|---|\n</div>',
+  'para\n\n| a | b |\n|---|---|',
+  '| a | b |\n|---|---|\nafter',
+  'para\n    | a | b |\n    |---|---|',
+  '- a\n  - b',
+  '[^1]: note\n    | a | b |\r    |---|---|\n\nText[^1]',
+  // A lone CR in the paragraph, the table or the end of its last line.
+  '> para\n> | a | b |\r> |---|---|',
+  'para\n| a | b |\r|---|---|',
+  'para\n| a | b |\r|---|---|\r| 1 | 2 |',
+  'para\r\n| a | b |\r|---|---|',
+  '- a\n  | x | y |\r  |---|---|',
+  '- a\n  | x | y |\r  |---|---|\n- b',
+  '> > para\n> > | a | b |\r> > |---|---|',
+  '> - a\n>   | x | y |\r>   |---|---|',
+  '- > a\n  > | x | y |\r  > |---|---|',
+  'para\n| a | b |\n|---|---|\r| 1 | 2 |',
+  'line one\rline two\n| a | b |\n|---|---|',
+  'para\n| a | b |\n|---|---|\r',
+  'para\n| a | b |\r\r|---|---|',
+  '> para\n| a | b |\r> |---|---|\nafter',
+  '- a\n| x | y |\r  |---|---|\nafter',
+  '> para\n| a | b |\r> |---|---|',
+  '- a\n| x | y |\r  |---|---|',
+  '> > para\n> | a | b |\r> > |---|---|',
+  'para\n  | a | b |\r|---|---|',
+  '> para\n> | a | b |\r>|---|---|',
+  // Over Telegram's limits: 21 columns in the head or a body row, 17 levels.
+  'para\n' + cols(21) + '\n' + delim(21),
+  'para\n' + cols(20) + '\n' + delim(20) + '\n' + cols(21, ' 1 |'),
+  q(13) + 'para\n' + q(13) + '| a | b |\n' + q(13) + '|---|---|',
+  q(13) + 'para\n' + q(13) + '| @someone | b |\n' + q(13) + '|---|---|',
+  q(12) + 'para\n' + q(12) + '| **a** | b |\n' + q(12) + '|---|---|',
+  q(11) + 'para\n' + q(11) + '| <b>a</b> | b |\n' + q(11) + '|---|---|',
+  q(11) + 'para\n' + q(11) + '| ==a== | b |\n' + q(11) + '|---|---|',
+  q(11) + 'para\n' + q(11) + '| \\|\\|a\\|\\| | b |\n' + q(11) + '|---|---|',
+  q(12) + 'para\n' + q(12) + '| a[^1] | b |\n' + q(12) + '|---|---|\n\n[^1]: note',
+  // A cell holds text only: an image or an HTML tag Telegram makes a block from.
+  'para\n| ![x](https://example.com/p.jpg) | b |\n|---|---|',
+  'para\n| ![x][p] | b |\n|---|---|\n\n[p]: https://example.com/p.jpg',
+  'para\n| <img src="https://example.com/p.jpg"> | b |\n|---|---|',
+  'para\n| a <blockquote>q</blockquote> | b |\n|---|---|',
+  // <details> other than as sent live.
+  '- x\n  <details><summary>S</summary>\n  Text\n  | a | b |\n  |---|---|\n  </details>',
+  '> <details><summary>S</summary>\n> Text\n> | a | b |\n> |---|---|\n> </details>',
+  '<details><summary>S</summary>\n> Text\n> | a | b |\n> |---|---|\n</details>',
+  '<details><summary>S</summary>Text\n| a | b |\n|---|---|\n</details>',
+  '<details><summary>S</summary>\nText\n| a | b |\n|---|---|\nNote <details><summary>B</summary>',
+  '<details><summary>S</summary>\nText\n| a | b |\n|---|---|\n\nNote <summary>B</summary> more\n</details>',
+  '<details><summary>S</summary>\nText\n| a | b |\n|---|---|',
+  '<details><summary>A</summary>\n<details><summary>B</summary>\nText\n| a | b |\n|---|---|\n</details>\n</details>',
+  '<details><summary>S</summary>\nText\n| a | b |\n|---|---|\n\n<details><summary>B</summary>\nx\n</details>\n</details>',
+  ' <details><summary>S</summary>\nText\n| a | b |\n|---|---|\n</details>',
+  '<details><summary>S</summary>\nText\n| a | b |\n|---|---|\n\n </details>',
+  'Text\n| a | <details> |\n|---|---|',
+  'Text <summary>x</summary>\n| a | b |\n|---|---|',
+  '<details><summary>S</summary>\nText\n| a | ' + '<b>'.repeat(6) + 'x' + '</b>'.repeat(6) + ' |\n|---|---|\n</details>',
+  // Raw HTML open around the paragraph: a collage, a slideshow, a quote, a dropped tag, a summary outside a section, an earlier tag.
+  '<tg-collage>\n\npara\n| a | b |\n|---|---|\n\n</tg-collage>',
+  '<tg-slideshow>\n\npara\n| a | b |\n|---|---|\n\n</tg-slideshow>',
+  '<blockquote>\n\npara\n| a | b |\n|---|---|\n\n</blockquote>',
+  '<div>\n\npara\n| a | b |\n|---|---|\n\n</div>',
+  '<summary>\n\npara\n| a | b |\n|---|---|\n\n</summary>',
+  'Intro <span>x\n\npara\n| a | b |\n|---|---|',
+  // A tag, a == or a || the line would split from its pair, across the paragraph and the table or across cells.
+  '<b>para\n| a | b |\n|---|---|\n| c | d</b> |',
+  '<tg-spoiler>para\n| a | b |\n|---|---|\n| c | d</tg-spoiler> |',
+  '==para\n| a | b |\n|---|---|\n| x== | y |',
+  '||para\n| a | b |\n|---|---|',
+  'para\n| <b>a | b</b> |\n|---|---|',
+  'para\n| ==a | b== |\n|---|---|',
+  'para\n| \\|\\|a | b\\|\\| |\n|---|---|',
+  'para\n| a || b |\n|---|---|---|',
+  // A cell holding a tag the page builds no text from.
+  'para\n| <tr> | b |\n|---|---|',
+  'para\n| <a name="x"></a>a | b |\n|---|---|',
+  'para\n| <a href="https://t.me">a</a> | b |\n|---|---|',
+  'para\n| <kbd>a</kbd> | b |\n|---|---|',
+  'para\n| <tg-map lat="1" long="2"/> | b |\n|---|---|',
+  // A == read one way and not another: an escape or a reference beside a mark, an escape that joins two =, four in a row.
+  'para \\=\\= x ==\n| a | b |\n|---|---|\n| \\=\\= c == | d |',
+  'para\n| a | b |\n|---|---|\n| \\=\\= c == | \\=\\= d == |',
+  'para\n| a | b |\n|---|---|\n| &#61;= c == | &#61;= d == |',
+  'para a \\== b ==\n| a | b |\n|---|---|',
+  'para \\=\\= x \\==\n| a | b |\n|---|---|',
+  'para \\\\== b \\==\n| a | b |\n|---|---|',
+  'para ==== x\n| a | b |\n|---|---|',
+  'para\n| a ==== b | c |\n|---|---|',
+  // A tag inside a comment counts as left open; a closing tag inside a <pre> closes nothing; a cell holding a comment.
+  '<!-- <b> -->\n\npara\n| a | b |\n|---|---|',
+  'Intro <span>x\n\n<!-- </span> -->\n\npara\n| a | b |\n|---|---|',
+  'Intro <span>x\n\n<!-- a > b </span> -->\n\npara\n| a | b |\n|---|---|',
+  '<tg-collage>\n\n<!-- </tg-collage> -->\n\npara\n| a | b |\n|---|---|\n\n</tg-collage>',
+  'Intro <span>x\n\n<pre>\n</span>\n</pre>\n\npara\n| a | b |\n|---|---|',
+  'para\n| <!-- c --> a | b |\n|---|---|',
+  // A head row with no leading pipe that starts with a list marker that cannot interrupt a paragraph
+  // (an ordered one not numbered 1, or an empty item): the blank line would open a list.
+  'Steps\n3. Deploy | Owner\n---|---\n| x | y |',
+  'para\n2) a | b\n--|--\n| 1 | 2 |',
+  'para\n10) Step | Detail\n---|---',
+  'para\n0) a | b\n--|--',
+  '> para\n> 3) x | y\n> --|--',
+  '> para\n> 2. x | y\n> --|--',
+  '- a\n  2) x | y\n  --|--',
+  '- a\n  3. x | y\n  --|--',
+  'para\n2.\ta | b\n--|--',
+  'para\n123. a | b\n--|--',
+  'para\n123456789. a | b\n--|--',
+  'para\n*\n|---|',
+  'para\n+\n|---|',
+  'para\n1.\n|---|',
+  'para\n2.\n|---|',
+  '> para\n> *\n> |---|',
+  '- a\n  1.\n  |---|',
+]
+
+describe('a table right under a paragraph', () => {
+  test('corpus: one inserted line where it fires, byte-identical elsewhere, the GFM tree kept', () => {
+    for (const [md, line] of FIRES) {
+      const out = richMarkdown(md)
+      let i = 0
+      while (i < md.length && out[i] === md[i]) i++
+      expect([md, out.slice(i, i + line.length), out.slice(i + line.length)]).toEqual([md, line, md.slice(i)])
+      expect([md, tree(out)]).toEqual([md, tree(md)])
+    }
+    for (const md of SAME) expect([md, richMarkdown(md)]).toEqual([md, md])
+    // Head rows near a list marker, generated, at the top level: bare and with cells, after an LF, and bare after a CRLF.
+    // A table to the parser gains its line exactly when a blank line above it keeps the tree, and is as written otherwise.
+    const parse = (s: string) => fromMarkdown(s, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] })
+    const shape = (n: any): unknown => 'value' in n ? [n.type, n.value] : [n.type, ...(n.children ?? []).map(shape)]
+    const ascii = Array.from({ length: 94 }, (_, i) => String.fromCharCode(33 + i)).filter(c => c !== '$') // a $ gains its escape, held by its own test
+    const spaces = Array.from({ length: 0x10000 }, (_, i) => String.fromCharCode(i)).filter(c => /\s/.test(c) && c !== '\n' && c !== '\r')
+    const numbers = [...Array.from({ length: 10 }, (_, i) => String(i)), '00', '01', '09', '007', '10', '99', '1'.repeat(9), '9'.repeat(9), '0'.repeat(8) + '5', '1'.repeat(10), '9'.repeat(10), 'a', 'Note', '(1', 'x1']
+    const markers = ['*', '+', '-', '1.', '1)', '3.', '3)']
+    // Each part the check reads, swept on its own: the first character, the number, the character after it, and what follows the marker.
+    const heads: string[] = [...ascii, '\u2022', '\u2023', '\u25e6', '\u00b7', '\u2013', '\u2014', '**', '--', '++']
+    for (const n of numbers) for (const m of ['.', ')', '']) heads.push(n + m)
+    for (const m of ascii) heads.push('3' + m)
+    for (const h of markers) for (const t of [...spaces, 'x']) heads.push(h + t)
+    const forms: string[][] = heads.flatMap(h => [[h + ' ', 'a | b', '--|--', '\n'], [h, '', '|---|', '\n']])
+    for (const h of markers) forms.push([h, '', '|---|', '\r\n'])
+    let swept = 0
+    for (const [head, row, sep, nl] of forms) {
+      const md = `para${nl}${head}${row}${nl}${sep}`
+      const p = parse(md)
+      if (p.children.map(c => c.type).join(',') !== 'paragraph,table') continue
+      swept++
+      const gained = `para${nl}${nl}${head}${row}${nl}${sep}`
+      const want = JSON.stringify(shape(parse(gained))) === JSON.stringify(shape(p)) ? gained : md
+      expect([md, richMarkdown(md)]).toEqual([md, want])
+    }
+    expect(swept).toBeGreaterThan(800)
+  })
+
+  test('fires: exact output', () => {
+    expect(richMarkdown('**The real risks**\n| Risk | Impact |\n|---|---|\n| a | b |'))
+      .toBe('**The real risks**\n\n| Risk | Impact |\n|---|---|\n| a | b |')
+    expect(richMarkdown('- a\n  | x | y |\n  |---|---|')).toBe('- a\n\n  | x | y |\n  |---|---|')
+    expect(richMarkdown('Intro\r\n| a | b |\r\n|---|---|')).toBe('Intro\r\n\r\n| a | b |\r\n|---|---|')
+    expect(richMarkdown('> para\r\n> | a | b |\r\n> |---|---|')).toBe('> para\r\n>\r\n> | a | b |\r\n> |---|---|')
+    expect(richMarkdown('para  \n| a | b |\n|---|---|')).toBe('para  \n\n| a | b |\n|---|---|')
+    expect(richMarkdown('> > para\n> > | a | b |\n> > |---|---|')).toBe('> > para\n> >\n> > | a | b |\n> > |---|---|')
+    // A name sent as &lt; is text to Telegram, no tag.
+    expect(richMarkdown('Vec<String>\n| a | b |\n|---|---|')).toBe('Vec&lt;String>\n\n| a | b |\n|---|---|')
+  })
+
+  test('details: a table under text inside a top-level <details> gets the line, as sent live', () => {
+    expect(richMarkdown('<details><summary>S</summary>\nText\n| a | b |\n|---|---|\n| 1 | 2 |\n</details>'))
+      .toBe('<details><summary>S</summary>\nText\n\n| a | b |\n|---|---|\n| 1 | 2 |\n</details>')
+    expect(richMarkdown('Before\n\n<details><summary>S</summary>\nText\n| a | b |\n|---|---|\n\nMore\n</details>\n\nAfter'))
+      .toBe('Before\n\n<details><summary>S</summary>\nText\n\n| a | b |\n|---|---|\n\nMore\n</details>\n\nAfter')
+    // 16 levels: the section, the table, its row, its cell, an entity in its text and 11 tags in the cell.
+    const at16 = '<details><summary>S</summary>\nText\n| a | ' + '<b>'.repeat(5) + 'x' + '</b>'.repeat(5) + '<br> |\n|---|---|\n</details>'
+    expect(richMarkdown(at16)).toBe(at16.replace('Text\n', 'Text\n\n'))
+  })
+
+  test('details arrangements: no <summary>, <details open> and a <summary> on its own line get the line, as sent live', () => {
+    const table = '| a | b |\n|---|---|\n| 1 | 2 |\n</details>'
+    for (const head of ['<details>\n\n', '<details>\n', '<details open><summary>S</summary>\n', '<details>\n<summary>S</summary>\n',
+      '<details>\n<summary>S</summary>\n\n', '<details open>\n<summary>S</summary>\n', '<details open>\n<summary>S</summary>\n\n'])
+      expect([head, richMarkdown(head + 'Text\n' + table)]).toEqual([head, head + 'Text\n\n' + table])
+  })
+
+  test('time: a long HTML block whose < meet no > is read in time linear in its length', () => {
+    const md = '<p>x</p>\n' + 'x<y '.repeat(50_000) + '\n\npara\n| a | b |\n|---|---|'
+    const start = performance.now()
+    const parts = richParts(md)
+    expect(performance.now() - start).toBeLessThan(3000)
+    expect(parts.map(p => p.rich)).toEqual([undefined, 'para\n\n| a | b |\n|---|---|'])
+  })
+
+  test('dollar: a $ that opens the table keeps its escape and the blank line', () => {
+    expect(richMarkdown('para\n$a | b\n--|--')).toBe('para\n\n\\$a | b\n--|--')
+  })
+
+  test('a cut between a paragraph and its table adds no line to either part', () => {
+    const md = 'p'.repeat(40) + '\n| a | b |\n|---|---|\n| 1 | 2 |'
+    expect(richParts(md, { bytes: 45, blocks: 400 })).toEqual([
+      { rich: 'p'.repeat(40), plain: 'p'.repeat(40) },
+      { rich: '| a | b |\n|---|---|\n| 1 | 2 |', plain: '| a | b |\n|---|---|\n| 1 | 2 |' },
+    ])
+  })
+
+  const top = 'p'.repeat(40) + '\n| a | b |\n|---|---|\n| 1 | 2 |'
+  const quote = '> ' + 'q'.repeat(40) + '\n> | a | b |\n> |---|---|\n> | 1 | 2 |'
+  const items = '- ' + 'l'.repeat(40) + '\n  | a | b |\n  |---|---|\n  | 1 | 2 |\n- b\n- c'
+  const item = '- ' + 'l'.repeat(40) + '\n  | a | b |\n  |---|---|\n  | 1 | 2 |'
+  const deep = '> > ' + 'q'.repeat(40) + '\n> > | a | b |\n> > |---|---|\n> > | 1 | 2 |'
+  const det = '<details><summary>S</summary>\n' + 'd'.repeat(30) + '\n| a | b |\n|---|---|\n| 1 | 2 |\n</details>'
+  // Each text with the bytes its line adds.
+  const AT: [string, number][] = [[top, 1], [quote, 2], [items, 1], [item, 1], [deep, 4], [det, 1]]
+  const lim = (bytes: number) => ({ bytes, blocks: 400 })
+  const raw = (calls: Record<string, unknown>[]): RawApi => ({
+    sendRichMessage: async () => ({ message_id: 1 }),
+    sendMessage: async () => ({ message_id: 1 }),
+    editMessageText: async p => { calls.push(p); return true },
+  })
+
+  test('limit kept: a text that fits only without its line is one rich part as written; with room for the line, one part with it', () => {
+    for (const [md, add] of AT) {
+      expect([md, richParts(md, lim(md.length))]).toEqual([md, [{ rich: md, plain: md }]])
+      const fixed = richMarkdown(md)
+      expect([md, Buffer.byteLength(fixed)]).toEqual([md, md.length + add])
+      expect([md, richParts(md, lim(md.length + add))]).toEqual([md, [{ rich: fixed, plain: md }]])
+    }
+  })
+
+  test('limit cut: in a longer reply the cuts fall where main puts them, and only the part with room gets its line', () => {
+    const md = top + '\n\nafter'
+    expect(richParts(md, lim(top.length))).toEqual([{ rich: top, plain: top }, { rich: 'after', plain: 'after' }])
+    expect(richParts(md, lim(top.length + 1))).toEqual([{ rich: richMarkdown(top), plain: top }, { rich: 'after', plain: 'after' }])
+  })
+
+  test('limit list: a list cut between its items keeps main\'s cut, and its first item gets its line only with room for it', () => {
+    const first = items.slice(0, items.indexOf('\n- b'))
+    expect(richParts(items, lim(first.length))).toEqual([{ rich: first, plain: first }, { rich: '- b\n- c', plain: '- b\n- c' }])
+    expect(richParts(items, lim(first.length + 1))).toEqual([{ rich: richMarkdown(first), plain: first }, { rich: '- b\n- c', plain: '- b\n- c' }])
+    // The item with the table last, so it is the list's last part.
+    const tail = '- b\n' + item
+    expect(richParts(tail, lim(item.length))).toEqual([{ rich: '- b', plain: '- b' }, { rich: item, plain: item }])
+    expect(richParts(tail, lim(item.length + 1))).toEqual([{ rich: '- b', plain: '- b' }, { rich: richMarkdown(item), plain: item }])
+  })
+
+  test('limit edit: at 30,000 bytes an edit is one rich edit as written; a byte under, it carries the line', async () => {
+    for (const md of [top, item]) {
+      const pad = (n: number) => md.startsWith('- ') ? md.replace('- ', '- ' + 'l'.repeat(n - md.length)) : 'p'.repeat(n - md.length) + md
+      const full = pad(30_000), room = pad(29_999)
+      expect(Buffer.byteLength(full)).toBe(30_000)
+      expect(await richEditParse(full)).toBe(full)
+      const calls: Record<string, unknown>[] = []
+      await editRich({ raw: raw(calls), chatId: '1', messageId: 7, text: full })
+      await editRich({ raw: raw(calls), chatId: '1', messageId: 7, text: room })
+      expect(calls).toEqual([
+        { chat_id: '1', message_id: 7, rich_message: { markdown: full } },
+        { chat_id: '1', message_id: 7, rich_message: { markdown: richMarkdown(room) } },
+      ])
+      expect(richMarkdown(room)).not.toBe(room)
+    }
+  })
+
+  // n one-word paragraphs, each a block.
+  const words = (n: number) => 'w\n\n'.repeat(n)
+  const pair = 'para\n| a | b |\n|---|---|'
+
+  test('blocks edit: an edit of 400 blocks, counted as Telegram counts them, carries the line; of 401, it is one rich edit as written', async () => {
+    // n paragraphs, then the paragraph, the table and its row: n + 3 blocks.
+    const calls: Record<string, unknown>[] = []
+    await editRich({ raw: raw(calls), chatId: '1', messageId: 7, text: words(397) + pair })
+    await editRich({ raw: raw(calls), chatId: '1', messageId: 7, text: words(398) + pair })
+    expect(calls).toEqual([
+      { chat_id: '1', message_id: 7, rich_message: { markdown: words(397) + 'para\n\n| a | b |\n|---|---|' } },
+      { chat_id: '1', message_id: 7, rich_message: { markdown: words(398) + pair } },
+    ])
+    expect(await richEditParse(words(398) + pair)).toBe(words(398) + pair)
+  })
+
+  test('blocks edit over the budget: an edit of 600 top-level blocks is still one rich edit, as main sends it', async () => {
+    const calls: Record<string, unknown>[] = []
+    await editRich({ raw: raw(calls), chatId: '1', messageId: 7, text: words(600) + pair })
+    expect(calls).toEqual([{ chat_id: '1', message_id: 7, rich_message: { markdown: words(600) + pair } }])
+  })
+
+  test('blocks nested: list items, their paragraphs and table rows count, though the list is one top-level block', () => {
+    // n paragraphs, a list (1) of 101 items (101), their paragraphs (101), the table (1) and its row (1): n + 205.
+    const list = (n: number) => words(n) + '- a\n  | x | y |\n  |---|---|\n' + '- b\n'.repeat(100)
+    for (const [n, line] of [[195, true], [196, false]] as const) {
+      const md = list(n), sent = md.trimEnd()
+      const parts = richParts(md)
+      expect([n, parts.length]).toEqual([n, 1])
+      expect([n, parts[0]!.rich]).toEqual([n, line ? sent.replace('- a\n', '- a\n\n') : sent])
+    }
+    // A table's rows: n paragraphs, the paragraph, the table, its head row and 10 rows: n + 13.
+    const rows = (n: number) => words(n) + pair + '\n| 1 | 2 |'.repeat(10)
+    expect(richParts(rows(387))[0]!.rich).toBe(richMarkdown(rows(387)))
+    expect(richParts(rows(388))[0]!.rich).toBe(rows(388))
+  })
+
+  test('blocks details: one <details> section over 400 blocks is one part as written; at 400, it carries its line', () => {
+    // The section (1), the summary line's paragraph (1), n paragraphs, the paragraph, the table and its row: n + 5.
+    const sec = (n: number) => '<details><summary>S</summary>\n' + words(n) + 'Text\n| a | b |\n|---|---|\n</details>'
+    expect(richParts(sec(395))).toEqual([{ rich: sec(395).replace('Text\n', 'Text\n\n'), plain: sec(395) }])
+    expect(richParts(sec(396))).toEqual([{ rich: sec(396), plain: sec(396) }])
+  })
+
+  test('blocks html: raw HTML counts two blocks per tag', () => {
+    // The paragraph, the table and its row (3), <div>x</div> (4) and n paragraphs: n + 7.
+    const md = (n: number) => pair + '\n\n<div>x</div>\n\n' + words(n).trimEnd()
+    expect(richParts(md(393))[0]!.rich).toBe(richMarkdown(md(393)))
+    expect(richParts(md(394))[0]!.rich).toBe(md(394))
+  })
+
+  test('blocks image: a Markdown image counts two blocks, inside raw HTML too', () => {
+    // The pair (3), the image's paragraph (1) and the image (2), and n paragraphs: n + 6.
+    const md = (n: number) => pair + '\n\n![](https://example.com/p.jpg)\n\n' + words(n).trimEnd()
+    expect(richParts(md(394))[0]!.rich).toBe(richMarkdown(md(394)))
+    expect(richParts(md(395))[0]!.rich).toBe(md(395))
+    // The pair (3), a collage's two tags and two images, two each (8), and n paragraphs: n + 11.
+    const col = (n: number) => pair + '\n\n<tg-collage>\n![](https://example.com/a.jpg)\n![](https://example.com/b.jpg)\n</tg-collage>\n\n' + words(n).trimEnd()
+    expect(richParts(col(389))[0]!.rich).toBe(richMarkdown(col(389)))
+    expect(richParts(col(390))[0]!.rich).toBe(col(390))
+  })
+
+  test('blocks cut: a list piece after a cut counts its list again', () => {
+    // The first item fills a part; the second piece holds k items (2 each) and the item
+    // with the table (4), and its list opens again: 2k + 5.
+    const md = (k: number) => '- ' + 'x'.repeat(996) + '\n' + '- w\n'.repeat(k) + '- a\n  | x | y |\n  |---|---|'
+    for (const [k, line] of [[197, true], [198, false]] as const) {
+      const parts = richParts(md(k), { bytes: 1000, blocks: 400 })
+      expect([k, parts.length, parts[0]!.plain.length]).toEqual([k, 2, 998])
+      const second = parts[1]!.plain
+      expect([k, parts[1]!.rich]).toEqual([k, line ? second.replace('- a\n', '- a\n\n') : second])
+      // The same piece in the middle, a third item filling a part after it.
+      const three = richParts(md(k) + '\n- ' + 'y'.repeat(996), { bytes: 1000, blocks: 400 })
+      expect([k, three.length, three[1]!.plain]).toEqual([k, 3, second])
+      expect([k, three[1]!.rich]).toEqual([k, line ? second.replace('- a\n', '- a\n\n') : second])
+    }
+  })
+
+  test('editRich carries the blank line', async () => {
+    const calls: Record<string, unknown>[] = []
+    await editRich({ raw: raw(calls), chatId: '1', messageId: 7, text: 'para\n| a | b |\n|---|---|' })
+    expect(calls).toEqual([{ chat_id: '1', message_id: 7, rich_message: { markdown: 'para\n\n| a | b |\n|---|---|' } }])
   })
 })
