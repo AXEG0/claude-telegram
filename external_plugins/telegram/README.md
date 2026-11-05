@@ -641,7 +641,13 @@ The server parses the Markdown as Telegram reads it, Markdown inside `<details>`
 included, and sends it through `sendRichMessage` and `editMessageText`. A `$` in
 text goes out escaped, so `$HOME/$USER` stays text rather than a formula, while
 code and URLs keep theirs; formulas go in `<tg-math>`. A tag that is not HTML,
-such as the `<String>` in `Vec<String>`, goes out as text.
+such as the `<String>` in `Vec<String>`, goes out as text. A table on the line
+right after a paragraph, which Telegram would show as part of that paragraph,
+gets one blank line above it, quote markers included, unless that would take its
+part past the part's size or block limit or the table past Telegram's 20 columns
+or 16 levels, or the table sits where Telegram's reading was never checked, such
+as inside raw HTML or with a picture in a cell; such a table goes out as
+written.
 
 A long reply goes out in parts cut between top-level blocks, each within the
 size and block count Telegram renders whole. A `<details>` section stays in one
