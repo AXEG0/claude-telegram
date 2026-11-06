@@ -1310,10 +1310,12 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     from = calls(t.dir).length
     expect((await edit('\u030aone\u0333 two\x00three\u033f\u202b')).content[0].text).toBe(edited)
     expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', 'one two three']])
-    // U+2060 alone stays, as Telegram kept it.
-    from = calls(t.dir).length
-    expect((await edit('\u2060')).content[0].text).toBe(edited)
-    expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', '\u2060']])
+    // U+2060 alone stays, and so does U+E0080, as Telegram kept them.
+    for (const kept of ['\u2060', '\u{e0080}']) {
+      from = calls(t.dir).length
+      expect((await edit(kept)).content[0].text).toBe(edited)
+      expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', kept]])
+    }
     // A no-break space or U+200B beside anything else stays: Telegram kept a
     // no-break space at each end, where JavaScript's own trim would remove it.
     from = calls(t.dir).length
@@ -1349,7 +1351,8 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     // U+FEFF and U+2009, each alone, with a message that has no caption, so
     // the edit would delete the text.
     for (const text of ['  \n ', '', ' \t\r ', '\r\n\t', '\x01\u2028\x0b\u202e\x1f', '\u0333', '\u00a0', '\u200b', ' \u00a0\u200b\n\u0333 ',
-      '\u202f', '\u200c', '\ufeff', '\u2009', '\u3000\u2800\u200d\u200e\u200f\u2000\u200a']) {
+      '\u202f', '\u200c', '\ufeff', '\u2009', '\u3000\u2800\u200d\u200e\u200f\u2000\u200a',
+      '\u1680', '\u180e', '\u{e0000}', '\u{e007f}', '\ufffc\u205f\u2005\u{e0041}']) {
       expect(failure(await edit(text))).toBe('edit_message failed: a caption needs text once its ends are trimmed; nothing was edited')
     }
     expect(calls(t.dir).slice(from)).toEqual([])
