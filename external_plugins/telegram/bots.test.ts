@@ -691,17 +691,44 @@ describe('a reply with files to a bot', () => {
     expect(botReply('t', files(21)).groups.map(g => g.length)).toEqual([10, 10, 1])
   })
 
-  test('carries a text of up to 1024 characters as the first file\'s caption, a longer one after the files, and none that is empty once trimmed', () => {
+  test('carries a text of up to 1024 characters as the first file\'s caption, kept and counted as Telegram keeps and counts a caption, a longer one after the files, and none that is empty as a caption', () => {
+    const one = (caption: string) => ({ groups: [files(1)], caption, pieces: [] })
     expect(botReply('  the files\n', files(2))).toEqual({ groups: [files(2)], caption: 'the files', pieces: [] })
-    expect(botReply('x'.repeat(1024), files(1))).toEqual({ groups: [files(1)], caption: 'x'.repeat(1024), pieces: [] })
+    expect(botReply('x'.repeat(1024), files(1))).toEqual(one('x'.repeat(1024)))
     expect(botReply('x'.repeat(1025), files(1))).toEqual({ groups: [files(1)], pieces: ['x'.repeat(1025)] })
     expect(botReply('', files(1))).toEqual({ groups: [files(1)], pieces: [] })
     expect(botReply(' \n \n', files(1))).toEqual({ groups: [files(1)], pieces: [] })
-    // Telegram trims only spaces and line breaks.
-    expect(telegramTrim('\t a b \n')).toBe('\t a b')
-    // So a tab at each end counts toward the 1024, and the text follows the file.
-    const tabbed = '\t' + 'x'.repeat(1023) + '\t'
-    expect(botReply(tabbed, files(1))).toEqual({ groups: [files(1)], pieces: [tabbed] })
+    // Telegram drops every carriage return and turns every tab into a space,
+    // then trims spaces and line breaks from both ends, as api.telegram.org
+    // answered a live read: it kept '\tx\t' as 'x' and 'a\rb' as 'ab'.
+    expect(telegramTrim('\tx\t')).toBe('x')
+    expect(telegramTrim('a\rb')).toBe('ab')
+    expect(telegramTrim('\r\n\ta\tb\r\n \r')).toBe('a b')
+    expect(botReply('a\rb', files(1))).toEqual(one('ab'))
+    expect(botReply('\tthe\tnote\t', files(1))).toEqual(one('the note'))
+    // A text of tabs and carriage returns is empty as a caption: Telegram
+    // answered a caption edit to ' \t\r ' with no caption.
+    expect(botReply(' \t\r ', files(1))).toEqual({ groups: [files(1)], pieces: [] })
+    // Any other character stays and counts, such as a no-break space, which
+    // JavaScript's own trim would remove.
+    expect(botReply(' \t\u00a0\r\n', files(1))).toEqual(one('\u00a0'))
+    expect(botReply('\u00a0' + 'x'.repeat(1024), files(1))).toEqual({ groups: [files(1)], pieces: ['\u00a0' + 'x'.repeat(1024)] })
+    // The 1024 counts what Telegram keeps, in characters (code points): it
+    // took 1024 characters between two tabs, and 1024 followed by a carriage
+    // return, and 1024 characters outside the Basic Multilingual Plane, 2,048
+    // UTF-16 units, and refused 1025 of those.
+    expect(botReply('\t' + 'x'.repeat(1024) + '\t', files(1))).toEqual(one('x'.repeat(1024)))
+    expect(botReply('x'.repeat(1024) + '\r', files(1))).toEqual(one('x'.repeat(1024)))
+    // 1,048 UTF-16 units, and 1,024 characters once its carriage returns go.
+    const lines = Array.from({ length: 25 }, () => 'l'.repeat(40))
+    expect(botReply(lines.join('\r\n'), files(1))).toEqual(one(lines.join('\n')))
+    expect(botReply('\u{1F600}'.repeat(1024), files(1))).toEqual(one('\u{1F600}'.repeat(1024)))
+    expect(botReply('\u{1F600}'.repeat(1025), files(1))).toEqual({ groups: [files(1)], pieces: ['\u{1F600}'.repeat(1025)] })
+    // A longer text goes as text messages, as before: only spaces and line
+    // breaks are trimmed from its ends, and its tabs and carriage returns go
+    // as written.
+    const long = '\t' + 'x'.repeat(600) + '\r\n\t' + 'y'.repeat(600) + '\r'
+    expect(botReply(` \n${long}\n `, files(1))).toEqual({ groups: [files(1)], pieces: [long] })
   })
 })
 
@@ -721,12 +748,12 @@ describe('a long text to a bot', () => {
     const pieces = botTextPieces(text)
     expect(glued(pieces)).toBe(text)
     expect(pieces[0]!.length).toBe(4094)
-    for (const p of pieces) expect(telegramTrim(p)).toBe(p)
+    for (const p of pieces) expect(p).not.toMatch(/^[ \n]|[ \n]$/)
     // Prose: every cut between two letters of a word.
     const prose = 'the quick brown fox jumps over the lazy dog\n'.repeat(400).trim()
     const cut = botTextPieces(prose)
     expect(glued(cut)).toBe(prose)
-    for (const p of cut) expect(telegramTrim(p)).toBe(p)
+    for (const p of cut) expect(p).not.toMatch(/^[ \n]|[ \n]$/)
     for (const p of cut.slice(0, -1)) {
       expect(p.length).toBeLessThanOrEqual(BOT_TEXT_MAX)
       expect(p.length).toBeGreaterThanOrEqual(FRAGMENT_CHARS)

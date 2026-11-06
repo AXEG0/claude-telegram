@@ -277,11 +277,12 @@ export function sendStyle(format: string, toBot: boolean): Style {
 // so the files go first, the whole upload before anything else, and the text
 // right after them. Every file goes as a document, so up to ten files make one
 // album: more go as albums of ten, and a single file left over by itself. The
-// text, as Telegram keeps it once it trims spaces and line breaks from both
-// ends, rides as the first file's caption when it is 1024 characters or fewer
-// (Telegram's caption limit), and nothing goes for a text that is empty once
-// trimmed. A longer text follows the files in pieces of 4096 characters at
-// most (Telegram's text limit), whatever textChunkLimit and chunkMode say.
+// text, as Telegram keeps a caption (see telegramTrim), rides as the first
+// file's caption when it is 1024 characters or fewer (Telegram's caption
+// limit, see captionLength), and nothing goes for a text that is empty as a
+// caption. A longer text follows the files in pieces of 4096 characters at
+// most (Telegram's text limit), whatever textChunkLimit and chunkMode say, cut
+// from the text with only spaces and line breaks trimmed from its ends.
 export const BOT_ALBUM_MAX = 10
 export const BOT_CAPTION_MAX = 1024
 export const BOT_TEXT_MAX = 4096
@@ -289,16 +290,28 @@ export type BotReply = { groups: string[][]; caption?: string; pieces: string[] 
 export function botReply(text: string, files: string[]): BotReply {
   const groups: string[][] = []
   for (let i = 0; i < files.length; i += BOT_ALBUM_MAX) groups.push(files.slice(i, i + BOT_ALBUM_MAX))
-  const kept = telegramTrim(text)
-  if (kept === '') return { groups, pieces: [] }
-  if (kept.length <= BOT_CAPTION_MAX) return { groups, caption: kept, pieces: [] }
-  return { groups, pieces: botTextPieces(kept) }
+  const caption = telegramTrim(text)
+  if (caption === '') return { groups, pieces: [] }
+  if (captionLength(caption) <= BOT_CAPTION_MAX) return { groups, caption, pieces: [] }
+  return { groups, pieces: botTextPieces(textTrim(text)) }
 }
 
-// Telegram removes spaces and line breaks from both ends of a text or caption
-// it is sent.
+// Telegram removes spaces and line breaks from both ends of a text message it
+// is sent.
 const TRIMMED = /^[ \n]+|[ \n]+$/g
-export const telegramTrim = (text: string): string => text.replace(TRIMMED, '')
+const textTrim = (text: string): string => text.replace(TRIMMED, '')
+
+// A caption as Telegram keeps it, as api.telegram.org answered a live read: it
+// drops every carriage return and turns every tab into a space, then removes
+// spaces and line breaks from both ends, so '\tx\t' is kept as 'x' and 'a\rb'
+// as 'ab'. A caption with nothing left is no caption, so an edit to one would
+// delete the text.
+export const telegramTrim = (text: string): string => textTrim(text.replace(/\r/g, '').replace(/\t/g, ' '))
+
+// How long Telegram counts a caption: in characters (code points), so a
+// character outside the Basic Multilingual Plane, two UTF-16 units, counts
+// once. It took a caption of 1024 such characters and refused one of 1025.
+export const captionLength = (caption: string): number => [...caption].length
 
 // A text cut into pieces Telegram keeps whole, and the receiving plugin glues
 // back with nothing between them. Each cut falls between two characters that

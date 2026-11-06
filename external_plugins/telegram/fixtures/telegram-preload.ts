@@ -325,12 +325,28 @@ async function holdPoll(payload: Record<string, unknown>, signal: AbortSignal | 
 
 const SENDS = ['sendMessage', 'sendPhoto', 'sendDocument', 'sendRichMessage', 'sendMediaGroup']
 
-// Telegram trims spaces and line breaks from both ends of a text or caption,
-// and refuses a text message, or a text edit, with nothing left.
+// Telegram trims spaces and line breaks from both ends of a text, and refuses
+// a text message, or a text edit, with nothing left.
 const trimmed = (text: string) => text.replace(/^[ \n]+|[ \n]+$/g, '')
 const EMPTY_TEXT = { error_code: 400, description: 'Bad Request: message text is empty' }
 const emptyText = (method: string, payload: Record<string, unknown>) =>
   (method === 'sendMessage' || method === 'editMessageText') && typeof payload.text === 'string' && trimmed(payload.text) === ''
+
+// A caption as api.telegram.org keeps it, read live with an installation's bot
+// on 2026-11-06: it drops every carriage return and turns every tab into a
+// space, then trims spaces and line breaks from both ends. It kept '\tx\t' as
+// 'x' and 'a\rb' as 'ab', and answered a caption edit to ' \t\r ' with a
+// message that has no caption. It counts a caption in characters (code
+// points): a send took 1024 characters outside the Basic Multilingual Plane
+// and refused 1025 of them, or 1025 'x', as too long.
+const captionKept = (caption: string) => trimmed(caption.replace(/\r/g, '').replace(/\t/g, ' '))
+const LONG_CAPTION = { error_code: 400, description: 'Bad Request: message caption is too long' }
+const longCaption = (method: string, payload: Record<string, unknown>) => {
+  const captions = method === 'sendMediaGroup' ? (payload.media as Record<string, unknown>[]).map(m => m.caption)
+    : method === 'sendDocument' || method === 'sendPhoto' ? [payload.caption]
+    : []
+  return captions.some(c => typeof c === 'string' && [...captionKept(c)].length > 1024)
+}
 
 // A sent message's own fields as Telegram answers a send: its text, or its
 // file and the caption Telegram kept, none when it is empty once trimmed. A
@@ -340,7 +356,7 @@ function contentOf(method: string, sent: Record<string, unknown>, uncaptioned: b
   if (method === 'sendRichMessage') return {}
   const type = method === 'sendMediaGroup' ? sent.type : method === 'sendPhoto' ? 'photo' : 'document'
   const name = String(method === 'sendMediaGroup' ? sent.media : sent[String(type)]).replace(/^file:/, '')
-  const kept = typeof sent.caption === 'string' && !uncaptioned ? trimmed(sent.caption) : ''
+  const kept = typeof sent.caption === 'string' && !uncaptioned ? captionKept(sent.caption) : ''
   return {
     ...(type === 'photo'
       ? { photo: [{ file_id: `file-of-${name}`, file_unique_id: `u-${name}`, width: 1, height: 1 }] }
@@ -386,7 +402,7 @@ function bridgeSend(method: string, payload: Record<string, unknown>): void {
   const chat = { id: ME.id, type: 'private', first_name: ME.first_name, username: ME.username }
   const file = (type: unknown, media: unknown, caption: unknown, n: number) => {
     const name = String(media).replace(/^file:/, '')
-    const kept = typeof caption === 'string' ? trimmed(caption) : ''
+    const kept = typeof caption === 'string' ? captionKept(caption) : ''
     return {
       ...(type === 'photo'
         ? { photo: [{ file_id: `file-of-${name}`, file_unique_id: `u${n}`, width: 1, height: 1 }] }
@@ -437,7 +453,7 @@ const answerCall = (async (url: string | URL | Request, options: RequestInit | u
     appendFileSync(process.env.TELEGRAM_TEST_API_LOG!, JSON.stringify({ pid: process.pid, method, payload, at: Date.now(), failed: rule.network }) + '\n')
     throw Object.assign(new TypeError(`${rule.network}: Unable to connect. Is the computer able to access the url?`), { code: rule.network })
   }
-  const refusal = emptyText(method, payload) ? EMPTY_TEXT : editRefused(method, payload) ?? (rule?.lands ? undefined : rule?.error)
+  const refusal = emptyText(method, payload) ? EMPTY_TEXT : longCaption(method, payload) ? LONG_CAPTION : editRefused(method, payload) ?? (rule?.lands ? undefined : rule?.error)
   if (rule?.preMs) await Bun.sleep(rule.preMs)
   const to = n && !refusal ? recipient(payload.chat_id) : undefined
   if (to && nextId !== undefined && !redirectNumbers(payload.chat_id)) to.message_id = nextId++
@@ -477,7 +493,7 @@ const answerCall = (async (url: string | URL | Request, options: RequestInit | u
   const captioned = method === 'editMessageCaption' ? editedOf(payload) : undefined
   if (captioned?.kind === 'file') {
     const { caption: _, ...file } = captioned.content
-    const kept = typeof payload.caption === 'string' ? trimmed(payload.caption) : ''
+    const kept = typeof payload.caption === 'string' ? captionKept(payload.caption) : ''
     captioned.content = { ...file, ...(kept ? { caption: kept } : {}) }
     result = { message_id: payload.message_id, date: 0, edit_date: 0, chat: captioned.chat, ...captioned.content }
   }
