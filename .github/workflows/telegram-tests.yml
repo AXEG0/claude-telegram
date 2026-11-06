@@ -34,15 +34,29 @@ jobs:
       # instead of waiting out real timers. The suite's bound is 3 minutes: a
       # run that reaches it fails this step. Every run prints its time and the
       # runner's processors, and a failing test still fails the step.
-      - name: bun run test, within 3 minutes
+      # The suite runs with an empty temp folder of its own, and each entry it
+      # leaves there, on a passing run or a failing one, is named and fails the
+      # step: a test removes every folder it makes when it ends.
+      - name: bun run test, within 3 minutes, leaving its temp folder empty
         run: |
           lscpu
           bound_ms=180000
+          suite_tmp=$(mktemp -d "$RUNNER_TEMP/suite-tmp.XXXXXX")
           start=$(date +%s%N)
           status=0
-          bun run test || status=$?
+          TMPDIR="$suite_tmp" bun run test || status=$?
           took_ms=$(( ($(date +%s%N) - start) / 1000000 ))
           took="$((took_ms / 1000)).$(printf '%03d' $((took_ms % 1000)))"
+          left=$(find "$suite_tmp" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
+          if [ -n "$left" ]; then
+            echo "::error title=Test suite left entries in its temp folder::The suite left $(printf '%s\n' "$left" | wc -l) entries in its temp folder; each is named below."
+            printf '%s\n' "$left" | while IFS= read -r entry; do
+              echo "::error::Left in the temp folder: $entry"
+            done
+            status=1
+          else
+            echo "The suite left its temp folder empty."
+          fi
           if [ "$took_ms" -ge "$bound_ms" ]; then
             echo "::error title=Test suite over its bound::The suite took ${took} s on $(nproc) cores; its bound is $((bound_ms / 1000)) s."
             exit 1

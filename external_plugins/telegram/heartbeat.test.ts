@@ -1,13 +1,18 @@
-import { describe, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, readdirSync, readFileSync } from 'fs'
+import { afterEach, describe, expect, test } from 'bun:test'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { Bot, GrammyError } from 'grammy'
 import { heartbeatTransformer, writeHeartbeat } from './heartbeat.ts'
 
+// Each test's folders go when it ends.
+const made: string[] = []
 function dir(): string {
-  return mkdtempSync(join(tmpdir(), 'tg-heartbeat-'))
+  const d = mkdtempSync(join(tmpdir(), 'tg-heartbeat-'))
+  made.push(d)
+  return d
 }
+afterEach(() => { for (const dir of made.splice(0)) rmSync(dir, { recursive: true, force: true }) })
 
 // A real grammy Bot whose HTTP calls return the given Bot API bodies in turn,
 // so the transformer runs inside grammy's own call path.

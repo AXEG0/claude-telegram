@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -215,6 +215,7 @@ describe('the record file', () => {
     dirs.push(d)
     return d
   }
+  afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }) })
   const store = (dir: string, now = () => 1791544879112, log?: (l: string) => void) =>
     createButtonStore({ file: join(dir, 'buttons.json'), lockFile: join(dir, 'buttons.lock'), now, log })
 
@@ -227,7 +228,6 @@ describe('the record file', () => {
     // Another clock does not restart the counter of a record that exists.
     expect(await store(dir, () => 5).withLock(held => held.update(rec => reserve(rec, '1', [['Yes']])))).toBe(1791544879113)
     expect(readdirSync(dir).filter(f => f.endsWith('.tmp'))).toEqual([])
-    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true })
   })
 
   test('an unreadable record is moved aside and a fresh one starts', async () => {
@@ -247,7 +247,6 @@ describe('the record file', () => {
     writeFileSync(join(dir, 'buttons.json'), JSON.stringify({ next: 9, entries: [{ chat: '1', message: 2, keyboard: 3, rows: [['Yes']], textSha: 7 }] }))
     expect(await s.withLock(held => held.read())).toEqual({ next: 9, entries: [] })
     expect(lines).toEqual(Array(3).fill('buttons.json is unreadable, moved aside. Starting fresh.'))
-    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true })
   })
 
   test('one holder at a time, the same process’s other holders included, and a wait never stops the event loop', async () => {
@@ -271,7 +270,6 @@ describe('the record file', () => {
     const release = await lock(join(dir, 'buttons.lock'))
     release()
     await s.withLock(() => {})
-    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true })
   })
 
   test('the event names the label, the message, the presser and the time', () => {

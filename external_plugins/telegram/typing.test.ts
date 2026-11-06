@@ -1,11 +1,16 @@
-import { describe, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, utimesSync, writeFileSync } from 'fs'
+import { afterEach, describe, expect, test } from 'bun:test'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { ancestorPids, BUSY_EVENTS, busyFiles, CAP_MS, createTyping, hookInput, markerFiles, PROMPT_GRACE_MS, readBusyAt, readTurnEnd, subagentFiles, TURN_END_EVENTS, writeTurnEnd } from './typing.ts'
 import failureHooks from './fixtures/failure-hooks.json'
 import turnHooks from './fixtures/turn-hooks.json'
 import { runRegistered } from './fixtures/hooks.ts'
+
+// Each test's folders go when it ends.
+const made: string[] = []
+const scratch = () => { const dir = mkdtempSync(join(tmpdir(), 'typing-')); made.push(dir); return dir }
+afterEach(() => { for (const dir of made.splice(0)) rmSync(dir, { recursive: true, force: true }) })
 
 function harness(capMs = 60_000, chat?: string) {
   let t = 1_000
@@ -352,7 +357,7 @@ describe('turn-end markers', () => {
   })
 
   test('the latest end across the files is the turn end', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'typing-'))
+    const dir = scratch()
     const [a, b] = markerFiles(dir, 'sess', [4242])
     expect(readTurnEnd([a!, b!])).toBe(0)
     writeTurnEnd([a!], 5)
@@ -368,7 +373,7 @@ describe('hooks/busy.ts', () => {
   })
 
   test('touches busy-<Claude Code pid> for Claude\'s own call, whatever its tool input holds', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'typing-'))
+    const dir = scratch()
     const input = JSON.stringify({ ...turnHooks.pre_tool_use, tool_name: 'mcp__a2a__send', tool_input: { agent_id: 'peer' } })
     expect(run(input, { TELEGRAM_STATE_DIR: dir, CLAUDE_PID: '4242' }).exitCode).toBe(0)
     expect(readBusyAt(busyFiles(dir, [4242]))).toBeGreaterThan(0)
@@ -376,7 +381,7 @@ describe('hooks/busy.ts', () => {
   })
 
   test('a subagent\'s call touches subagent-<pid> instead', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'typing-'))
+    const dir = scratch()
     const input = JSON.stringify(turnHooks.subagent_pre_tool_use)
     expect(run(input, { TELEGRAM_STATE_DIR: dir, CLAUDE_PID: '4242' }).exitCode).toBe(0)
     expect(readdirSync(join(dir, 'turns'))).toEqual(['subagent-4242'])
@@ -403,7 +408,7 @@ describe('hooks/turn-end.ts', () => {
   }
 
   test('writes the end time for the session id and the pid', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'typing-'))
+    const dir = scratch()
     const before = Date.now()
     const r = runHook(JSON.stringify({ session_id: 'sess-1', hook_event_name: 'Stop' }), {
       TELEGRAM_STATE_DIR: dir,
@@ -415,7 +420,7 @@ describe('hooks/turn-end.ts', () => {
   })
 
   test('a subagent\'s StopFailure writes no turn end; the main session\'s StopFailure still does', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'typing-'))
+    const dir = scratch()
     const env = { TELEGRAM_STATE_DIR: dir, CLAUDE_PID: '4242' }
     expect(runHook(JSON.stringify(failureHooks.subagent_stop_failure), env).exitCode).toBe(0)
     expect(existsSync(join(dir, 'turns'))).toBe(false)
@@ -424,7 +429,7 @@ describe('hooks/turn-end.ts', () => {
     expect(readdirSync(join(dir, 'turns')).sort()).toEqual(['pid-4242', `session-${failureHooks.main_stop_failure.session_id}`])
     expect(Number(readFileSync(join(dir, 'turns', 'pid-4242'), 'utf8'))).toBeGreaterThanOrEqual(before)
     // Only a StopFailure that names a subagent is skipped.
-    const other = mkdtempSync(join(tmpdir(), 'typing-'))
+    const other = scratch()
     const { agent_id, session_id } = failureHooks.subagent_stop_failure
     expect(runHook(JSON.stringify({ session_id, agent_id, hook_event_name: 'Stop' }), { TELEGRAM_STATE_DIR: other, CLAUDE_PID: '4242' }).exitCode).toBe(0)
     expect(readdirSync(join(other, 'turns')).sort()).toEqual(['pid-4242', `session-${session_id}`])
@@ -473,7 +478,7 @@ describe('the marking hooks act only on hook input', () => {
   // A state folder holding this session's marks from an hour ago, and a mark
   // older than a week, which the turn-end hook's sweep deletes.
   function seeded(): string {
-    const dir = mkdtempSync(join(tmpdir(), 'typing-'))
+    const dir = scratch()
     const turns = join(dir, 'turns')
     mkdirSync(turns)
     const hourAgo = new Date(Date.now() - 60 * 60 * 1000)
@@ -549,13 +554,13 @@ describe('the marking hooks act only on hook input', () => {
       })
 
       test.each(notHookInput)('creates no state folder, given %s', (_, stdin) => {
-        const dir = join(mkdtempSync(join(tmpdir(), 'typing-')), 'state')
+        const dir = join(scratch(), 'state')
         expect(run(script, stdin, dir).exitCode).toBe(0)
         expect(existsSync(dir)).toBe(false)
       })
 
       test.each(events.map(e => [e]))('marks the session on its recorded %s input, run as hooks.json runs it', event => {
-        const dir = mkdtempSync(join(tmpdir(), 'typing-'))
+        const dir = scratch()
         const before = Date.now()
         // StopFailure also runs hooks/subagent.ts, which records nothing for the main session's.
         expect(new Set(runRegistered(event, recorded[event]!, { TELEGRAM_STATE_DIR: dir, CLAUDE_PID: '4242' }))).toEqual(new Set([0]))
@@ -577,7 +582,7 @@ describe('the marking hooks act only on hook input', () => {
       ]
       test.each(events.flatMap(event => forms.map(([form, make]) => [event, form, make] as const)))(
         'marks the session on its %s input as %s sends it', (event, _, make) => {
-          const dir = mkdtempSync(join(tmpdir(), 'typing-'))
+          const dir = scratch()
           const input = make(recorded[event]!)
           expect(new Set(runRegistered(event, input, { TELEGRAM_STATE_DIR: dir, CLAUDE_PID: '4242' }))).toEqual(new Set([0]))
           const turns = join(dir, 'turns')
@@ -590,7 +595,7 @@ describe('the marking hooks act only on hook input', () => {
 
   test.each([['PreToolUse', turnHooks.subagent_pre_tool_use], ['PostToolUse', turnHooks.subagent_post_tool_use]] as const)(
     'a subagent\'s recorded %s input marks it working on', (event, input) => {
-      const dir = mkdtempSync(join(tmpdir(), 'typing-'))
+      const dir = scratch()
       expect(runRegistered(event, input, { TELEGRAM_STATE_DIR: dir, CLAUDE_PID: '4242' })).toEqual([0])
       expect(readdirSync(join(dir, 'turns'))).toEqual(['subagent-4242'])
     })

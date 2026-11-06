@@ -1,8 +1,13 @@
 import { afterEach, describe, expect, jest, test } from 'bun:test'
-import { mkdtempSync, readFileSync, writeFileSync } from 'fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { FILE_LIMIT_MS, fetchPhoto, STT_MAX_BYTES, sttConfig, transcribe, transcribeTelegramFile, uploadName, type SttConfig } from './stt.ts'
+
+// Each test's folders go when it ends.
+const made: string[] = []
+const scratch = () => { const dir = mkdtempSync(join(tmpdir(), 'stt-')); made.push(dir); return dir }
+afterEach(() => { for (const dir of made.splice(0)) rmSync(dir, { recursive: true, force: true }) })
 
 const cfg: SttConfig = { apiKey: 'k', model: 'gpt-transcribe', endpoint: 'https://stt.test/v1' }
 
@@ -65,7 +70,7 @@ describe('transcribeTelegramFile', () => {
   const api = { getFile: async (_id: string, _signal?: AbortSignal) => ({ file_path: 'voice/file_1.oga', file_unique_id: 'u1' }) }
 
   test('downloads into the inbox and returns the transcript', async () => {
-    const inboxDir = mkdtempSync(join(tmpdir(), 'stt-'))
+    const inboxDir = scratch()
     const f = fakeFetch(url =>
       url.startsWith('https://api.telegram.org/file/botTOKEN/voice/file_1.oga')
         ? new Response(new Uint8Array([9, 9, 9]))
@@ -83,7 +88,7 @@ describe('transcribeTelegramFile', () => {
     let asked = false
     const r = await transcribeTelegramFile({
       api: { getFile: async () => { asked = true; return {} } },
-      token: 'T', inboxDir: mkdtempSync(join(tmpdir(), 'stt-')), fileId: 'f', size: STT_MAX_BYTES + 1, cfg,
+      token: 'T', inboxDir: scratch(), fileId: 'f', size: STT_MAX_BYTES + 1, cfg,
     })
     expect(r.text).toBeUndefined()
     expect(r.reason).toBe(`file is ${STT_MAX_BYTES + 1} bytes`)
@@ -91,7 +96,7 @@ describe('transcribeTelegramFile', () => {
   })
 
   test('a slow transcription gives up at the limit, with the saved file', async () => {
-    const inboxDir = mkdtempSync(join(tmpdir(), 'stt-'))
+    const inboxDir = scratch()
     const impl = (async (input: string | URL | Request, init?: RequestInit) => {
       if (String(input).includes('api.telegram.org')) return new Response(new Uint8Array([1]))
       return new Promise<Response>((_, reject) => init?.signal?.addEventListener('abort', () => reject(init.signal!.reason)))
@@ -105,7 +110,7 @@ describe('transcribeTelegramFile', () => {
   })
 
   test('an API error comes back as the reason, so the message goes through untranscribed', async () => {
-    const inboxDir = mkdtempSync(join(tmpdir(), 'stt-'))
+    const inboxDir = scratch()
     const f = fakeFetch(url => (url.includes('api.telegram.org') ? new Response(new Uint8Array([1])) : new Response('no', { status: 500 })))
     const r = await transcribeTelegramFile({ api, token: 'T', inboxDir, fileId: 'f', mime: 'audio/ogg', cfg, fetchImpl: f.impl })
     expect(r.text).toBeUndefined()
@@ -118,7 +123,7 @@ describe('transcribeTelegramFile', () => {
         new Promise<{ file_path?: string }>((_, reject) => signal?.addEventListener('abort', () => reject(signal.reason))),
     }
     const t0 = Date.now()
-    const r = await transcribeTelegramFile({ api: hanging, token: 'T', inboxDir: mkdtempSync(join(tmpdir(), 'stt-')), fileId: 'f', mime: 'audio/ogg', cfg, limitMs: 200 })
+    const r = await transcribeTelegramFile({ api: hanging, token: 'T', inboxDir: scratch(), fileId: 'f', mime: 'audio/ogg', cfg, limitMs: 200 })
     expect(r.reason).toBe('getFile gave no answer within 0.2 s')
     expect(r.path).toBeUndefined()
     expect(Date.now() - t0).toBeLessThan(2000)
@@ -147,7 +152,7 @@ describe('the file work and its limit', () => {
     await turns()
     return done
   }
-  const inbox = () => mkdtempSync(join(tmpdir(), 'stt-'))
+  const inbox = () => scratch()
   const file = (path = 'voice/file_1.oga') => ({ file_path: path, file_unique_id: 'u1' })
 
   test('S1 getFile and the download answering at 45 s still give the transcript, with each step timed', async () => {

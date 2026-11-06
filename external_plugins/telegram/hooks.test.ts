@@ -2,10 +2,15 @@
 // Claude Code session, which inherits the session's CLAUDE_PID, with nothing,
 // text, an empty array, an empty object, an input for an event no hook runs
 // on, or closed stdin, writes nothing and answers nothing.
-import { describe, expect, test } from 'bun:test'
-import { mkdtempSync, readdirSync, readFileSync } from 'fs'
+import { afterEach, describe, expect, test } from 'bun:test'
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+
+// Each test's folders go when it ends.
+const made: string[] = []
+const scratch = () => { const dir = mkdtempSync(join(tmpdir(), 'hooks-')); made.push(dir); return dir }
+afterEach(() => { for (const dir of made.splice(0)) rmSync(dir, { recursive: true, force: true }) })
 
 const ROOT = import.meta.dir
 const hooks: Record<string, { hooks: { command: string }[] }[]> =
@@ -27,7 +32,7 @@ describe('a hook script run without hook input', () => {
 
   for (const command of commands) {
     test.each(notHookInput)(`${command} writes and prints nothing, given %s`, (_, stdin) => {
-      const dir = mkdtempSync(join(tmpdir(), 'hooks-'))
+      const dir = scratch()
       const r = Bun.spawnSync(['sh', '-c', command], {
         stdin: new TextEncoder().encode(stdin),
         env: { PATH: process.env.PATH!, HOME: process.env.HOME!, CLAUDE_PLUGIN_ROOT: ROOT, TELEGRAM_STATE_DIR: dir, CLAUDE_PID: '4242' },
@@ -41,7 +46,7 @@ describe('a hook script run without hook input', () => {
     // takes the same path as given nothing; this row guards a runtime whose
     // read throws instead.
     test(`${command} writes and prints nothing with its stdin closed`, () => {
-      const dir = mkdtempSync(join(tmpdir(), 'hooks-'))
+      const dir = scratch()
       const r = Bun.spawnSync(['sh', '-c', `${command} <&-`], {
         env: { PATH: process.env.PATH!, HOME: process.env.HOME!, CLAUDE_PLUGIN_ROOT: ROOT, TELEGRAM_STATE_DIR: dir, CLAUDE_PID: '4242' },
       })

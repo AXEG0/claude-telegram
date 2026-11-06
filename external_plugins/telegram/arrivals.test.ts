@@ -1,11 +1,15 @@
-import { describe, expect, test } from 'bun:test'
-import { appendFileSync, copyFileSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'fs'
+import { afterEach, describe, expect, test } from 'bun:test'
+import { appendFileSync, copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { ARRIVALS_BOUND, createArrivals, KEPT_MS, type ArrivalsIo, type DoneSeed } from './arrivals.ts'
 
 const T = 1_800_000_000_000
-const file = () => join(mkdtempSync(join(tmpdir(), 'tg-arrivals-')), 'arrivals.jsonl')
+// Each test's folders go when it ends.
+const made: string[] = []
+const scratch = () => { const dir = mkdtempSync(join(tmpdir(), 'tg-arrivals-')); made.push(dir); return dir }
+afterEach(() => { for (const dir of made.splice(0)) rmSync(dir, { recursive: true, force: true }) })
+const file = () => join(scratch(), 'arrivals.jsonl')
 const lines = (path: string) => readFileSync(path, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l))
 const update = (id: number, pad = 0) => ({ update_id: id, message: { message_id: id, date: T / 1000, text: `m${id}`, pad: 'x'.repeat(pad) } })
 const seed = (id: number): DoneSeed => ({ update_id: id, chat_id: '1', message_id: String(id), kind: 'text', arrived: T, queued: 0, handed: T, outcome: 'delivered' })
