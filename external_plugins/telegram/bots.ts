@@ -301,12 +301,17 @@ export function botReply(text: string, files: string[]): BotReply {
 const TRIMMED = /^[ \n]+|[ \n]+$/g
 const textTrim = (text: string): string => text.replace(TRIMMED, '')
 
-// A caption as Telegram keeps it, as api.telegram.org answered a live read: it
-// drops every carriage return and turns every tab into a space, then removes
-// spaces and line breaks from both ends, so '\tx\t' is kept as 'x' and 'a\rb'
-// as 'ab'. A caption with nothing left is no caption, so an edit to one would
-// delete the text.
-export const telegramTrim = (text: string): string => textTrim(text.replace(/\r/g, '').replace(/\t/g, ' '))
+// A caption as Telegram keeps it, as api.telegram.org answered live reads: it
+// turns every control character below a space but the line break into a
+// space, a tab included, and drops every carriage return and every character
+// from U+2028 to U+202E, then removes spaces and line breaks from both ends.
+// So '\tx\t' is kept as 'x', 'a\x0bb' as 'a b', and 'a\rb' and 'a\u2028b' as
+// 'ab'. Any other character is left alone: DEL, U+200B and a no-break space,
+// at the ends too, came back as sent. A caption with nothing left is no
+// caption, so an edit to one would delete the text.
+const SPACED = /[\x00-\x09\x0b\x0c\x0e-\x1f]/g
+const DROPPED = /[\r\u2028-\u202e]/g
+export const telegramTrim = (text: string): string => textTrim(text.replace(DROPPED, '').replace(SPACED, ' '))
 
 // How long Telegram counts a caption: in characters (code points), so a
 // character outside the Basic Multilingual Plane, two UTF-16 units, counts

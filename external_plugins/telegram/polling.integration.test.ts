@@ -1296,14 +1296,19 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     from = calls(t.dir).length
     expect((await edit(`  \n${most}\n  `)).content[0].text).toBe(edited)
     expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', most]])
-    // Telegram drops every carriage return and turns every tab into a space,
-    // then trims spaces and line breaks from both ends, as api.telegram.org
-    // answered a live read, and the edit sends what it keeps.
+    // Telegram turns every control character below a space but the line
+    // break into a space, a tab included, and drops every carriage return and
+    // every character from U+2028 to U+202E, then trims spaces and line breaks
+    // from both ends, as api.telegram.org answered live reads, and the edit
+    // sends what it keeps.
     from = calls(t.dir).length
     expect((await edit(' \n\tcorrected\r\nnote\tagain\t\r\n ')).content[0].text).toBe(edited)
     expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', 'corrected\nnote again']])
-    // Any other character stays, such as a no-break space, which
-    // JavaScript's own trim would remove.
+    from = calls(t.dir).length
+    expect((await edit('\x0bthe\x0cfinal\u2028\u202e note\x1f\u2029')).content[0].text).toBe(edited)
+    expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', 'the final note']])
+    // The rule leaves any other character alone: a no-break space, which
+    // Telegram kept at each end and JavaScript's own trim would remove.
     from = calls(t.dir).length
     expect((await edit(' \u00a0\t\r')).content[0].text).toBe(edited)
     expect(calls(t.dir).slice(from).map(c => [c.method, c.payload])).toEqual([
@@ -1317,6 +1322,7 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     const lines = Array.from({ length: 25 }, () => 'l'.repeat(40))
     for (const [text, kept] of [
       [` \t${'c'.repeat(1024)}\r\n`, 'c'.repeat(1024)],
+      [`\x01${'d'.repeat(512)}\u2028${'d'.repeat(512)}\u202e`, 'd'.repeat(1024)],
       [lines.join('\r\n'), lines.join('\n')],
       ['\u{1F600}'.repeat(1024), '\u{1F600}'.repeat(1024)],
     ]) {
@@ -1333,7 +1339,7 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     // A text that is empty as a caption makes no call: Telegram answered a
     // caption edit to ' \t\r ' with a message that has no caption, so the
     // edit would delete the text.
-    for (const text of ['  \n ', '', ' \t\r ', '\r\n\t']) {
+    for (const text of ['  \n ', '', ' \t\r ', '\r\n\t', '\x01\u2028\x0b\u202e\x1f']) {
       expect(failure(await edit(text))).toBe('edit_message failed: a caption needs text once its ends are trimmed; nothing was edited')
     }
     expect(calls(t.dir).slice(from)).toEqual([])
