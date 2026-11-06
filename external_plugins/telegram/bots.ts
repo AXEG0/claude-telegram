@@ -305,20 +305,25 @@ const textTrim = (text: string): string => text.replace(TRIMMED, '')
 // live read of api.telegram.org with an installation's bot, "code" is TDLib at
 // bc9c263e, the commit the Bot API server pins, and a part with neither says so.
 // - Every control character below a space but the line break becomes a space,
-//   a tab included. Read: the tab, 0x00, 0x01, 0x0B, 0x0C and 0x1F, so '\tx\t'
-//   is kept as 'x' and 'a\x0bb' as 'a b'. Code: clean_input_string
-//   (misc.cpp:76-160) for the rest of the range.
+//   a tab included. Read: 0x00, 0x01, 0x0B, 0x0C and 0x1F between characters,
+//   so 'a\x0bb' is kept as 'a b', and a tab at each end, so '\tx\t' is kept as
+//   'x'. Code: clean_input_string (misc.cpp:76-160) for the rest of the range,
+//   a tab between characters included (misc.cpp:97), which no read covered.
 // - Every carriage return, every character from U+2028 to U+202E and the
 //   combining marks U+030A, U+0333 and U+033F are dropped, so 'a\rb' is kept
 //   as 'ab'. Read: the carriage return, U+2028, U+2029, U+202A, U+202B, U+202E
 //   and each mark. Code: the same function for U+202C and U+202D.
-// - Spaces and line breaks are then trimmed from both ends. Read; code:
-//   MessageEntity.cpp:4530-4570.
+// - Spaces and line breaks are then trimmed from both ends. Read: spaces at the
+//   ends, the ones the clean step makes from a tab or a control character.
+//   Code: MessageEntity.cpp:4296-4298 and :4530-4570, a line break at an end
+//   included, which no read covered.
 // - A result of nothing but BLANK's characters, alone or mixed, is no caption.
-//   Read: each one alone, on a send or an edit, and one mix, U+00A0 then
-//   U+200B. Code: is_empty_string (misc.cpp:163-258), which TDLib applies when
-//   it reads the message back (MessageEntity.cpp:4574-4582 and :4614), for the
-//   other mixes. Each stays beside anything else. Read: a no-break space at
+//   Read: each one alone, on a send or an edit, but for the tags, of which
+//   U+E0000, U+E0001, U+E0020, U+E0041 and U+E007F were read alone, and one
+//   mix, U+00A0 then U+200B. Code: is_empty_string (misc.cpp:163-258), which
+//   TDLib applies when it reads the message back (MessageEntity.cpp:4574-4582
+//   and :4614), for the other mixes, and strip_empty_characters (misc.cpp:174
+//   and :186-193) for the other 123 tags. Each stays beside anything else. Read: a no-break space at
 //   each end, U+202F and U+200B inside. Code for the others.
 // - Any other character is left alone. Read: DEL, U+2027, U+2060 and U+E0080.
 //   Code for the rest, the C1 controls U+0080 to U+009F included, which no read

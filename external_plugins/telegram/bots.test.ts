@@ -701,8 +701,11 @@ describe('a reply with files to a bot', () => {
     // Telegram turns every control character below a space but the line
     // break into a space, a tab included, and drops every carriage return,
     // every character from U+2028 to U+202E and the combining marks U+030A,
-    // U+0333 and U+033F, then trims spaces and line breaks from both ends, as
-    // api.telegram.org answered live reads.
+    // U+0333 and U+033F, then trims spaces and line breaks from both ends.
+    // Each row of this table is a live read of api.telegram.org. The lines
+    // after it also hold what rests on TDLib's code alone (see telegramTrim):
+    // a tab between characters, 0x0E, U+202D, a line break at an end, and the
+    // mixes.
     for (const [sent, kept] of [
       ['\tx\t', 'x'], ['\x01x\x01', 'x'],
       ['a\x00b', 'a b'], ['a\x01b', 'a b'], ['a\x0bb', 'a b'], ['a\x0cb', 'a b'], ['a\x1fb', 'a b'],
@@ -736,6 +739,7 @@ describe('a reply with files to a bot', () => {
     expect(telegramTrim('\r\n\ta\tb\r\n \r')).toBe('a b')
     expect(telegramTrim('\u2028\n\x00a\x0e\u202db\x1f\u2029')).toBe('a b')
     expect(botReply('a\rb', files(1))).toEqual(one('ab'))
+    // A tab between characters becomes a space by TDLib's code alone.
     expect(botReply('\tthe\tnote\t', files(1))).toEqual(one('the note'))
     // A text of tabs and carriage returns is empty as a caption: Telegram
     // answered a caption edit to ' \t\r ' with no caption.
@@ -745,8 +749,9 @@ describe('a reply with files to a bot', () => {
     expect(botReply('\u202f\u200c\ufeff\u2009\u2800', files(1))).toEqual({ groups: [files(1)], pieces: [] })
     // A text over 1024 characters as written that is empty as a caption sends
     // nothing either, where it once went after the files as text messages,
-    // which TDLib refuses with nothing in them (code: InputMessageText.cpp:61-62
-    // and MessageEntity.cpp:4513-4520; no read).
+    // which TDLib refuses with nothing in them (code: InputMessageText.cpp:61-62,
+    // then MessageEntity.cpp:4513-4520 for the tabs, once they are spaces, and
+    // :4574-4577 for the no-break spaces; no read).
     expect(botReply('\t'.repeat(1500), files(1))).toEqual({ groups: [files(1)], pieces: [] })
     expect(botReply('\u00a0'.repeat(1500), files(1))).toEqual({ groups: [files(1)], pieces: [] })
     expect(botReply('\u2060', files(1))).toEqual(one('\u2060'))

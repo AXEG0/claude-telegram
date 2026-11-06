@@ -1296,11 +1296,11 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     from = calls(t.dir).length
     expect((await edit(`  \n${most}\n  `)).content[0].text).toBe(edited)
     expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', most]])
-    // Telegram turns every control character below a space but the line
-    // break into a space, a tab included, and drops every carriage return,
-    // every character from U+2028 to U+202E and the combining marks U+030A,
-    // U+0333 and U+033F, then trims spaces and line breaks from both ends, as
-    // api.telegram.org answered live reads, and the edit sends what it keeps.
+    // The edit takes the send's rule (see telegramTrim) and sends what it
+    // keeps. No edit that leaves text was read: these rest on the sends read
+    // and on TDLib's code, where an edit parses its caption as a send does
+    // (MessagesManager.cpp:23805-23806), and a tab between characters rests on
+    // that code alone.
     from = calls(t.dir).length
     expect((await edit(' \n\tcorrected\r\nnote\tagain\t\r\n ')).content[0].text).toBe(edited)
     expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', 'corrected\nnote again']])
@@ -1310,24 +1310,25 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     from = calls(t.dir).length
     expect((await edit('\u030aone\u0333 two\x00three\u033f\u202b')).content[0].text).toBe(edited)
     expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', 'one two three']])
-    // U+2060 alone stays, and so does U+E0080, as Telegram kept them.
+    // U+2060 alone stays, and so does U+E0080, as Telegram kept them on a
+    // send; no edit of them was read.
     for (const kept of ['\u2060', '\u{e0080}']) {
       from = calls(t.dir).length
       expect((await edit(kept)).content[0].text).toBe(edited)
       expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', kept]])
     }
     // A no-break space or U+200B beside anything else stays: Telegram kept a
-    // no-break space at each end, where JavaScript's own trim would remove it.
+    // no-break space at each end on a send, where JavaScript's own trim would
+    // remove it.
     from = calls(t.dir).length
     expect((await edit(' \u00a0x\u200b\t\r')).content[0].text).toBe(edited)
     expect(calls(t.dir).slice(from).map(c => [c.method, c.payload])).toEqual([
       ['editMessageCaption', { chat_id: '7080', message_id: id, caption: '\u00a0x\u200b' }],
     ])
-    // The 1024 counts what Telegram keeps, in characters (code points): it
-    // took 1024 characters between two tabs, and 1024 followed by a carriage
-    // return, and 1024 characters outside the Basic Multilingual Plane, 2,048
-    // UTF-16 units. The lines are 1,048 UTF-16 units, and 1,024 characters
-    // once their carriage returns go.
+    // The edit applies the send's limit and count, 1024 characters (code
+    // points) of what the rule keeps, which no read and no TDLib code shows for
+    // an edit (see captionLength). The lines are 1,048 UTF-16 units, and 1,024
+    // characters once their carriage returns go.
     const lines = Array.from({ length: 25 }, () => 'l'.repeat(40))
     for (const [text, kept] of [
       [` \t${'c'.repeat(1024)}\r\n`, 'c'.repeat(1024)],
@@ -1340,7 +1341,7 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
       expect((await edit(text!)).content[0].text).toBe(edited)
       expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', kept]])
     }
-    // Over it nothing goes, and the answer counts as Telegram counts.
+    // Over it nothing goes, and the answer counts as the send counts.
     from = calls(t.dir).length
     for (const text of [`  \n${'z'.repeat(1025)}\n  `, '\u{1F600}'.repeat(1025), '\u00a0' + 'z'.repeat(1024)]) {
       expect(failure(await edit(text))).toBe(
@@ -1349,7 +1350,8 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     // A text that is empty as a caption makes no call: Telegram answered a
     // caption edit to ' \t\r ', to U+0333, U+00A0, U+200B, U+202F, U+200C,
     // U+FEFF and U+2009, each alone, with a message that has no caption, so
-    // the edit would delete the text.
+    // the edit would delete the text. The other characters below were read
+    // alone on a send, and the mixes rest on TDLib's code.
     for (const text of ['  \n ', '', ' \t\r ', '\r\n\t', '\x01\u2028\x0b\u202e\x1f', '\u0333', '\u00a0', '\u200b', ' \u00a0\u200b\n\u0333 ',
       '\u202f', '\u200c', '\ufeff', '\u2009', '\u3000\u2800\u200d\u200e\u200f\u2000\u200a',
       '\u1680', '\u180e', '\u{e0000}', '\u{e007f}', '\ufffc\u205f\u2005\u{e0041}']) {

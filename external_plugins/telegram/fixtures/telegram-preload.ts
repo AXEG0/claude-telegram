@@ -349,7 +349,7 @@ const longCaption = (method: string, payload: Record<string, unknown>) => {
 }
 
 // A sent message's own fields as Telegram answers a send: its text, or its
-// file and the caption Telegram kept, none when it is empty once trimmed. A
+// file and the caption Telegram kept, none when it is empty as a caption. A
 // rich message's answer carries none of them.
 function contentOf(method: string, sent: Record<string, unknown>, uncaptioned: boolean): Record<string, unknown> {
   if (method === 'sendMessage') return { text: trimmed(String(sent.text)) }
