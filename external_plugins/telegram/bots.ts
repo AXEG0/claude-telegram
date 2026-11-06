@@ -306,17 +306,18 @@ const textTrim = (text: string): string => text.replace(TRIMMED, '')
 // bc9c263e, the commit the Bot API server pins, and a part with neither says so.
 // - Every control character below a space but the line break becomes a space,
 //   a tab included. Read: 0x00, 0x01, 0x0B, 0x0C and 0x1F between characters,
-//   so 'a\x0bb' is kept as 'a b', and a tab at each end, so '\tx\t' is kept as
-//   'x'. Code: clean_input_string (misc.cpp:76-160) for the rest of the range,
-//   a tab between characters included (misc.cpp:97), which no read covered.
+//   so 'a\x0bb' is kept as 'a b', a tab at each end, so '\tx\t' is kept as
+//   'x', and a tab between characters on a send and an edit, so 'a\tb' is
+//   kept as 'a b' (live8, 2026-11-06). Code: clean_input_string
+//   (misc.cpp:76-160) for the rest of the range.
 // - Every carriage return, every character from U+2028 to U+202E and the
 //   combining marks U+030A, U+0333 and U+033F are dropped, so 'a\rb' is kept
 //   as 'ab'. Read: the carriage return, U+2028, U+2029, U+202A, U+202B, U+202E
 //   and each mark. Code: the same function for U+202C and U+202D.
 // - Spaces and line breaks are then trimmed from both ends. Read: spaces at the
-//   ends, the ones the clean step makes from a tab or a control character.
-//   Code: MessageEntity.cpp:4296-4298 and :4530-4570, a line break at an end
-//   included, which no read covered.
+//   ends, the ones the clean step makes from a tab or a control character, and
+//   a line break at each end of a send, so '\nx\n' is kept as 'x' (live8,
+//   2026-11-06). Code: MessageEntity.cpp:4296-4298 and :4530-4570.
 // - A result of nothing but BLANK's characters, alone or mixed, is no caption.
 //   Read: each one alone, on a send or an edit, but for the tags, of which
 //   U+E0000, U+E0001, U+E0020, U+E0041 and U+E007F were read alone, and one
@@ -325,12 +326,15 @@ const textTrim = (text: string): string => text.replace(TRIMMED, '')
 //   and :4614), for the other mixes, and strip_empty_characters (misc.cpp:174
 //   and :186-193) for the other 123 tags. Each stays beside anything else. Read: a no-break space at
 //   each end, U+202F and U+200B inside. Code for the others.
-// - Any other character is left alone. Read: DEL, U+2027, U+2060 and U+E0080.
-//   Code for the rest, the C1 controls U+0080 to U+009F included, which no read
-//   covered yet.
+// - Any other character is left alone. Read: DEL, U+2027, U+2060 and U+E0080,
+//   and the C1 controls U+0085 and U+009F, so 'a\x85b\x9fc' and '\x85\x9f' are
+//   each kept as sent, on a send and an edit (live8, 2026-11-06). Code for the
+//   rest, the other C1 controls included.
 // - An edit's caption takes the same rule. Read: an edit with nothing left, as
-//   ' \t\r ' and each of seven characters alone. Code for an edit of text
-//   beside them: the edit parses its caption as a send does
+//   ' \t\r ' and each of seven characters alone, and edits that leave text:
+//   'a\tb' kept as 'a b', and the two C1 texts above, U+2060 alone and U+E0080
+//   alone each kept as sent (live8, 2026-11-06). Code for the other characters
+//   in an edit: it parses its caption as a send does
 //   (MessagesManager.cpp:23805-23806).
 // A caption with nothing left is no caption, so an edit to one would delete
 // the text.
@@ -342,16 +346,17 @@ export const telegramTrim = (text: string): string => {
   return BLANK.test(kept) ? '' : kept
 }
 
-// How long Telegram counts a caption: in characters (code points), so a
-// character outside the Basic Multilingual Plane, two UTF-16 units, counts
-// once. Read: a send took 1024 U+1F600, and 1024 'x' between two tabs, and
-// refused 1025 of each. Code: utf8_length in the send's check
-// (MessageContent.cpp:5289-5294).
-// Code points rather than grapheme clusters rest on that code alone, since
-// every character read was one code point. An edit applies the send's limit
-// and count with neither: no read covered an edit's length, and TDLib makes no
-// length check on an edit (MessagesManager.cpp:23782-23812), so Telegram's
-// own server decides it.
+// How long Telegram counts a caption: in characters (code points), neither
+// UTF-16 units nor grapheme clusters, so a character outside the Basic
+// Multilingual Plane, two UTF-16 units, counts once, and a combining mark
+// counts as a character of its own. Read: a send took 1024 U+1F600, and 1024
+// 'x' between two tabs, and refused 1025 of each; an edit took 1024 U+1F600
+// and refused 1025; and a send and an edit each refused 512 pairs of 'x' and
+// U+0301, then one 'x', 1025 code points in 513 grapheme clusters (live8,
+// 2026-11-06). Code: utf8_length in the send's check
+// (MessageContent.cpp:5289-5294). TDLib makes no length check on an edit
+// (MessagesManager.cpp:23782-23812), so the edit's limit is Telegram's own
+// server's, and the read shows it is the send's.
 export const captionLength = (caption: string): number => [...caption].length
 
 // A text cut into pieces Telegram keeps whole, and the receiving plugin glues

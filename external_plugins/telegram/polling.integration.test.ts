@@ -1297,10 +1297,13 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     expect((await edit(`  \n${most}\n  `)).content[0].text).toBe(edited)
     expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', most]])
     // The edit takes the send's rule (see telegramTrim) and sends what it
-    // keeps. No edit that leaves text was read: these rest on the sends read
-    // and on TDLib's code, where an edit parses its caption as a send does
-    // (MessagesManager.cpp:23805-23806), and a tab between characters rests on
-    // that code alone.
+    // keeps. Read (live8, 2026-11-06): an edit of 'a' TAB 'b' kept 'a b'. The
+    // other characters in these edits were read on a send, and an edit parses
+    // its caption as a send does in TDLib's code
+    // (MessagesManager.cpp:23805-23806).
+    from = calls(t.dir).length
+    expect((await edit('a\tb')).content[0].text).toBe(edited)
+    expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', 'a b']])
     from = calls(t.dir).length
     expect((await edit(' \n\tcorrected\r\nnote\tagain\t\r\n ')).content[0].text).toBe(edited)
     expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', 'corrected\nnote again']])
@@ -1310,9 +1313,10 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     from = calls(t.dir).length
     expect((await edit('\u030aone\u0333 two\x00three\u033f\u202b')).content[0].text).toBe(edited)
     expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', 'one two three']])
-    // U+2060 alone stays, and so does U+E0080, as Telegram kept them on a
-    // send; no edit of them was read.
-    for (const kept of ['\u2060', '\u{e0080}']) {
+    // These stay as sent: Telegram kept each on an edit (live8, 2026-11-06),
+    // U+2060 alone, U+E0080 alone, 'a' U+0085 'b' U+009F 'c' and U+0085 U+009F
+    // alone, the C1 controls neither spaced nor dropped.
+    for (const kept of ['\u2060', '\u{e0080}', 'a\x85b\x9fc', '\x85\x9f']) {
       from = calls(t.dir).length
       expect((await edit(kept)).content[0].text).toBe(edited)
       expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', kept]])
@@ -1326,9 +1330,10 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
       ['editMessageCaption', { chat_id: '7080', message_id: id, caption: '\u00a0x\u200b' }],
     ])
     // The edit applies the send's limit and count, 1024 characters (code
-    // points) of what the rule keeps, which no read and no TDLib code shows for
-    // an edit (see captionLength). The lines are 1,048 UTF-16 units, and 1,024
-    // characters once their carriage returns go.
+    // points) of what the rule keeps (see captionLength). Read (live8,
+    // 2026-11-06): an edit took 1024 U+1F600, 2,048 UTF-16 units. The lines
+    // are 1,048 UTF-16 units, and 1,024 characters once their carriage returns
+    // go.
     const lines = Array.from({ length: 25 }, () => 'l'.repeat(40))
     for (const [text, kept] of [
       [` \t${'c'.repeat(1024)}\r\n`, 'c'.repeat(1024)],
@@ -1341,9 +1346,12 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
       expect((await edit(text!)).content[0].text).toBe(edited)
       expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', kept]])
     }
-    // Over it nothing goes, and the answer counts as the send counts.
+    // Over it nothing goes, and the answer counts as Telegram counts. Read
+    // (live8, 2026-11-06): an edit of 1025 U+1F600 was refused as too long, and
+    // so was one of 512 pairs of 'x' and U+0301, then one 'x', 1025 code points
+    // in 513 grapheme clusters.
     from = calls(t.dir).length
-    for (const text of [`  \n${'z'.repeat(1025)}\n  `, '\u{1F600}'.repeat(1025), '\u00a0' + 'z'.repeat(1024)]) {
+    for (const text of [`  \n${'z'.repeat(1025)}\n  `, '\u{1F600}'.repeat(1025), '\u00a0' + 'z'.repeat(1024), 'x\u0301'.repeat(512) + 'x']) {
       expect(failure(await edit(text))).toBe(
         'edit_message failed: this text has 1025 characters, over the 1024 a caption holds; nothing was edited; send it as a new reply')
     }

@@ -1335,7 +1335,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         assertAllowedChat(chat_id)
         // Text goes where the message holds it, as the reply that sent it
         // recorded: a file's caption takes what Telegram keeps of it, 1 to
-        // 1024 characters as the send counts them, and a file with no text
+        // 1024 characters as Telegram counts them on a send and an edit alike,
+        // and a file with no text
         // takes none. A message the record does not hold is edited as before.
         // See telegramTrim and captionLength in bots.ts for the evidence.
         const holds = text !== undefined ? sentHolds.get(chat_id, message_id) as Holds | undefined : undefined

@@ -704,8 +704,7 @@ describe('a reply with files to a bot', () => {
     // U+0333 and U+033F, then trims spaces and line breaks from both ends.
     // Each row of this table is a live read of api.telegram.org. The lines
     // after it also hold what rests on TDLib's code alone (see telegramTrim):
-    // a tab between characters, 0x0E, U+202D, a line break at an end, and the
-    // mixes.
+    // 0x0E, U+202D and the mixes.
     for (const [sent, kept] of [
       ['\tx\t', 'x'], ['\x01x\x01', 'x'],
       ['a\x00b', 'a b'], ['a\x01b', 'a b'], ['a\x0bb', 'a b'], ['a\x0cb', 'a b'], ['a\x1fb', 'a b'],
@@ -715,6 +714,10 @@ describe('a reply with files to a bot', () => {
       // a line break as sent.
       ['a\x7fb', 'a\x7fb'], ['a\u2027b', 'a\u2027b'], ['a\u202fb', 'a\u202fb'], ['a\u200bb', 'a\u200bb'],
       ['\u00a0x\u00a0', '\u00a0x\u00a0'], ['a\nb', 'a\nb'],
+      // live8, 2026-11-06: a send of 'a' TAB 'b' kept 'a b', of LF 'x' LF kept
+      // 'x', and of 'a' U+0085 'b' U+009F 'c' and of U+0085 U+009F alone kept
+      // each as sent, the C1 controls neither spaced nor dropped.
+      ['a\tb', 'a b'], ['\nx\n', 'x'], ['a\x85b\x9fc', 'a\x85b\x9fc'], ['\x85\x9f', '\x85\x9f'],
       // It answered a send or a caption edit of U+0333 or of one of these
       // invisible characters alone with no caption, so a caption of nothing
       // but those is none, while U+2060 alone, and U+E0080 just past the tags,
@@ -739,7 +742,8 @@ describe('a reply with files to a bot', () => {
     expect(telegramTrim('\r\n\ta\tb\r\n \r')).toBe('a b')
     expect(telegramTrim('\u2028\n\x00a\x0e\u202db\x1f\u2029')).toBe('a b')
     expect(botReply('a\rb', files(1))).toEqual(one('ab'))
-    // A tab between characters becomes a space by TDLib's code alone.
+    // A tab between characters becomes a space (live8, 2026-11-06: 'a' TAB 'b'
+    // kept as 'a b' on a send and an edit).
     expect(botReply('\tthe\tnote\t', files(1))).toEqual(one('the note'))
     // A text of tabs and carriage returns is empty as a caption: Telegram
     // answered a caption edit to ' \t\r ' with no caption.
@@ -757,6 +761,8 @@ describe('a reply with files to a bot', () => {
     expect(botReply('\u2060', files(1))).toEqual(one('\u2060'))
     expect(botReply('\u1680\u180e\u2003\u205f\ufffc\u{e0020}', files(1))).toEqual({ groups: [files(1)], pieces: [] })
     expect(botReply('\u{e0080}', files(1))).toEqual(one('\u{e0080}'))
+    // live8, 2026-11-06: U+0085 U+009F alone stayed a caption, as sent.
+    expect(botReply('\x85\x9f', files(1))).toEqual(one('\x85\x9f'))
     // A no-break space beside anything else stays, and it counts: Telegram
     // kept one at each end, where JavaScript's own trim would remove it.
     expect(botReply(' \t\u00a0x\r\n', files(1))).toEqual(one('\u00a0x'))
@@ -774,6 +780,11 @@ describe('a reply with files to a bot', () => {
     expect(botReply(lines.join('\r\n'), files(1))).toEqual(one(lines.join('\n')))
     expect(botReply('\u{1F600}'.repeat(1024), files(1))).toEqual(one('\u{1F600}'.repeat(1024)))
     expect(botReply('\u{1F600}'.repeat(1025), files(1))).toEqual({ groups: [files(1)], pieces: ['\u{1F600}'.repeat(1025)] })
+    // live8, 2026-11-06: Telegram refused 512 pairs of 'x' and U+0301, then
+    // one 'x', 1025 code points in 513 grapheme clusters, as too long, so the
+    // count is in code points, not clusters.
+    const marked = 'x\u0301'.repeat(512) + 'x'
+    expect(botReply(marked, files(1))).toEqual({ groups: [files(1)], pieces: [marked] })
     // A longer text goes as text messages, as before: only spaces and line
     // breaks are trimmed from its ends, and its tabs and carriage returns go
     // as written.
