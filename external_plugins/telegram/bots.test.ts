@@ -699,6 +699,9 @@ describe('a reply with files to a bot', () => {
     expect(botReply(' \n \n', files(1))).toEqual({ groups: [files(1)], pieces: [] })
     // Telegram trims only spaces and line breaks.
     expect(telegramTrim('\t a b \n')).toBe('\t a b')
+    // So a tab at each end counts toward the 1024, and the text follows the file.
+    const tabbed = '\t' + 'x'.repeat(1023) + '\t'
+    expect(botReply(tabbed, files(1))).toEqual({ groups: [files(1)], pieces: [tabbed] })
   })
 })
 

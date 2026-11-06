@@ -1300,6 +1300,17 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     from = calls(t.dir).length
     expect((await edit(' \n\tcorrected note\t\n ')).content[0].text).toBe(edited)
     expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', '\tcorrected note\t']])
+    // Every check reads that trim: a text of tabs and carriage returns is not
+    // empty, and a tab at each end counts toward the 1024.
+    from = calls(t.dir).length
+    expect((await edit(' \t\r ')).content[0].text).toBe(edited)
+    expect(calls(t.dir).slice(from).map(c => [c.method, c.payload])).toEqual([
+      ['editMessageCaption', { chat_id: '7080', message_id: id, caption: '\t\r' }],
+    ])
+    from = calls(t.dir).length
+    expect(failure(await edit(` \n\t${'c'.repeat(1023)}\t\n `))).toBe(
+      'edit_message failed: this text has 1025 characters, over the 1024 a caption holds; nothing was edited; send it as a new reply')
+    expect(calls(t.dir).slice(from)).toEqual([])
     // The count is of what Telegram would keep.
     from = calls(t.dir).length
     expect(failure(await edit(`  \n${'z'.repeat(1025)}\n  `))).toBe(
