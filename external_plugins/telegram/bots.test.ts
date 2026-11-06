@@ -724,6 +724,9 @@ describe('a reply with files to a bot', () => {
       ['\u{e0000}', ''], ['\u{e0001}', ''], ['\u{e0020}', ''], ['\u{e0041}', ''], ['\u{e007f}', ''],
       ['\u{e0080}', '\u{e0080}'],
     ]) expect(telegramTrim(sent!)).toBe(kept!)
+    // The mixes below, beyond U+00A0 then U+200B, and these characters beside
+    // text, beyond a no-break space at each end and U+202F and U+200B inside,
+    // rest on TDLib's code rather than a read (see telegramTrim).
     expect(telegramTrim('\u1680\u{e0041}\n\ufffc\u205f\u2005\u180e\u{e007f}')).toBe('')
     expect(telegramTrim('\u{e0041}x\u1680')).toBe('\u{e0041}x\u1680')
     expect(telegramTrim(' \u200b\u00a0\n\u00a0 ')).toBe('')
@@ -740,6 +743,12 @@ describe('a reply with files to a bot', () => {
     expect(botReply('\x01\u2028\x0b\u202e\x1f', files(1))).toEqual({ groups: [files(1)], pieces: [] })
     expect(botReply(' \t\u00a0\u0333\r\u200b\n', files(1))).toEqual({ groups: [files(1)], pieces: [] })
     expect(botReply('\u202f\u200c\ufeff\u2009\u2800', files(1))).toEqual({ groups: [files(1)], pieces: [] })
+    // A text over 1024 characters as written that is empty as a caption sends
+    // nothing either, where it once went after the files as text messages,
+    // which TDLib refuses with nothing in them (code: InputMessageText.cpp:61-62
+    // and MessageEntity.cpp:4513-4520; no read).
+    expect(botReply('\t'.repeat(1500), files(1))).toEqual({ groups: [files(1)], pieces: [] })
+    expect(botReply('\u00a0'.repeat(1500), files(1))).toEqual({ groups: [files(1)], pieces: [] })
     expect(botReply('\u2060', files(1))).toEqual(one('\u2060'))
     expect(botReply('\u1680\u180e\u2003\u205f\ufffc\u{e0020}', files(1))).toEqual({ groups: [files(1)], pieces: [] })
     expect(botReply('\u{e0080}', files(1))).toEqual(one('\u{e0080}'))

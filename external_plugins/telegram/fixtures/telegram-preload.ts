@@ -4,6 +4,7 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renam
 import { join } from 'path'
 import * as grammy from 'grammy'
 import { pollFetch } from '../deadline.ts'
+import { BOT_CAPTION_MAX, captionLength, telegramTrim } from '../bots.ts'
 
 // A file upload goes as a multipart stream; its fields are logged as text and
 // each file as its name.
@@ -332,30 +333,19 @@ const EMPTY_TEXT = { error_code: 400, description: 'Bad Request: message text is
 const emptyText = (method: string, payload: Record<string, unknown>) =>
   (method === 'sendMessage' || method === 'editMessageText') && typeof payload.text === 'string' && trimmed(payload.text) === ''
 
-// A caption as api.telegram.org keeps it, read live with an installation's bot
-// on 2026-11-06: it turns every control character below a space but the line
-// break into a space, a tab included, and drops every carriage return, every
-// character from U+2028 to U+202E and the combining marks U+030A, U+0333 and
-// U+033F, then trims spaces and line breaks from both ends. It kept '\tx\t' and
-// '\x01x\x01' as 'x', 'a\x00b', 'a\x0bb' and 'a\x1fb' as 'a b', and 'a\rb',
-// 'a\u202eb' and 'a\u0333b' as 'ab'; it kept DEL, U+2027, U+202F, U+200B and a
-// no-break space at each end as sent, and U+2060 and U+E0080 alone; and it
-// answered a send or a caption edit of ' \t\r ', or of nothing but U+00A0,
-// U+1680, U+180E, U+2000 to U+200F, U+202F, U+205F, U+2800, U+3000, U+FEFF,
-// U+FFFC and the tags U+E0000 to U+E007F, alone or mixed, with a message that
-// has no caption. It counts a caption in characters (code
-// points): a send took 1024 characters outside the Basic Multilingual Plane
-// and refused 1025 of them, or 1025 'x', as too long.
-const captionKept = (caption: string) => {
-  const kept = trimmed(caption.replace(/[\r\u030a\u0333\u033f\u2028-\u202e]/g, '').replace(/[\x00-\x09\x0b\x0c\x0e-\x1f]/g, ' '))
-  return /^[ \n\u00a0\u1680\u180e\u2000-\u200f\u202f\u205f\u2800\u3000\ufeff\ufffc\u{e0000}-\u{e007f}]*$/u.test(kept) ? '' : kept
-}
+// A caption as api.telegram.org keeps and counts it is the plugin's own rule,
+// telegramTrim and captionLength in bots.ts, where each part names its
+// evidence, so the fake cannot keep a rule the plugin has dropped. A send
+// whose caption is over 1024 characters is refused, as a live read of
+// sendDocument answered for 1025 'x' and for 1025 U+1F600; no read covered an
+// album's caption.
+const captionKept = telegramTrim
 const LONG_CAPTION = { error_code: 400, description: 'Bad Request: message caption is too long' }
 const longCaption = (method: string, payload: Record<string, unknown>) => {
   const captions = method === 'sendMediaGroup' ? (payload.media as Record<string, unknown>[]).map(m => m.caption)
     : method === 'sendDocument' || method === 'sendPhoto' ? [payload.caption]
     : []
-  return captions.some(c => typeof c === 'string' && [...captionKept(c)].length > 1024)
+  return captions.some(c => typeof c === 'string' && captionLength(captionKept(c)) > BOT_CAPTION_MAX)
 }
 
 // A sent message's own fields as Telegram answers a send: its text, or its
