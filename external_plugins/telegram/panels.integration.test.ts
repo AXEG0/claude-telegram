@@ -116,7 +116,7 @@ describe.skipIf(process.platform !== 'linux')('the records of open subagents mes
     expect(later.message_id).toBe(8)
     await until(() => records(s.dir).length === 2)
     const byMessage = new Map(records(s.dir).map(r => [r.message, r]))
-    expect(byMessage.get(7)!.text).toMatch(/^🤖 Subagents\n1\. ✅ Done in \d+s · general-purpose · Long job · 900 tokens$/)
+    expect(byMessage.get(7)!.text).toMatch(/^🤖 Subagents\n1\. ✅ Done in (\d+m )?\d+s · general-purpose · Long job · 900 tokens$/)
     expect(byMessage.get(8)!.text).toMatch(/^🤖 Subagents\n1\. 🔌 No longer followed after \d+s · general-purpose · Later job · last: Starting…$/)
     const pid = s.channel.serverPid()
     process.kill(pid, 'SIGKILL')

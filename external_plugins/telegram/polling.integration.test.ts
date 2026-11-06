@@ -4,7 +4,7 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statS
 import { join } from 'path'
 import { asSeconds, calls, children, cleanup, CONFLICT, conflicts, deliver, driveClock, pollGaps, stamp, start, state, until, wait } from './fixtures/harness.ts'
 import fixture from './fixtures/channel-argv.json'
-import { AGENT_TICK_MS, appendAgentEvent, agentEventFile } from './agents.ts'
+import { AGENT_TICK_MS, appendAgentEvent, agentEventFile, CHAT_GAP_MS } from './agents.ts'
 import { appendPermit, permitDetail, permitFile, permitText, type PermitEvent } from './permit.ts'
 import { idleText, NO_OWNER, RECOVERED_TEXT, stuckText } from './alerts.ts'
 import { NO_ASKS } from './asks.ts'
@@ -95,7 +95,7 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     appendAgentEvent(file, { t: Date.now(), event: 'stop', agent_id: 'a2', outcome: 'stopped' })
     appendAgentEvent(file, { t: Date.now(), event: 'stop', agent_id: 'a3' })
     await until(() => calls(dir).some(c => c.method === 'editMessageText' && c.payload.text?.includes('2. ⏹ Stopped after')
-      && c.payload.text?.includes('3. ✅ Done in')), AGENT_TICK_MS + 4000)
+      && c.payload.text?.includes('3. ✅ Done in')), AGENT_TICK_MS + CHAT_GAP_MS + 4000)
     const edit = calls(dir).findLast(c => c.method === 'editMessageText')!
     expect(edit.payload.message_id).toBe(42)
     for (let i = 1; i <= 4; i++) expect(edit.payload.text).toContain(`Shared agent ${i}`)
@@ -130,7 +130,7 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     appendFileSync(join(tasks, 'b2.output'), 'FAIL\n\n[exited with code 3]\n')
     appendAgentEvent(file, { t: Date.now(), event: 'shell_stop', task_id: 'b3', outcome: 'stopped' })
     await until(() => calls(dir).some(c => c.method === 'editMessageText' && panel(c) && c.payload.text.includes('2. ✅ Done in')
-      && c.payload.text.includes('3. ❌ Failed after') && c.payload.text.includes('4. ⏹ Stopped after')), AGENT_TICK_MS + 4000)
+      && c.payload.text.includes('3. ❌ Failed after') && c.payload.text.includes('4. ⏹ Stopped after')), AGENT_TICK_MS + CHAT_GAP_MS + 4000)
     const edit = calls(dir).findLast(c => c.method === 'editMessageText')!
     expect(edit.payload.message_id).toBe(42)
     expect(edit.payload.text).toMatch(/\n1\. ⏳ general-purpose · Shared agent · /)
