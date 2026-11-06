@@ -33,7 +33,9 @@ async function failA1(s: Session) {
   s.begin('a2', 'Other job')
   s.write('a1', userText('u1', Date.now(), 'Long job'))
   const sent = await s.next(t => row(t, 2).startsWith('2. ⏳'))
-  await wait(Math.max(0, sent.at + CHAT_GAP_MS + 500 - Date.now()))
+  // Up to the tick on which the chat's slot opens, so the failure shows at
+  // the tick that reads it, before the clock refresh takes that slot.
+  await wait(Math.max(0, sent.at + CHAT_GAP_MS - AGENT_TICK_MS + 500 - Date.now()))
   s.write('a1', apiError('e1', Date.now(), 'overloaded'))
   const failed = await s.next(t => row(t, 1).startsWith('1. ❌'), sent.index + 1)
   return { sent, failed }
@@ -102,7 +104,9 @@ describe.skipIf(process.platform !== 'linux')('a failure read from the transcrip
     s.begin('a1', 'Long job')
     s.write('a1', userText('u1', Date.now(), 'Long job'))
     const sent = await s.next(t => row(t, 1).startsWith('1. ⏳'))
-    await wait(Math.max(0, sent.at + CHAT_GAP_MS + 500 - Date.now()))
+    // Up to the tick on which the chat's slot opens, so the failure shows at
+    // the tick that reads it, before the clock refresh takes that slot.
+    await wait(Math.max(0, sent.at + CHAT_GAP_MS - AGENT_TICK_MS + 500 - Date.now()))
     s.write('a1', apiError('e1', Date.now(), 'overloaded'))
     const failed = await s.next(t => row(t, 1).startsWith('1. ❌'), sent.index + 1)
     // The next tick confirms the failure and ends the group.
@@ -120,7 +124,9 @@ describe.skipIf(process.platform !== 'linux')('a failure read from the transcrip
     s.begin('a1', 'Long job')
     s.write('a1', userText('u1', Date.now(), 'Long job'))
     const sent = await s.next(t => row(t, 1).startsWith('1. ⏳'))
-    await wait(Math.max(0, sent.at + CHAT_GAP_MS + 500 - Date.now()))
+    // Up to the tick on which the chat's slot opens, so the failure shows at
+    // the tick that reads it, before the clock refresh takes that slot.
+    await wait(Math.max(0, sent.at + CHAT_GAP_MS - AGENT_TICK_MS + 500 - Date.now()))
     s.write('a1', apiError('e1', Date.now(), 'overloaded'))
     const failed = await s.next(t => row(t, 1).startsWith('1. ❌'), sent.index + 1)
     // The next tick confirms the failure and ends the group.

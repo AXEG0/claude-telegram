@@ -127,6 +127,39 @@ describe.skipIf(process.platform !== 'linux')('the subagents message in the runn
     await channel.close()
   }, 20000)
 
+  // Nor do a button edit and typing wait for the message's slot: while its
+  // twelve seconds since the send run, an edit of a reply's buttons alone goes
+  // to Telegram at once, and the turn's typing keeps its own pace.
+  test('while the subagents message\'s 12-second slot is taken, a buttons-only edit goes out at once and typing keeps its pace', async () => {
+    const dir = state()
+    const { channel, file } = await twoRows(dir)
+    const send = calls(dir).find(panelSend)!
+    const tool = async (name: string, args: object) => {
+      const r = (await channel.request('tools/call', { name, arguments: args })).result
+      expect(r.isError).toBeFalsy()
+      return r.content[0].text as string
+    }
+    const id = Number(/\(id: (\d+)\)/.exec(await tool('reply', { chat_id: '1', text: 'Pick one', buttons: [['Yes', 'No']] }))![1])
+    const asked = Date.now()
+    expect(await tool('edit_message', { chat_id: '1', message_id: String(id), buttons: [['Yes']] })).toBe(`edited (id: ${id})`)
+    const edit = calls(dir).find(c => c.method === 'editMessageReplyMarkup' && c.payload.message_id === id)!
+    expect(edit.at - asked).toBeLessThanOrEqual(2 * STEP_MS)
+    expect(edit.at - send.at).toBeLessThan(12_000)
+    // A row ends, so the message has something new for its next slot.
+    appendAgentEvent(file, { t: Date.now(), event: 'stop', agent_id: 'a2' })
+    // The turn's typing goes on every few seconds through the slot.
+    const typing = () => calls(dir).filter(c => c.method === 'sendChatAction' && c.payload.chat_id === '1' && c.at > send.at)
+    await until(() => typing().some(c => c.at > send.at + 6_000), 12_000)
+    const inSlot = typing().filter(c => c.at < send.at + 12_000)
+    expect(inSlot.length).toBeGreaterThanOrEqual(2)
+    expect(inSlot[0]!.at - send.at).toBeLessThanOrEqual(REFRESH_MS + 2 * STEP_MS)
+    // No send or edit of the message came meanwhile: its slot was taken.
+    expect(calls(dir).filter(c => isPanel(c) && c.at > send.at && c.at < send.at + 12_000 - SLACK_MS)).toEqual([])
+    await until(() => calls(dir).some(panelEdit), AGENT_TICK_MS + 12_000 + 4000)
+    expect(calls(dir).find(panelEdit)!.at - send.at).toBeGreaterThanOrEqual(12_000 - SLACK_MS)
+    await channel.close()
+  }, 20000)
+
   // The registered hooks with the inputs Claude Code sent for a subagent whose
   // model call failed, written for the server's own Claude Code process.
   for (const kind of ['an Agent call', 'a workflow'] as const) {
