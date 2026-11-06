@@ -4,7 +4,7 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renam
 import { join } from 'path'
 import * as grammy from 'grammy'
 import { pollFetch } from '../deadline.ts'
-import { BOT_CAPTION_MAX, captionLength, telegramTrim } from '../bots.ts'
+import { BOT_CAPTION_MAX, captionLength, telegramClean, telegramTrim } from '../bots.ts'
 
 // A file upload goes as a multipart stream; its fields are logged as text and
 // each file as its name.
@@ -334,18 +334,21 @@ const emptyText = (method: string, payload: Record<string, unknown>) =>
   (method === 'sendMessage' || method === 'editMessageText') && typeof payload.text === 'string' && trimmed(payload.text) === ''
 
 // A caption as api.telegram.org keeps and counts it is the plugin's own rule,
-// telegramTrim and captionLength in bots.ts, where each part names its
-// evidence, so the fake cannot keep a rule the plugin has dropped. A send
-// whose caption is over 1024 characters is refused, as a live read of
-// sendDocument answered for 1025 'x' and for 1025 U+1F600; no read covered an
-// album's caption.
+// telegramTrim, telegramClean and captionLength in bots.ts, where each part
+// names its evidence and the two steps of TDLib's it leaves out, which change
+// no count and no empty check, so the fake cannot keep a rule the plugin has
+// dropped. A send whose caption is over 1024 characters once cleaned and
+// trimmed is refused, before the empty check, as TDLib counts it: a live read
+// of sendDocument answered so for 1025 'x' and for 1025 U+1F600, and by
+// TDLib's code a blank one over 1024 is refused the same way; no read covered
+// that or an album's caption.
 const captionKept = telegramTrim
 const LONG_CAPTION = { error_code: 400, description: 'Bad Request: message caption is too long' }
 const longCaption = (method: string, payload: Record<string, unknown>) => {
   const captions = method === 'sendMediaGroup' ? (payload.media as Record<string, unknown>[]).map(m => m.caption)
     : method === 'sendDocument' || method === 'sendPhoto' ? [payload.caption]
     : []
-  return captions.some(c => typeof c === 'string' && captionLength(captionKept(c)) > BOT_CAPTION_MAX)
+  return captions.some(c => typeof c === 'string' && captionLength(telegramClean(c)) > BOT_CAPTION_MAX)
 }
 
 // A sent message's own fields as Telegram answers a send: its text, or its

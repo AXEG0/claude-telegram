@@ -280,9 +280,11 @@ export function sendStyle(format: string, toBot: boolean): Style {
 // text, as Telegram keeps a caption (see telegramTrim), rides as the first
 // file's caption when it is 1024 characters or fewer (Telegram's caption
 // limit, see captionLength), and nothing goes for a text that is empty as a
-// caption. A longer text follows the files in pieces of 4096 characters at
-// most (Telegram's text limit), whatever textChunkLimit and chunkMode say, cut
-// from the text with only spaces and line breaks trimmed from its ends.
+// caption, or blank and over 1024 characters, which no way of sending carries
+// (see telegramTrim). A longer text follows the files in pieces of 4096
+// characters at most (Telegram's text limit), whatever textChunkLimit and
+// chunkMode say, cut from the text with only spaces and line breaks trimmed
+// from its ends.
 export const BOT_ALBUM_MAX = 10
 export const BOT_CAPTION_MAX = 1024
 export const BOT_TEXT_MAX = 4096
@@ -301,9 +303,10 @@ export function botReply(text: string, files: string[]): BotReply {
 const TRIMMED = /^[ \n]+|[ \n]+$/g
 const textTrim = (text: string): string => text.replace(TRIMMED, '')
 
-// A caption as Telegram keeps it. Each part names its evidence: "read" is a
-// live read of api.telegram.org with an installation's bot, "code" is TDLib at
-// bc9c263e, the commit the Bot API server pins, and a part with neither says so.
+// A caption as Telegram keeps it, but for the two steps of TDLib's named at
+// the end. Each part names its evidence: "read" is a live read of
+// api.telegram.org with an installation's bot, "code" is TDLib at bc9c263e,
+// the commit the Bot API server pins, and a part with neither says so.
 // - Every control character below a space but the line break becomes a space,
 //   a tab included. Read: 0x00, 0x01, 0x0B, 0x0C and 0x1F between characters,
 //   so 'a\x0bb' is kept as 'a b', a tab at each end, so '\tx\t' is kept as
@@ -318,14 +321,25 @@ const textTrim = (text: string): string => text.replace(TRIMMED, '')
 //   ends, the ones the clean step makes from a tab or a control character, and
 //   a line break at each end of a send, so '\nx\n' is kept as 'x' (live8,
 //   2026-11-06). Code: MessageEntity.cpp:4296-4298 and :4530-4570.
-// - A result of nothing but BLANK's characters, alone or mixed, is no caption.
-//   Read: each one alone, on a send or an edit, but for the tags, of which
-//   U+E0000, U+E0001, U+E0020, U+E0041 and U+E007F were read alone, and one
-//   mix, U+00A0 then U+200B. Code: is_empty_string (misc.cpp:163-258), which
-//   TDLib applies when it reads the message back (MessageEntity.cpp:4574-4582
-//   and :4614), for the other mixes, and strip_empty_characters (misc.cpp:174
-//   and :186-193) for the other 123 tags. Each stays beside anything else. Read: a no-break space at
-//   each end, U+202F and U+200B inside. Code for the others.
+// - A result of nothing but BLANK's characters, alone or mixed, of up to 1024
+//   characters is no caption. Read: each one alone, on a send or an edit, but
+//   for the tags, of which U+E0000, U+E0001, U+E0020, U+E0041 and U+E007F were
+//   read alone, and one mix, U+00A0 then U+200B. Code: is_empty_string
+//   (misc.cpp:163-258), which TDLib applies when it reads the message back
+//   (MessageEntity.cpp:4574-4582 and :4614), for the other mixes, and
+//   strip_empty_characters (misc.cpp:174 and :186-193) for the other 123
+//   tags. A longer one is counted, not emptied: TDLib keeps a bot's such text
+//   (MessageEntity.cpp:4578-4581, with :4665) and refuses it as too long
+//   (MessageContent.cpp:5293). A text with nothing left once cleaned and
+//   trimmed, such as tabs alone, is cleared before the count
+//   (MessageEntity.cpp:4513-4517), so it is no caption at any length. No read
+//   covered either. telegramTrim gives '' for a longer one all the same, the
+//   plugin's own choice: by TDLib's code no way of sending such a text
+//   succeeds, so the file goes alone, and an edit to it is refused with no
+//   call. telegramClean gives the text a send counts, before this check.
+// - Each of BLANK's characters stays beside anything else. Read: a no-break
+//   space at each end, U+202F and U+200B inside. Code for the others, but for
+//   a run of U+200E and U+200F (see the end).
 // - Any other character is left alone. Read: DEL, U+2027, U+2060 and U+E0080,
 //   and the C1 controls U+0085 and U+009F, so 'a\x85b\x9fc' and '\x85\x9f' are
 //   each kept as sent, on a send and an edit (live8, 2026-11-06). Code for the
@@ -336,13 +350,23 @@ const textTrim = (text: string): string => text.replace(TRIMMED, '')
 //   alone each kept as sent (live8, 2026-11-06). Code for the other characters
 //   in an edit: it parses its caption as a send does
 //   (MessagesManager.cpp:23805-23806).
+// Two steps of TDLib's are left out, since neither changes a count or the
+// empty check (code; no read). It turns each U+200E or U+200F directly
+// followed by another of the two into U+200C (misc.cpp:62-73, called at
+// :158), and all three are one character each and in BLANK. It cuts a text
+// at 35,000 bytes (misc.cpp:150-153, MessageEntity.cpp:4584-4595), which no
+// caption reaches: one the plugin sends or edits holds at most 1024
+// characters, so at most 4,096 bytes, and the Bot API server refuses any
+// caption over 32,768 bytes as too long before TDLib sees it (its Client.cpp
+// at e3e9dd8e, :11957-11959).
 // A caption with nothing left is no caption, so an edit to one would delete
 // the text.
 const SPACED = /[\x00-\x09\x0b\x0c\x0e-\x1f]/g
 const DROPPED = /[\r\u030a\u0333\u033f\u2028-\u202e]/g
 const BLANK = /^[ \n\u00a0\u1680\u180e\u2000-\u200f\u202f\u205f\u2800\u3000\ufeff\ufffc\u{e0000}-\u{e007f}]*$/u
+export const telegramClean = (text: string): string => textTrim(text.replace(DROPPED, '').replace(SPACED, ' '))
 export const telegramTrim = (text: string): string => {
-  const kept = textTrim(text.replace(DROPPED, '').replace(SPACED, ' '))
+  const kept = telegramClean(text)
   return BLANK.test(kept) ? '' : kept
 }
 

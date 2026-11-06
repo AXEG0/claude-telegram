@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { BOT_TEXT_MAX, botReply, botTextPieces, BOT_USERNAME, CHAT_ID, createBotLookup, createConfirm, createPeers, listed, noticeChat, PeerError, plainObject, sendStyle, telegramTrim, type Peer } from './bots.ts'
+import { BOT_TEXT_MAX, botReply, botTextPieces, BOT_USERNAME, CHAT_ID, createBotLookup, createConfirm, createPeers, listed, noticeChat, PeerError, plainObject, sendStyle, telegramClean, telegramTrim, captionLength, type Peer } from './bots.ts'
 import { FRAGMENT_CHARS } from './batch.ts'
 
 // Another bot, made up for these tests.
@@ -751,13 +751,22 @@ describe('a reply with files to a bot', () => {
     expect(botReply('\x01\u2028\x0b\u202e\x1f', files(1))).toEqual({ groups: [files(1)], pieces: [] })
     expect(botReply(' \t\u00a0\u0333\r\u200b\n', files(1))).toEqual({ groups: [files(1)], pieces: [] })
     expect(botReply('\u202f\u200c\ufeff\u2009\u2800', files(1))).toEqual({ groups: [files(1)], pieces: [] })
-    // A text over 1024 characters as written that is empty as a caption sends
-    // nothing either, where it once went after the files as text messages,
-    // which TDLib refuses with nothing in them (code: InputMessageText.cpp:61-62,
-    // then MessageEntity.cpp:4513-4520 for the tabs, once they are spaces, and
-    // :4574-4577 for the no-break spaces; no read).
+    // A text over 1024 characters as written that telegramTrim finds empty
+    // sends the file alone, where it once went after the files as text
+    // messages, which TDLib refuses with nothing in them (code:
+    // InputMessageText.cpp:61-62, then MessageEntity.cpp:4513-4520 for the
+    // tabs, once they are spaces, and :4574-4577 for the no-break spaces; no
+    // read). As a caption, by TDLib's code alone, 1,500 tabs are no caption,
+    // since they are spaces once cleaned and are cleared before the count
+    // (MessageEntity.cpp:4513-4517), while 1,500 no-break spaces are kept and
+    // refused as too long (MessageEntity.cpp:4578-4581 with :4665,
+    // MessageContent.cpp:5293). So for the second the file alone is the
+    // plugin's own choice, the one outcome that does not fail, and
+    // telegramClean gives the text Telegram counts.
     expect(botReply('\t'.repeat(1500), files(1))).toEqual({ groups: [files(1)], pieces: [] })
     expect(botReply('\u00a0'.repeat(1500), files(1))).toEqual({ groups: [files(1)], pieces: [] })
+    expect(telegramClean('\t'.repeat(1500))).toBe('')
+    expect(captionLength(telegramClean('\u00a0'.repeat(1500)))).toBe(1500)
     expect(botReply('\u2060', files(1))).toEqual(one('\u2060'))
     expect(botReply('\u1680\u180e\u2003\u205f\ufffc\u{e0020}', files(1))).toEqual({ groups: [files(1)], pieces: [] })
     expect(botReply('\u{e0080}', files(1))).toEqual(one('\u{e0080}'))
