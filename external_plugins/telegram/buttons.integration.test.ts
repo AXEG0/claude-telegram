@@ -412,7 +412,7 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     await srv.close()
   }, 15000)
 
-  test('edit_message with text and buttons on a file with no text answers that it has none and makes no call, in a person\'s chat and before the bot-buttons refusal in a bot\'s', async () => {
+  test('edit_message with text and buttons answers each refusal with no call, before the bot-buttons refusal in a bot\'s chat: a file with no text, in a person\'s chat and a bot\'s, and a caption empty once trimmed or over 1024 characters', async () => {
     const BOT = { id: 7092, is_bot: true, first_name: 'Peer', username: 'peer_ninety_two_bot' }
     const dir = state({ dmPolicy: 'allowlist', allowFrom: ['1', String(BOT.id)] })
     mkdirSync(join(dir, 'inbox'))
@@ -424,12 +424,21 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
       'sent 2 parts (ids: 100, 101); what each holds: 100 file, 101 text')
     expect(ok(await tool(srv, 'reply', { chat_id: '1', text: 'the chart', files: [join(dir, 'inbox', 'chart.png')], buttons: [['Yes', 'No']] }))).toBe(
       'sent 2 parts (ids: 102, 103); buttons on message 103; what each holds: 102 text, 103 file')
+    // To the bot a short text rides as the file's caption.
+    expect(ok(await tool(srv, 'reply', { chat_id: String(BOT.id), text: 'the log', files: [join(dir, 'inbox', 'log.txt')] }))).toBe(
+      'sent (id: 104); what each holds: 104 file with text caption')
     // Every call the fake took since, but the polls.
     const since = (from: number) => calls(dir).slice(from).filter(c => c.method !== 'getUpdates')
-    for (const [chat_id, m] of [['1', 103], [String(BOT.id), 100]] as [string, number][]) {
+    const noText = (m: number) => `edit_message failed: message ${m} holds a file with no text, so it has no text to edit; nothing was edited`
+    const cases: [string, number, string, string][] = [
+      ['1', 103, 'corrected', noText(103)],
+      [String(BOT.id), 100, 'corrected', noText(100)],
+      [String(BOT.id), 104, '  \n ', 'edit_message failed: a caption needs text once its ends are trimmed; nothing was edited'],
+      [String(BOT.id), 104, 'z'.repeat(1025), 'edit_message failed: this text has 1025 characters, over the 1024 a caption holds; nothing was edited; send it as a new reply'],
+    ]
+    for (const [chat_id, m, text, answer] of cases) {
       const from = calls(dir).length
-      expect(failed(await tool(srv, 'edit_message', { chat_id, message_id: String(m), text: 'corrected', buttons: [['Yes']] }))).toBe(
-        `edit_message failed: message ${m} holds a file with no text, so it has no text to edit; nothing was edited`)
+      expect(failed(await tool(srv, 'edit_message', { chat_id, message_id: String(m), text, buttons: [['Yes']] }))).toBe(answer)
       expect(since(from)).toEqual([])
     }
     await srv.close()

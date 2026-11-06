@@ -1296,13 +1296,39 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     from = calls(t.dir).length
     expect((await edit(`  \n${most}\n  `)).content[0].text).toBe(edited)
     expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', most]])
+    // Telegram trims only spaces and line breaks, so a tab at each kept end stays.
     from = calls(t.dir).length
-    expect(failure(await edit('z'.repeat(1025)))).toBe(
+    expect((await edit(' \n\tcorrected note\t\n ')).content[0].text).toBe(edited)
+    expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', '\tcorrected note\t']])
+    // The count is of what Telegram would keep.
+    from = calls(t.dir).length
+    expect(failure(await edit(`  \n${'z'.repeat(1025)}\n  `))).toBe(
       'edit_message failed: this text has 1025 characters, over the 1024 a caption holds; nothing was edited; send it as a new reply')
     for (const text of ['  \n ', '']) {
       expect(failure(await edit(text))).toBe('edit_message failed: a caption needs text once its ends are trimmed; nothing was edited')
     }
     expect(calls(t.dir).slice(from)).toEqual([])
+    await t.sender.close()
+  }, 15000)
+
+  test('a caption edit Telegram refuses says not edited with Telegram\'s reason, and one whose outcome is unknown says so in a result that is no error', async () => {
+    const NOT_FOUND = { error_code: 400, description: 'Bad Request: message to edit not found' }
+    const GATEWAY = { error_code: 504, description: 'Gateway Timeout' }
+    const t = await toPeerBot({}, { TELEGRAM_TEST_RULES: JSON.stringify([
+      { method: 'editMessageCaption', has: 'refuse this', error: NOT_FOUND },
+      { method: 'editMessageCaption', has: 'time this out', error: GATEWAY },
+    ]) })
+    await t.reply({ text: 'the report', files: [t.file('report.pdf')] })
+    const id = sends(t.dir)[0]!.message_id!
+    const edit = (text: string) => toolCall(t.sender, 'edit_message', { chat_id: '7080', message_id: String(id), text })
+    expect(failure(await edit('refuse this'))).toBe(`edit_message failed: not edited (Telegram answered 400: ${NOT_FOUND.description})`)
+    const unknown = await edit('time this out')
+    expect(unknown.isError).not.toBe(true)
+    expect(unknown.content[0].text).toBe(`edit outcome unknown; repeating the same edit is safe (Telegram answered 504: ${GATEWAY.description})`)
+    expect(calls(t.dir).filter(c => c.method.startsWith('edit')).map(c => [c.method, c.payload.caption, c.refused])).toEqual([
+      ['editMessageCaption', 'refuse this', NOT_FOUND.description],
+      ['editMessageCaption', 'time this out', GATEWAY.description],
+    ])
     await t.sender.close()
   }, 15000)
 
