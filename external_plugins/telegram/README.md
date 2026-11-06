@@ -955,4 +955,6 @@ plugin's own code is the same in tests as in use.
 
 The "Telegram plugin tests" CI job runs the same command and prints the
 runner's processors and the suite's time on every run. A run that takes 3
-minutes or more fails it, as does any failing test.
+minutes or more fails it, as does any failing test. The suite runs there with
+an empty temp folder of its own, and anything a run leaves in it, on a passing
+run or a failing one, fails the job too, which names each entry left.
