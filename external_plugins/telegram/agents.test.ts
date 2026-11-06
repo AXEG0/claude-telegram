@@ -36,6 +36,9 @@ import { apiError, assistantText, line, requestBlob, userText } from './fixtures
 
 const assistant = (content: unknown[], usage?: Record<string, number>, ts = '2026-10-08T15:00:00.000Z') =>
   JSON.stringify({ type: 'assistant', timestamp: ts, message: { content, usage } })
+// With nothing new, a message is edited when its clock refresh is due and the
+// chat's slot allows: the beat of its edits.
+const BEAT_MS = Math.max(CLOCK_REFRESH_MS, CHAT_GAP_MS)
 
 describe('eventFromHook', () => {
   test('maps start and stop, and places the subagent files beside the session transcript', () => {
@@ -365,23 +368,23 @@ describe('createAgentStream', () => {
     h.write('/s/agent-a1.jsonl', assistant([{ type: 'tool_use', name: 'Bash', input: { description: 'Checking gate' } }], { input_tokens: 85400 }))
     await h.tick()
     expect(h.edits.at(-1)).toEqual({ id: 7, text: '🤖 Subagents · 🐚 Shells\n'
-      + '1. ⏳ general-purpose · Review PRs · Checking gate · 6s · 85.4k tokens\n2. ❌ Failed after 6s (exit 1) · shell · Run tests\n'
-      + '3. ⏳ shell · Wait for CI · 6s\n4. ✅ Done in 6s · shell · Install' })
+      + '1. ⏳ general-purpose · Review PRs · Checking gate · 12s · 85.4k tokens\n2. ❌ Failed after 12s (exit 1) · shell · Run tests\n'
+      + '3. ⏳ shell · Wait for CI · 12s\n4. ✅ Done in 12s · shell · Install' })
 
     h.advance(CHAT_GAP_MS)
     h.events.push({ t: h.now(), event: 'shell_stop', task_id: 'b2', outcome: 'stopped' })
     h.write('/s/agent-a1.jsonl', assistant([{ type: 'text', text: 'Found it' }], { input_tokens: 90000 }))
     await h.tick()
     expect(h.edits.at(-1)?.text).toBe('🤖 Subagents · 🐚 Shells\n'
-      + '1. ⏳ general-purpose · Review PRs · ✍️ Writing… · 12s · 90.0k tokens\n2. ❌ Failed after 6s (exit 1) · shell · Run tests\n'
-      + '3. ⏹ Stopped after 12s · shell · Wait for CI\n4. ✅ Done in 6s · shell · Install')
+      + '1. ⏳ general-purpose · Review PRs · ✍️ Writing… · 24s · 90.0k tokens\n2. ❌ Failed after 12s (exit 1) · shell · Run tests\n'
+      + '3. ⏹ Stopped after 24s · shell · Wait for CI\n4. ✅ Done in 12s · shell · Install')
 
     h.advance(CHAT_GAP_MS)
     h.write('/t/b2.output', '\n[killed]\n')
     h.events.push({ t: h.now(), event: 'stop', agent_id: 'a1' })
     await h.tick()
-    expect(h.edits.at(-1)?.text).toContain('1. ✅ Done in 18s · general-purpose · Review PRs · 90.0k tokens\n')
-    expect(h.edits.at(-1)?.text).toContain('3. ⏹ Stopped after 12s · shell · Wait for CI\n')
+    expect(h.edits.at(-1)?.text).toContain('1. ✅ Done in 36s · general-purpose · Review PRs · 90.0k tokens\n')
+    expect(h.edits.at(-1)?.text).toContain('3. ⏹ Stopped after 24s · shell · Wait for CI\n')
     await h.tick()
     expect(h.stream.agents()).toEqual([])
     expect(h.sent).toHaveLength(1)
@@ -397,7 +400,7 @@ describe('createAgentStream', () => {
     h.advance(CHAT_GAP_MS)
     h.write('/t/b1.output', '\n[killed]\n')
     await h.tick()
-    expect(h.edits.at(-1)).toEqual({ id: 7, text: '🐚 Shells\n1. ⏹ Stopped after 6s · shell · Agent shell' })
+    expect(h.edits.at(-1)).toEqual({ id: 7, text: '🐚 Shells\n1. ⏹ Stopped after 12s · shell · Agent shell' })
   })
 
   test('a shell that ended before its first tick shows its ending in the first message, labelled without a description', async () => {
@@ -435,7 +438,7 @@ describe('createAgentStream', () => {
     h.advance(CHAT_GAP_MS)
     h.events.push({ t: h.now(), event: 'shell_stop', task_id: 'b1', outcome: 'stopped' }, s)
     await h.tick()
-    expect(h.sent.at(-1)?.text).toBe('🐚 Shells\n1. ⏹ Stopped after 6s · shell · Long wait')
+    expect(h.sent.at(-1)?.text).toBe('🐚 Shells\n1. ⏹ Stopped after 12s · shell · Long wait')
   })
 
   test('a shell and a subagent with the same id never end each other', async () => {
@@ -446,11 +449,11 @@ describe('createAgentStream', () => {
     h.advance(CHAT_GAP_MS)
     h.events.push({ t: h.now(), event: 'stop', agent_id: 'x1', outcome: 'stopped' })
     await h.tick()
-    expect(h.edits.at(-1)?.text).toBe('🤖 Subagents · 🐚 Shells\n1. ⏹ Stopped after 6s · general-purpose\n2. ⏳ shell · Same id · 6s')
+    expect(h.edits.at(-1)?.text).toBe('🤖 Subagents · 🐚 Shells\n1. ⏹ Stopped after 12s · general-purpose\n2. ⏳ shell · Same id · 12s')
     h.advance(CHAT_GAP_MS)
     h.events.push({ t: h.now(), event: 'shell_stop', task_id: 'x1', outcome: 'stopped' })
     await h.tick()
-    expect(h.edits.at(-1)?.text).toBe('🤖 Subagents · 🐚 Shells\n1. ⏹ Stopped after 6s · general-purpose\n2. ⏹ Stopped after 12s · shell · Same id')
+    expect(h.edits.at(-1)?.text).toBe('🤖 Subagents · 🐚 Shells\n1. ⏹ Stopped after 12s · general-purpose\n2. ⏹ Stopped after 24s · shell · Same id')
   })
 
   test('the backlog keeps only shells still running, however long ago they started', async () => {
@@ -488,12 +491,12 @@ describe('createAgentStream', () => {
     h.write('/s/agent-a1.jsonl', assistant([{ type: 'tool_use', name: 'Bash', input: { description: 'Checking gate mention' } }],
       { input_tokens: 85400 }, new Date(h.now()).toISOString()))
     await h.tick()
-    expect(h.edits).toEqual([{ id: 7, text: '🤖 Subagents\n1. ⏳ general-purpose · Review PRs 3 and 4 · Checking gate mention · 6s · 85.4k tokens' }])
+    expect(h.edits).toEqual([{ id: 7, text: '🤖 Subagents\n1. ⏳ general-purpose · Review PRs 3 and 4 · Checking gate mention · 12s · 85.4k tokens' }])
 
     h.advance(CHAT_GAP_MS)
     h.events.push({ t: h.now(), event: 'stop', agent_id: 'a1' })
     await h.tick()
-    expect(h.edits.at(-1)).toEqual({ id: 7, text: '🤖 Subagents\n1. ✅ Done in 12s · general-purpose · Review PRs 3 and 4 · 85.4k tokens' })
+    expect(h.edits.at(-1)).toEqual({ id: 7, text: '🤖 Subagents\n1. ✅ Done in 24s · general-purpose · Review PRs 3 and 4 · 85.4k tokens' })
     await h.tick()
     expect(h.stream.agents()).toEqual([])
   })
@@ -519,7 +522,7 @@ describe('createAgentStream', () => {
     h.advance(CHAT_GAP_MS)
     h.write('/s/agent-a1.jsonl', assistant([{ type: 'text', text: 'Working' }], { input_tokens: 32300 }) + '\n' + interrupted(h.now()))
     await h.tick()
-    expect(h.edits.at(-1)).toEqual({ id: 7, text: '🤖 Subagents\n1. ⏹ Stopped after 6s · general-purpose · 32.3k tokens' })
+    expect(h.edits.at(-1)).toEqual({ id: 7, text: '🤖 Subagents\n1. ⏹ Stopped after 12s · general-purpose · 32.3k tokens' })
     await h.tick()
     expect(h.stream.agents()).toEqual([])
     expect(h.sent).toHaveLength(1)
@@ -532,7 +535,7 @@ describe('createAgentStream', () => {
     h.advance(CHAT_GAP_MS)
     h.events.push({ t: h.now(), event: 'stop', agent_id: 'a1', outcome: 'stopped' })
     await h.tick()
-    expect(h.edits.at(-1)?.text).toContain('⏹ Stopped after 6s')
+    expect(h.edits.at(-1)?.text).toContain('⏹ Stopped after 12s')
     await h.tick()
     expect(h.stream.agents()).toEqual([])
   })
@@ -565,9 +568,11 @@ describe('createAgentStream', () => {
     await h.tick()
     expect(h.sent.length).toBe(1)
     expect(h.sent[0]!.text.split('\n')).toHaveLength(4)
+    // Nothing new by the chat's next slot, so only the clock refresh edits,
+    // once, with every row.
     h.advance(CHAT_GAP_MS); await h.tick()
     expect(h.sent.length).toBe(1)
-    expect(h.edits).toEqual([])
+    expect(h.edits.map(e => e.text.split('\n').length)).toEqual([4])
   })
 
   test('terminal rows and a busy agent update in the same edit', async () => {
@@ -580,7 +585,7 @@ describe('createAgentStream', () => {
     h.write('/s/agent-busy.jsonl', assistant([{ type: 'text', text: 'Working' }]))
     h.events.push({ t: h.now(), event: 'stop', agent_id: 'stopped', outcome: 'stopped' })
     await h.tick()
-    expect(h.edits.at(-1)?.text).toContain('⏹ Stopped after 12s')
+    expect(h.edits.at(-1)?.text).toContain('⏹ Stopped after 24s')
     expect(h.edits.at(-1)?.text).toContain(WRITING)
   })
 
@@ -595,7 +600,7 @@ describe('createAgentStream', () => {
       h.events.push(start(h, id))
       h.write(`/s/agent-${id}.meta.json`, JSON.stringify({ description: id }))
     }
-    // The chat takes an edit every second tick, and each carries the step
+    // The chat takes an edit every fourth tick, and each carries the step
     // written at its own tick.
     for (let i = 0; i < 40; i++) {
       h.write('/s/agent-busy.jsonl', assistant([{ type: 'tool_use', name: 'Bash', input: { description: `Step ${i}` } }]))
@@ -603,8 +608,8 @@ describe('createAgentStream', () => {
       if (i === 2) h.events.push({ t: h.now(), event: 'stop', agent_id: 'third' })
       const before = h.edits.length
       await h.tick()
-      expect(h.edits.length - before).toBe(i % 2)
-      if (i % 2) {
+      expect(h.edits.length - before).toBe(i % 4 === 3 ? 1 : 0)
+      if (i % 4 === 3) {
         const text = h.edits.at(-1)!.text
         for (const label of ['Busy first agent', 'second', 'third', 'fourth']) expect(text).toContain(label)
         expect(text).toContain(`Step ${i}`)
@@ -613,10 +618,41 @@ describe('createAgentStream', () => {
       }
       h.advance(AGENT_TICK_MS)
     }
-    expect(h.edits).toHaveLength(20)
+    expect(h.edits).toHaveLength(10)
     expect(h.sent).toHaveLength(1)
     expect(new Set(h.edits.map(e => e.id))).toEqual(new Set([7]))
     expect(h.stream.agents().map(a => a.id)).toEqual(['busy', 'fourth'])
+  })
+
+  // A running row whose step stays the same while its token count grows on
+  // every tick, written between ticks: each new count reaches the chat within
+  // one 12-second slot, and the clock moves with it.
+  test('a running row whose token count alone changes on every tick shows each new count within 12 seconds', async () => {
+    const SLOT = 12_000
+    const h = harness()
+    await h.tick()
+    h.events.push(start(h, 'a1'))
+    h.write('/s/agent-a1.meta.json', JSON.stringify({ description: 'Long answer' }))
+    h.write('/s/agent-a1.jsonl', assistant([{ type: 'text', text: 'Working' }], { input_tokens: 1000 }))
+    await h.tick()
+    const counts: { tokens: number; at: number }[] = []
+    for (let i = 1; i <= 100; i++) {
+      h.advance(1000)
+      const tokens = 1000 + 100 * i
+      h.write('/s/agent-a1.jsonl', assistant([{ type: 'text', text: 'Working' }], { input_tokens: tokens }))
+      counts.push({ tokens, at: h.now() })
+      h.advance(AGENT_TICK_MS - 1000)
+      await h.tick()
+    }
+    // Each send and edit, with the count it shows.
+    const shown = h.calls.map(c => ({ at: c.at, text: c.text, tokens: Math.round(1000 * Number(c.text.match(/· (\d+\.\d)k tokens$/)?.[1])) }))
+    expect(shown.every(c => c.text.includes(WRITING))).toBe(true)
+    // Each new count shows within one slot, itself or a later one.
+    const late = counts.filter(c => !shown.some(e => e.at >= c.at && e.at <= c.at + SLOT && e.tokens >= c.tokens))
+    expect(late).toEqual([])
+    const gaps = shown.slice(1).map((e, i) => e.at - shown[i]!.at)
+    expect(Math.max(...gaps)).toBe(SLOT)
+    expect(Math.min(...gaps)).toBe(SLOT)
   })
 
   // A day of the plugin's own traffic into its chats, from one seed: subagents
@@ -626,10 +662,10 @@ describe('createAgentStream', () => {
   // second chat, a gone server's messages swept while rows run, and the close
   // at the end. Telegram publishes no limit on edits; the bounds below are the
   // plugin's own pace, typed out so a change to it fails here.
-  test('over a day of overlapping subagents and shells, the message goes into a chat at most once in any 6 seconds and 600 times an hour, each new step reaches it within 6 seconds, and its clock moves at least every 12', async () => {
-    const SLOT = 6_000
+  test('over a day of overlapping subagents and shells, the message goes into a chat at most once in any 12 seconds and 300 times an hour, each new step reaches it within 12 seconds, and its clock moves at least every 12', async () => {
+    const SLOT = 12_000
     const CLOCK = 12_000
-    const PER_HOUR = 600
+    const PER_HOUR = 300
     const MINUTE = 60_000
     const HOUR = 60 * MINUTE
     let seed = 75
@@ -727,17 +763,17 @@ describe('createAgentStream', () => {
     const marked = (text: string, id: string) => text.includes(`· ${id} s`)
     for (const chat of ['1001', '1002']) {
       const mine = calls.filter(c => c.chat === chat)
-      // Never twice in any 6 seconds.
+      // Never twice in any 12 seconds.
       const tight = mine.findIndex((c, i) => i > 0 && c.at - mine[i - 1]!.at < SLOT)
       expect(tight < 0 ? undefined : { chat, at: mine[tight]!.at - day0, gap: mine[tight]!.at - mine[tight - 1]!.at }).toBeUndefined()
-      // At most 600 in any hour.
+      // At most 300 in any hour.
       let most = 0
       for (let i = 0, j = 0; i < mine.length; i++) {
         while (j < mine.length && mine[j]!.at < mine[i]!.at + HOUR) j++
         most = Math.max(most, j - i)
       }
       expect(most).toBeLessThanOrEqual(PER_HOUR)
-      if (chat === '1001') expect(most).toBeGreaterThanOrEqual(590)
+      if (chat === '1001') expect(most).toBeGreaterThanOrEqual(295)
       else expect(mine.length).toBeGreaterThan(300)
       // While a row runs, its message moves at least every 12 seconds, except
       // when another message of the chat took the slot: a sweep or a late stop,
@@ -756,7 +792,7 @@ describe('createAgentStream', () => {
       expect(slow).toEqual([])
       if (chat === '1001') expect(open).toBeGreaterThanOrEqual(12 * HOUR)
     }
-    // Each new step reaches the chat within one 6-second slot, in a send or an
+    // Each new step reaches the chat within one 12-second slot, in a send or an
     // edit showing it or a later step, except when another message took the
     // slot first.
     const shown = new Map<string, { at: number; n: number }[]>()
@@ -790,6 +826,101 @@ describe('createAgentStream', () => {
       if (live?.text.includes('⏳') && c.at - live.at <= CLOCK) lateBeside++
     })
     expect(lateBeside).toBeGreaterThanOrEqual(3)
+  }, 120_000)
+
+  // A day in which the message never rests: subagents and shells overlap for
+  // the whole 24 hours, each running subagent writes a new step and token count
+  // on every tick, and rows end and new ones join all day, so the message has
+  // something new at every slot. The message's own pace is all that bounds it.
+  // Telegram publishes no limit; two installations were held after about
+  // 10,800 sends and edits into a chat in 24 hours. The bounds are typed out, so
+  // a change to the pace fails here.
+  test('over 24 hours in which rows change on every tick, the message goes into its chat at most once in any 12 seconds and at most 7,200 times', async () => {
+    const SLOT = 12_000
+    const PER_DAY = 7_200
+    const MINUTE = 60_000
+    const HOUR = 60 * MINUTE
+    const DAY = 24 * HOUR
+    let seed = 7200
+    const rand = () => {
+      seed = (seed + 0x6D2B79F5) | 0
+      let x = Math.imul(seed ^ (seed >>> 15), 1 | seed)
+      x = (x + Math.imul(x ^ (x >>> 7), 61 | x)) ^ x
+      return ((x ^ (x >>> 14)) >>> 0) / 2 ** 32
+    }
+    const h = harness('1001')
+    const day0 = h.now()
+    type Row = { id: string; shell: boolean; ends: number; n: number }
+    const live: Row[] = []
+    const steps: { id: string; n: number; at: number }[] = []
+    let made = 0
+    let ended = 0
+    const begin = (isShell: boolean) => {
+      const t = h.now()
+      // Lifetimes from 10 to 50 minutes, so rows end and join at all hours.
+      const r: Row = { id: `${isShell ? 'b' : 'a'}${++made}`, shell: isShell, ends: t + 10 * MINUTE + Math.floor(rand() * 40 * MINUTE), n: 0 }
+      live.push(r)
+      if (isShell) { h.events.push(shell(h, r.id, r.id)); h.write(`/t/${r.id}.output`, ''); return }
+      h.events.push(start(h, r.id))
+      h.write(`/s/agent-${r.id}.meta.json`, JSON.stringify({ description: 'Job' }))
+    }
+    // Four subagents and two shells run at every moment; one that ends is
+    // replaced at the same tick, while the others still run.
+    for (let i = 0; i < 4; i++) begin(false)
+    for (let i = 0; i < 2; i++) begin(true)
+    while (h.now() < day0 + DAY) {
+      const t = h.now()
+      for (const r of [...live]) {
+        if (t < r.ends) {
+          // A new step and token count on every tick, until 15 s before the
+          // row ends, so its last step shows before its ending.
+          if (!r.shell && t < r.ends - 15_000) {
+            r.n++
+            h.write(`/s/agent-${r.id}.jsonl`, toolCall(t, `${r.id} s${r.n}`, 1000 * r.n))
+            steps.push({ id: r.id, n: r.n, at: t })
+          }
+          continue
+        }
+        live.splice(live.indexOf(r), 1)
+        ended++
+        if (r.shell) h.write(`/t/${r.id}.output`, `\n[exited with code ${ended % 3 ? 0 : 1}]\n`)
+        else h.events.push({ t, event: 'stop', agent_id: r.id, ...(ended % 4 ? {} : { outcome: 'stopped' as const }) })
+        begin(r.shell)
+      }
+      h.stream.tick()
+      await new Promise(r => setImmediate(r))
+      h.advance(AGENT_TICK_MS)
+    }
+    await h.stream.close(h.now() + SLOT)
+
+    const mine = h.calls.filter(c => c.chat === '1001')
+    // At most 7,200 in any 24 hours, and the day kept the message busy enough
+    // to reach it.
+    let most = 0
+    for (let i = 0, j = 0; i < mine.length; i++) {
+      while (j < mine.length && mine[j]!.at < mine[i]!.at + DAY) j++
+      most = Math.max(most, j - i)
+    }
+    expect(most).toBeLessThanOrEqual(PER_DAY)
+    expect(most).toBeGreaterThanOrEqual(PER_DAY - 10)
+    // Never twice in any 12 seconds.
+    const tight = mine.findIndex((c, i) => i > 0 && c.at - mine[i - 1]!.at < SLOT)
+    expect(tight < 0 ? undefined : { at: mine[tight]!.at - day0, gap: mine[tight]!.at - mine[tight - 1]!.at }).toBeUndefined()
+    // One message all day: the group never ended.
+    expect(h.sent).toHaveLength(1)
+    expect(h.calls.filter(c => c.chat !== '1001')).toEqual([])
+    // Each new step reaches the chat within one 12-second slot, in an edit
+    // showing it or a later step; the close shows a running row's last step.
+    const shown = new Map<string, { at: number; n: number }[]>()
+    for (const c of mine) for (const m of c.text.matchAll(/(?:· |last: )(a\d+) s(\d+) ·/g)) {
+      const list = shown.get(m[1]!) ?? []
+      list.push({ at: c.at, n: Number(m[2]) })
+      shown.set(m[1]!, list)
+    }
+    const late = steps.filter(s => !(shown.get(s.id) ?? []).some(e => e.at >= s.at && e.at <= s.at + SLOT && e.n >= s.n))
+    expect(late.slice(0, 5).map(s => ({ ...s, at: s.at - day0 }))).toEqual([])
+    expect(steps.length).toBeGreaterThan(100_000)
+    expect(ended).toBeGreaterThan(200)
   }, 120_000)
 
   test('a completed panel stays intact and the next group gets a new message', async () => {
@@ -924,7 +1055,7 @@ describe('createAgentStream', () => {
     h.events.push(start(h))
     await h.tick()
     h.failEditWith({ description: 'Too Many Requests', parameters: { retry_after: 20 } })
-    h.advance(CLOCK_REFRESH_MS); await h.tick()
+    h.advance(CHAT_GAP_MS); await h.tick()
     h.failEditWith(undefined)
     h.advance(15_000); await h.tick()
     expect(h.edits).toEqual([])
@@ -961,7 +1092,7 @@ describe('createAgentStream', () => {
     h.advance(CHAT_GAP_MS)
     h.write('/s/agent-a1.jsonl', line(userText('u-a1', h.now() - CHAT_GAP_MS, 'Job')) + line(apiError('e-a1', h.now(), 'overloaded')))
     await h.tick()
-    expect(h.edits.at(-1)).toEqual({ id: 7, text: '🤖 Subagents\n1. ❌ Failed after 6s (overloaded) · general-purpose' })
+    expect(h.edits.at(-1)).toEqual({ id: 7, text: '🤖 Subagents\n1. ❌ Failed after 12s (overloaded) · general-purpose' })
     // The next tick confirms the failure and ends the group.
     h.advance(CHAT_GAP_MS); await h.tick()
     h.advance(CHAT_GAP_MS)
@@ -972,7 +1103,7 @@ describe('createAgentStream', () => {
     for (let i = 0; i < 6; i++) { h.advance(AGENT_TICK_MS); await h.tick() }
     expect(h.edits.length).toBe(edits)
     h.advance(2_000); await h.tick()
-    expect(h.edits.slice(edits)).toEqual([{ id: 7, text: '🤖 Subagents\n1. ✅ Done in 18s · general-purpose' }])
+    expect(h.edits.slice(edits)).toEqual([{ id: 7, text: '🤖 Subagents\n1. ✅ Done in 36s · general-purpose' }])
   })
 
   test('the sweep of a gone server\'s message takes no slot in a held chat until the hold ends', async () => {
@@ -1083,7 +1214,7 @@ describe('createAgentStream', () => {
     h.advance(CHAT_GAP_MS)
     h.events.push({ t: h.now(), event: 'stop', agent_id: 'a1', outcome: 'stopped' }, s)
     await h.tick()
-    expect(h.sent.at(-1)?.text).toContain('⏹ Stopped after 6s')
+    expect(h.sent.at(-1)?.text).toContain('⏹ Stopped after 12s')
   })
 
   test('the backlog keeps only subagents still running', async () => {
@@ -1121,12 +1252,12 @@ describe('createAgentStream', () => {
     h.advance(CHAT_GAP_MS)
     h.write(`${RUN_DIR}/agent-w1.meta.json`, workflowMeta('check:one'))
     await h.tick()
-    expect(h.edits.at(-1)).toEqual({ id: 7, text: '🤖 Subagents\n1. ⏳ workflow-subagent · check:one · Starting… · 6s' })
+    expect(h.edits.at(-1)).toEqual({ id: 7, text: '🤖 Subagents\n1. ⏳ workflow-subagent · check:one · Starting… · 12s' })
 
     h.advance(CHAT_GAP_MS)
     h.write(`${RUN_DIR}/agent-w1.jsonl`, toolCall(h.now(), 'Read the file', 32300))
     await h.tick()
-    expect(h.edits.at(-1)).toEqual({ id: 7, text: '🤖 Subagents\n1. ⏳ workflow-subagent · check:one · Read the file · 12s · 32.3k tokens' })
+    expect(h.edits.at(-1)).toEqual({ id: 7, text: '🤖 Subagents\n1. ⏳ workflow-subagent · check:one · Read the file · 24s · 32.3k tokens' })
   })
 
   test('a workflow subagent of a custom type is found in its run folder too', async () => {
@@ -1192,9 +1323,9 @@ describe('createAgentStream', () => {
   const stopOf = (h: { now(): number }, id: string, outcome?: 'stopped'): AgentEvent =>
     ({ t: h.now(), event: 'stop', agent_id: id, ...(outcome ? { outcome } : {}) })
   const settled = () => new Promise(r => setTimeout(r, 0))
-  // Ticks on the clock-refresh beat, landing on `until`.
+  // Ticks on the beat of the clock refresh, landing on `until`.
   async function runTo(h: ReturnType<typeof harness>, until: number) {
-    while (h.now() < until) { h.advance(Math.min(CLOCK_REFRESH_MS, until - h.now())); await h.tick() }
+    while (h.now() < until) { h.advance(Math.min(BEAT_MS, until - h.now())); await h.tick() }
   }
   // Runs the clock to five minutes after `from`, with a tick a second before.
   async function runPast(h: ReturnType<typeof harness>, from: number) {
@@ -1211,7 +1342,7 @@ describe('createAgentStream', () => {
     for (const e of kept) expect(e.text).toContain(label)
     const next = taken(h).find(e => e.at >= from + FIVE_MINUTES)
     expect(next).toBeDefined()
-    expect(next!.at).toBeLessThan(from + FIVE_MINUTES + CLOCK_REFRESH_MS)
+    expect(next!.at).toBeLessThanOrEqual(from + FIVE_MINUTES + BEAT_MS)
     expect(next!.text).not.toContain(label)
   }
 
@@ -1238,7 +1369,7 @@ describe('createAgentStream', () => {
     h.advance(20_000); h.write('/t/ok.output', 'built\n\n[exited with code 0]\n'); await h.tick()
     h.advance(20_000); h.events.push(stopOf(h, 'halt', 'stopped')); await h.tick()
     h.advance(20_000); h.write('/t/bad.output', '\n[exited with code 1]\n'); await h.tick()
-    for (const d of [20_000, 40_000, 60_000, 80_000, 130_000]) await runPast(h, joined + d)
+    for (const d of [20_000, 40_000, 60_000, 80_000, 128_000]) await runPast(h, joined + d)
     await runTo(h, t0 + AGENT_DROP_MS + 6 * 60 * 1000)
 
     for (const e of taken(h).filter(e => e.at >= joined)) {
@@ -1255,12 +1386,12 @@ describe('createAgentStream', () => {
       // Its line reads quiet before and after the drop.
       { label: 'Idle-agent', from: taken(h).find(e => e.at > t0 + AGENT_DROP_MS)!.at },
     ]
-    expect(rows.map(r => r.from)).toEqual([20_000, 40_000, 60_000, 80_000, 130_000].map(d => joined + d))
+    expect(rows.map(r => r.from)).toEqual([20_000, 40_000, 60_000, 80_000, 128_000].map(d => joined + d))
     expect(taken(h).find(e => e.at === rows[4]!.from)!.text).toContain('\n1. ⚠️ No activity for 2h 0m · Idle-agent')
     for (const { label, from } of rows) expectLeaves(h, label, from, joined)
 
-    expect(h.edits.at(-1)!.text).toBe('🤖 Subagents · 🐚 Shells\n2. ⏳ shell · Wait for deploy · 2h 6m\n'
-      + '3. ⚠️ No activity for 1h 6m · Quiet-agent · last: Starting…')
+    expect(h.edits.at(-1)!.text).toBe('🤖 Subagents · 🐚 Shells\n2. ⏳ shell · Wait for deploy · 2h 5m\n'
+      + '3. ⚠️ No activity for 1h 5m · Quiet-agent · last: Starting…')
   })
 
   test('an ending read while an edit is in flight, whose first edit a rate limit holds off a minute, leaves five minutes after the edit that carries it', async () => {
@@ -1270,18 +1401,18 @@ describe('createAgentStream', () => {
     h.write('/t/wait.output', '')
     await h.tick()
     const release = h.holdEdit()
-    h.advance(CLOCK_REFRESH_MS); await h.tick()
+    h.advance(BEAT_MS); await h.tick()
     h.advance(CHAT_GAP_MS)
     h.events.push(stopOf(h, 'a1')); await h.tick()
     release(); await settled()
     expect(h.attempts).toHaveLength(1)
-    expect(h.attempts[0]!.text).toContain('\n2. ⏳ Ending-agent · Starting… · 10s')
+    expect(h.attempts[0]!.text).toContain('\n2. ⏳ Ending-agent · Starting… · 12s')
 
     h.failEditWith({ description: 'Too Many Requests: retry after 60', parameters: { retry_after: 60 } })
     h.advance(CHAT_GAP_MS); await h.tick()
     h.failEditWith(undefined)
     const refused = h.attempts.at(-1)!
-    expect(refused.text).toContain('\n2. ✅ Done in 16s · Ending-agent')
+    expect(refused.text).toContain('\n2. ✅ Done in 24s · Ending-agent')
     expect(refused.error).toBeDefined()
     h.advance(30_000); await h.tick()
     expect(h.attempts.at(-1)).toBe(refused)
@@ -1289,7 +1420,7 @@ describe('createAgentStream', () => {
     const carried = h.attempts.at(-1)!
     expect(carried.at).toBe(refused.at + 60_000)
     expect(carried.error).toBeUndefined()
-    expect(carried.text).toContain('\n2. ✅ Done in 16s · Ending-agent')
+    expect(carried.text).toContain('\n2. ✅ Done in 24s · Ending-agent')
 
     await runPast(h, carried.at)
     expectLeaves(h, 'Ending-agent', carried.at, h.attempts[0]!.at)
@@ -1306,11 +1437,11 @@ describe('createAgentStream', () => {
     h.failEditWith({ description: 'Bad Gateway' })
     await h.tick()
     h.failEditWith(undefined)
-    expect(h.attempts.at(-1)!.text).toContain('\n2. ✅ Done in 6s · Ending-agent')
+    expect(h.attempts.at(-1)!.text).toContain('\n2. ✅ Done in 12s · Ending-agent')
     h.advance(CHAT_GAP_MS); await h.tick()
     const carried = h.attempts.at(-1)!
     expect(carried.error).toBeUndefined()
-    expect(carried.text).toContain('\n2. ✅ Done in 6s · Ending-agent')
+    expect(carried.text).toContain('\n2. ✅ Done in 12s · Ending-agent')
 
     await runPast(h, carried.at)
     expectLeaves(h, 'Ending-agent', carried.at)
@@ -1328,11 +1459,11 @@ describe('createAgentStream', () => {
     await h.tick()
     h.failEditWith(undefined)
     const answered = h.attempts.at(-1)!
-    expect(answered.text).toContain('\n2. ✅ Done in 6s · Ending-agent')
+    expect(answered.text).toContain('\n2. ✅ Done in 12s · Ending-agent')
     expect(h.edits).toEqual([])
 
     await runPast(h, answered.at)
-    expect(taken(h)[0]!.at).toBe(answered.at + CLOCK_REFRESH_MS)
+    expect(taken(h)[0]!.at).toBe(answered.at + BEAT_MS)
     expectLeaves(h, 'Ending-agent', answered.at)
   })
 
@@ -1345,11 +1476,11 @@ describe('createAgentStream', () => {
     h.advance(CHAT_GAP_MS)
     h.events.push(stopOf(h, 'r1')); await h.tick()
     const ended = h.attempts.at(-1)!
-    expect(ended.text).toContain('\n2. ✅ Done in 6s · Resumed-agent')
+    expect(ended.text).toContain('\n2. ✅ Done in 12s · Resumed-agent')
 
     h.advance(60_000)
     h.events.push(start(h, 'r1', { agent_type: 'Resumed-agent' })); await h.tick()
-    expect(h.edits.at(-1)!.text).toBe('🤖 Subagents · 🐚 Shells\n1. ⏳ shell · Wait for deploy · 1m 6s\n2. ⏳ Resumed-agent · Starting… · 0s')
+    expect(h.edits.at(-1)!.text).toBe('🤖 Subagents · 🐚 Shells\n1. ⏳ shell · Wait for deploy · 1m 12s\n2. ⏳ Resumed-agent · Starting… · 0s')
     const resumedAt = h.now()
     await runTo(h, ended.at + FIVE_MINUTES + 60_000)
     const later = taken(h).filter(e => e.at > resumedAt)
@@ -1369,14 +1500,14 @@ describe('createAgentStream', () => {
     h.advance(CHAT_GAP_MS)
     h.events.push(stopOf(h, 'r1')); await h.tick()
     const ended = h.attempts.at(-1)!
-    expect(ended.text).toContain('\n2. ✅ Done in 6s · Resumed-agent')
+    expect(ended.text).toContain('\n2. ✅ Done in 12s · Resumed-agent')
     await runTo(h, ended.at + FIVE_MINUTES)
-    expect(h.edits.at(-1)!.text).toBe('🐚 Shells\n1. ⏳ shell · Wait for deploy · 5m 6s\n3. ⏳ shell · Package · 5m 6s')
+    expect(h.edits.at(-1)!.text).toBe('🐚 Shells\n1. ⏳ shell · Wait for deploy · 5m 12s\n3. ⏳ shell · Package · 5m 12s')
 
-    h.advance(CLOCK_REFRESH_MS)
+    h.advance(BEAT_MS)
     h.events.push(start(h, 'r1', { agent_type: 'Resumed-agent' })); await h.tick()
-    expect(h.edits.at(-1)!.text).toBe('🤖 Subagents · 🐚 Shells\n1. ⏳ shell · Wait for deploy · 5m 16s\n'
-      + '2. ⏳ Resumed-agent · Starting… · 0s\n3. ⏳ shell · Package · 5m 16s')
+    expect(h.edits.at(-1)!.text).toBe('🤖 Subagents · 🐚 Shells\n1. ⏳ shell · Wait for deploy · 5m 24s\n'
+      + '2. ⏳ Resumed-agent · Starting… · 0s\n3. ⏳ shell · Package · 5m 24s')
   })
 
   test('once row 1, the only subagent, and the highest-numbered row have left, the edit is the remaining shells under their numbers, and a new row takes one past the highest number given', async () => {
@@ -1394,21 +1525,21 @@ describe('createAgentStream', () => {
     h.advance(CLOCK_REFRESH_MS)
     h.write('/t/s4.output', '\n[exited with code 0]\n'); await h.tick()
     const lastEnded = h.now()
-    expect(h.edits.at(-1)!.text).toContain('\n4. ✅ Done in 1m 6s · shell · Fourth')
+    expect(h.edits.at(-1)!.text).toContain('\n4. ✅ Done in 1m 12s · shell · Fourth')
 
     await runTo(h, firstEnded + FIVE_MINUTES)
-    expect(h.edits.at(-1)!.text).toBe('🐚 Shells\n2. ⏳ shell · Second · 5m 6s\n3. ⏳ shell · Third · 5m 6s\n4. ✅ Done in 1m 6s · shell · Fourth')
+    expect(h.edits.at(-1)!.text).toBe('🐚 Shells\n2. ⏳ shell · Second · 5m 12s\n3. ⏳ shell · Third · 5m 12s\n4. ✅ Done in 1m 12s · shell · Fourth')
     await runTo(h, lastEnded + FIVE_MINUTES - CLOCK_REFRESH_MS)
     const before = h.edits.length
     await runTo(h, lastEnded + FIVE_MINUTES)
     expect(h.edits).toHaveLength(before + 1)
-    expect(h.edits.at(-1)!.text).toBe('🐚 Shells\n2. ⏳ shell · Second · 6m 6s\n3. ⏳ shell · Third · 6m 6s')
+    expect(h.edits.at(-1)!.text).toBe('🐚 Shells\n2. ⏳ shell · Second · 6m 12s\n3. ⏳ shell · Third · 6m 12s')
 
     h.advance(CHAT_GAP_MS)
     h.events.push(shell(h, 's5', 'Fifth'))
     h.write('/t/s5.output', '')
     await h.tick()
-    expect(h.edits.at(-1)!.text).toBe('🐚 Shells\n2. ⏳ shell · Second · 6m 12s\n3. ⏳ shell · Third · 6m 12s\n5. ⏳ shell · Fifth · 0s')
+    expect(h.edits.at(-1)!.text).toBe('🐚 Shells\n2. ⏳ shell · Second · 6m 24s\n3. ⏳ shell · Third · 6m 24s\n5. ⏳ shell · Fifth · 0s')
     expect(h.sent).toHaveLength(1)
   })
 
@@ -1430,8 +1561,8 @@ describe('createAgentStream', () => {
     await runTo(h, ended + FIVE_MINUTES)
     h.write('/s/agent-long.jsonl', assistant([{ type: 'tool_use', name: 'Read', input: { description: 'Reading the storage notes one section at a time' } }],
       { input_tokens: 85400 }))
-    h.advance(CLOCK_REFRESH_MS); await h.tick()
-    const full = `61. ⏳ general-purpose · ${description} · Reading the storage notes one section at a time · 5m 16s · 85.4k tokens`
+    h.advance(BEAT_MS); await h.tick()
+    const full = `61. ⏳ general-purpose · ${description} · Reading the storage notes one section at a time · 5m 24s · 85.4k tokens`
     expect(full.length).toBeGreaterThan(AGENT_MESSAGE_LIMIT / 61)
     expect(h.edits.at(-1)!.text).toBe(`🤖 Subagents\n${full}`)
   })
@@ -1452,7 +1583,7 @@ describe('createAgentStream', () => {
     h.advance(CHAT_GAP_MS)
     h.write('/t/e3.output', '\n[exited with code 0]\n'); await h.tick()
     const final = h.edits.at(-1)!
-    expect(final).toEqual({ id: 7, text: '🐚 Shells\n2. ✅ Done in 4m 6s · shell · Recent\n3. ✅ Done in 6m 6s · shell · Last' })
+    expect(final).toEqual({ id: 7, text: '🐚 Shells\n2. ✅ Done in 4m 12s · shell · Recent\n3. ✅ Done in 6m 12s · shell · Last' })
 
     const attempts = h.attempts.length
     await runTo(h, h.now() + 10 * 60 * 1000)
@@ -1492,18 +1623,18 @@ describe('createAgentStream', () => {
     const numbers = lines.slice(1, -1).map(l => Number(l.split('.')[0]))
     expect(numbers).toEqual([...Array.from({ length: 98 }, (_, i) => i + 4), 109, 110])
     expect(lines.at(-1)).toBe('… 7 more shells')
-    expect(lines[1]).toBe('4. ✅ Done in 1m 6s · shell · S3')
-    expect(lines.at(-3)).toBe('109. ⏳ shell · S108 · 5m 6s')
-    expect(lines.at(-2)).toBe('110. ⏳ shell · S109 · 5m 6s')
-    expect(taken(h).some(e => e.at < next.at && e.text.includes('\n4. ✅ Done in 1m 6s · shell · S3'))).toBe(true)
+    expect(lines[1]).toBe('4. ✅ Done in 1m 12s · shell · S3')
+    expect(lines.at(-3)).toBe('109. ⏳ shell · S108 · 5m 12s')
+    expect(lines.at(-2)).toBe('110. ⏳ shell · S109 · 5m 12s')
+    expect(taken(h).some(e => e.at < next.at && e.text.includes('\n4. ✅ Done in 1m 12s · shell · S3'))).toBe(true)
 
     // Rows 104 to 108 ended with the rest, but the cap held them out of that
     // edit; their five minutes start from the edit that shows them.
     const shownAll = taken(h).find(e => e.at > secondEnded)!
     expect(taken(h).find(e => e.at === secondEnded)!.text).not.toContain('\n104. ')
-    expect(shownAll.text).toContain('\n108. ✅ Done in 1m 6s · shell · S107')
+    expect(shownAll.text).toContain('\n108. ✅ Done in 1m 12s · shell · S107')
     await runPast(h, secondEnded)
-    expect(taken(h).find(e => e.at >= secondEnded + FIVE_MINUTES)!.text).toContain('\n104. ✅ Done in 1m 6s · shell · S103')
+    expect(taken(h).find(e => e.at >= secondEnded + FIVE_MINUTES)!.text).toContain('\n104. ✅ Done in 1m 12s · shell · S103')
     await runPast(h, shownAll.at)
     expect(taken(h).find(e => e.at >= shownAll.at + FIVE_MINUTES)!.text).not.toContain('\n104. ')
   })
@@ -1532,7 +1663,7 @@ describe('createAgentStream', () => {
     h.events.push(stopOf(h, 'a1'))
     const release = h.holdEdit()
     await h.tick()
-    expect(h.attempts.at(-1)!.text).toContain('\n2. ✅ Done in 6s · Ending-agent')
+    expect(h.attempts.at(-1)!.text).toContain('\n2. ✅ Done in 12s · Ending-agent')
     h.advance(1000)
     h.write('/s/agent-a1.jsonl', assistant([{ type: 'text', text: 'All done' }], { input_tokens: 1200 }))
     await h.tick()
@@ -1552,7 +1683,7 @@ describe('createAgentStream', () => {
     h.advance(CHAT_GAP_MS)
     h.events.push({ t: h.now(), event: 'stop', agent_id: 'a1', outcome: 'failed', error: 'rate_limit' })
     await h.tick()
-    expect(h.edits.at(-1)).toEqual({ id: 7, text: '🤖 Subagents\n1. ❌ Failed after 6s (rate_limit) · general-purpose · Review the plan' })
+    expect(h.edits.at(-1)).toEqual({ id: 7, text: '🤖 Subagents\n1. ❌ Failed after 12s (rate_limit) · general-purpose · Review the plan' })
     await h.tick()
     expect(h.stream.agents()).toEqual([])
   })
@@ -1584,17 +1715,17 @@ describe('createAgentStream', () => {
     h.events.push({ t: h.now(), event: 'stop', agent_id: 'fin' })
     await h.tick()
     const before = h.edits.at(-1)!.text.split('\n')
-    expect(before[3]).toBe('3. ✅ Done in 6s · general-purpose')
+    expect(before[3]).toBe('3. ✅ Done in 12s · general-purpose')
     h.advance(1000)
     const edits = h.attempts.length
     await h.stream.close(h.now() + CHAT_GAP_MS)
     expect(h.attempts).toHaveLength(edits + 1)
     expect(h.edits.at(-1)!.text.split('\n')).toEqual([
       '🤖 Subagents · 🐚 Shells',
-      '1. 🔌 No longer followed after 30m 8s · general-purpose · Quiet job · last: Starting…',
-      '2. 🔌 No longer followed after 7s · general-purpose · Long job · last: Checking gate · 1.5k tokens',
+      '1. 🔌 No longer followed after 30m 14s · general-purpose · Quiet job · last: Starting…',
+      '2. 🔌 No longer followed after 13s · general-purpose · Long job · last: Checking gate · 1.5k tokens',
       before[3],
-      '4. 🔌 No longer followed after 7s · shell · Wait for CI',
+      '4. 🔌 No longer followed after 13s · shell · Wait for CI',
     ])
     h.advance(CLOCK_REFRESH_MS); await h.tick()
     h.events.push({ t: h.now(), event: 'stop', agent_id: 'run' })
@@ -1611,7 +1742,7 @@ describe('createAgentStream', () => {
     h.advance(CHAT_GAP_MS)
     h.events.push({ t: h.now(), event: 'stop', agent_id: 'fin' })
     await h.stream.close(h.now() + CHAT_GAP_MS)
-    expect(h.edits).toEqual([{ id: 7, text: '🤖 Subagents\n1. 🔌 No longer followed after 6s · general-purpose · last: Starting…\n2. ✅ Done in 6s · general-purpose' }])
+    expect(h.edits).toEqual([{ id: 7, text: '🤖 Subagents\n1. 🔌 No longer followed after 12s · general-purpose · last: Starting…\n2. ✅ Done in 12s · general-purpose' }])
   })
 
   test('the closing edit waits for an edit in flight, then for the chat\'s next slot', async () => {
@@ -1620,7 +1751,7 @@ describe('createAgentStream', () => {
     h.events.push(start(h))
     await h.tick()
     const release = h.holdEdit()
-    h.advance(CLOCK_REFRESH_MS); await h.tick()
+    h.advance(BEAT_MS); await h.tick()
     const inflight = h.attempts.at(-1)!.at
     const closed = h.stream.close(h.now() + CHAT_GAP_MS)
     for (let i = 0; i < 5; i++) await new Promise(r => setTimeout(r, 0))
@@ -1629,7 +1760,7 @@ describe('createAgentStream', () => {
     await closed
     expect(h.attempts).toHaveLength(2)
     expect(h.attempts[1]!.at).toBe(inflight + CHAT_GAP_MS)
-    expect(h.attempts[1]!.text).toBe('🤖 Subagents\n1. 🔌 No longer followed after 10s · general-purpose · last: Starting…')
+    expect(h.attempts[1]!.text).toBe('🤖 Subagents\n1. 🔌 No longer followed after 12s · general-purpose · last: Starting…')
   })
 
   test('the closing edit waits for the first send in flight and edits the message it made', async () => {
@@ -1697,7 +1828,7 @@ describe('createAgentStream', () => {
     h.advance(CHAT_GAP_MS)
     h.write('/s/agent-a1.jsonl', line(userText('u1', h.now() - 3000, 'Long job')) + line(apiError('e1', h.now(), 'overloaded')))
     await h.tick()
-    expect(h.edits.at(-1)!.text).toBe('🤖 Subagents\n1. ❌ Failed after 6s (overloaded) · general-purpose')
+    expect(h.edits.at(-1)!.text).toBe('🤖 Subagents\n1. ❌ Failed after 12s (overloaded) · general-purpose')
     // Another chat writes, and the run resumes before the failure is confirmed.
     h.setChat('2002')
     h.advance(CHAT_GAP_MS)
@@ -1720,7 +1851,7 @@ describe('createAgentStream', () => {
     h.advance(CHAT_GAP_MS)
     for (const id of ['a1', 'a3']) h.write(`/s/agent-${id}.jsonl`, line(apiError(`e-${id}`, h.now(), 'overloaded')))
     await h.tick()
-    expect(h.edits.at(-1)!.text).toBe('🤖 Subagents\n1. ❌ Failed after 6s (overloaded) · general-purpose\n2. ❌ Failed after 6s (overloaded) · general-purpose')
+    expect(h.edits.at(-1)!.text).toBe('🤖 Subagents\n1. ❌ Failed after 12s (overloaded) · general-purpose\n2. ❌ Failed after 12s (overloaded) · general-purpose')
     // The next tick confirms both failures and ends the group.
     h.advance(CHAT_GAP_MS); await h.tick()
     // a3 resumes and finishes in a new message.
@@ -1736,7 +1867,7 @@ describe('createAgentStream', () => {
     // a1's late stop edits its message; the replaced a3 stays as it was there.
     h.events.push({ t: h.now(), event: 'stop', agent_id: 'a1' })
     await h.tick()
-    expect(h.edits.at(-1)).toEqual({ id: 7, text: '🤖 Subagents\n1. ✅ Done in 30s · general-purpose\n2. ❌ Failed after 6s (overloaded) · general-purpose' })
+    expect(h.edits.at(-1)).toEqual({ id: 7, text: '🤖 Subagents\n1. ✅ Done in 1m 0s · general-purpose\n2. ❌ Failed after 12s (overloaded) · general-purpose' })
     h.write('/s/agent-a3.jsonl', line(userText('r-a3', h.now() - 2 * CHAT_GAP_MS, 'Resume')) + line(userText('n-a3', h.now(), 'More')))
     for (let i = 0; i < 4; i++) { h.advance(CHAT_GAP_MS); await h.tick() }
     expect(h.sent).toHaveLength(2)
@@ -1751,7 +1882,7 @@ describe('createAgentStream', () => {
     h.advance(CHAT_GAP_MS)
     h.write('/s/agent-a1.jsonl', line(userText('u-a1', h.now() - CHAT_GAP_MS, 'Job')) + line(apiError('e-a1', h.now(), 'overloaded')))
     await h.tick()
-    expect(h.edits.at(-1)).toEqual({ id: 7, text: '🤖 Subagents\n1. ❌ Failed after 6s (overloaded) · general-purpose' })
+    expect(h.edits.at(-1)).toEqual({ id: 7, text: '🤖 Subagents\n1. ❌ Failed after 12s (overloaded) · general-purpose' })
     // The next tick confirms the failure and ends the group.
     h.advance(CHAT_GAP_MS); await h.tick()
     // a2 starts a new group in its own message, and a1's stop lands in that
@@ -1769,16 +1900,16 @@ describe('createAgentStream', () => {
     h.advance(CHAT_GAP_MS)
     h.events.push({ t: h.now(), event: 'stop', agent_id: 'a2' })
     await h.tick()
-    expect(h.edits.slice(edits)).toEqual([{ id: 7, text: '🤖 Subagents\n1. ✅ Done in 18s · general-purpose' }])
+    expect(h.edits.slice(edits)).toEqual([{ id: 7, text: '🤖 Subagents\n1. ✅ Done in 36s · general-purpose' }])
     // The record took the final frame at the stop, before the edit, and is
     // deleted once Telegram has it.
     const late = h.records.filter(r => r.id === 7 && r.at >= stopAt)
-    expect(late[0]).toEqual({ at: stopAt, op: 'write', chat: '1001', id: 7, text: '🤖 Subagents\n1. ✅ Done in 18s · general-purpose' })
+    expect(late[0]).toEqual({ at: stopAt, op: 'write', chat: '1001', id: 7, text: '🤖 Subagents\n1. ✅ Done in 36s · general-purpose' })
     expect(late.at(-1)).toMatchObject({ op: 'remove', id: 7 })
     for (let i = 0; i < 3; i++) { h.advance(CHAT_GAP_MS); await h.tick() }
     expect(h.edits.slice(edits)).toEqual([
-      { id: 7, text: '🤖 Subagents\n1. ✅ Done in 18s · general-purpose' },
-      { id: 8, text: '🤖 Subagents\n1. ✅ Done in 6s · general-purpose' },
+      { id: 7, text: '🤖 Subagents\n1. ✅ Done in 36s · general-purpose' },
+      { id: 8, text: '🤖 Subagents\n1. ✅ Done in 12s · general-purpose' },
     ])
     expect(h.sent).toHaveLength(2)
   })
@@ -1802,7 +1933,7 @@ describe('createAgentStream', () => {
     h.advance(CHAT_GAP_MS)
     h.events.push({ t: h.now(), event: 'stop', agent_id: 'a1' })
     await h.tick()
-    expect(h.edits.at(-1)).toEqual({ id: 7, text: '🤖 Subagents\n1. ✅ Done in 24s · general-purpose\n2. ❌ Failed after 6s (overloaded) · general-purpose' })
+    expect(h.edits.at(-1)).toEqual({ id: 7, text: '🤖 Subagents\n1. ✅ Done in 48s · general-purpose\n2. ❌ Failed after 12s (overloaded) · general-purpose' })
   })
 
   test('a late stop whose message is gone tries one edit, sends no new message and drops the record', async () => {
@@ -1820,7 +1951,7 @@ describe('createAgentStream', () => {
     h.advance(CHAT_GAP_MS)
     h.events.push({ t: h.now(), event: 'stop', agent_id: 'a1' })
     for (let i = 0; i < 5; i++) { await h.tick(); h.advance(CHAT_GAP_MS) }
-    expect(h.attempts.slice(shown).map(a => a.text)).toEqual(['🤖 Subagents\n1. ✅ Done in 18s · general-purpose'])
+    expect(h.attempts.slice(shown).map(a => a.text)).toEqual(['🤖 Subagents\n1. ✅ Done in 36s · general-purpose'])
     expect(h.sent).toHaveLength(1)
     expect(h.records.filter(r => r.id === 7).at(-1)).toMatchObject({ op: 'remove', id: 7 })
   })
@@ -1836,11 +1967,11 @@ describe('createAgentStream', () => {
     await h.tick()
     // The next tick confirms the failure and ends the group.
     h.advance(CHAT_GAP_MS); await h.tick()
-    expect(h.edits.at(-1)).toEqual({ id: 7, text: '🤖 Subagents\n1. ❌ Failed after 6s (overloaded) · general-purpose\n2. ✅ Done in 0s · general-purpose' })
+    expect(h.edits.at(-1)).toEqual({ id: 7, text: '🤖 Subagents\n1. ❌ Failed after 12s (overloaded) · general-purpose\n2. ✅ Done in 0s · general-purpose' })
     h.advance(FINISHED_ROW_MS)
     h.events.push({ t: h.now(), event: 'stop', agent_id: 'a1' })
     await h.tick()
-    expect(h.edits.at(-1)).toEqual({ id: 7, text: '🤖 Subagents\n1. ✅ Done in 5m 12s · general-purpose\n2. ✅ Done in 0s · general-purpose' })
+    expect(h.edits.at(-1)).toEqual({ id: 7, text: '🤖 Subagents\n1. ✅ Done in 5m 24s · general-purpose\n2. ✅ Done in 0s · general-purpose' })
   })
 
   test('a stop for a watched row while its group is open shows in the next frame, and the row leaves five minutes after it', async () => {
@@ -1852,15 +1983,15 @@ describe('createAgentStream', () => {
     h.advance(CHAT_GAP_MS)
     h.write('/s/agent-a1.jsonl', line(userText('u-a1', h.now() - CHAT_GAP_MS, 'Job')) + line(apiError('e-a1', h.now(), 'overloaded')))
     await h.tick()
-    expect(h.edits.at(-1)!.text.split('\n')[1]).toBe('1. ❌ Failed after 6s (overloaded) · general-purpose')
+    expect(h.edits.at(-1)!.text.split('\n')[1]).toBe('1. ❌ Failed after 12s (overloaded) · general-purpose')
     h.advance(CHAT_GAP_MS)
     h.events.push({ t: h.now(), event: 'stop', agent_id: 'a1' })
     await h.tick()
-    expect(h.edits.at(-1)!.text.split('\n')[1]).toBe('1. ✅ Done in 12s · general-purpose')
+    expect(h.edits.at(-1)!.text.split('\n')[1]).toBe('1. ✅ Done in 24s · general-purpose')
     // The clock refresh edits every ten seconds; the row is in each edit up
     // to five minutes after that frame, and out of the one at five minutes.
     for (let i = 1; i < FINISHED_ROW_MS / CLOCK_REFRESH_MS; i++) { h.advance(CLOCK_REFRESH_MS); await h.tick() }
-    expect(h.edits.at(-1)!.text.split('\n')[1]).toBe('1. ✅ Done in 12s · general-purpose')
+    expect(h.edits.at(-1)!.text.split('\n')[1]).toBe('1. ✅ Done in 24s · general-purpose')
     h.advance(CLOCK_REFRESH_MS); await h.tick()
     expect(h.edits.at(-1)!.text).toMatch(/^🤖 Subagents\n2\. ⏳ /)
   })
@@ -1874,20 +2005,20 @@ describe('createAgentStream', () => {
     h.advance(CHAT_GAP_MS)
     h.write('/s/agent-a1.jsonl', line(userText('u-a1', h.now() - CHAT_GAP_MS, 'Job')) + line(apiError('e-a1', h.now(), 'overloaded')))
     await h.tick()
-    expect(h.edits.at(-1)!.text).toBe('🤖 Subagents\n1. ❌ Failed after 6s (overloaded) · general-purpose')
+    expect(h.edits.at(-1)!.text).toBe('🤖 Subagents\n1. ❌ Failed after 12s (overloaded) · general-purpose')
     // The resumed prompt reopens the row; by the time its start is read, the
     // tail holds only entries newer than the error.
     h.advance(CHAT_GAP_MS)
     h.write('/s/agent-a1.jsonl', line(userText('r-a1', h.now(), 'Resume')))
     await h.tick()
-    expect(h.edits.at(-1)!.text).toMatch(/^🤖 Subagents\n1\. ⏳ general-purpose · .* · 12s$/)
+    expect(h.edits.at(-1)!.text).toMatch(/^🤖 Subagents\n1\. ⏳ general-purpose · .* · 24s$/)
     h.advance(CHAT_GAP_MS)
     h.events.push(start(h, 'a1'))
     await h.tick()
     // The row reads the same apart from its clock, so the next clock refresh
     // shows it: on the resumed run's clock, not the first run's.
-    h.advance(CLOCK_REFRESH_MS); await h.tick()
-    expect(h.edits.at(-1)!.text).toMatch(/^🤖 Subagents\n1\. ⏳ general-purpose · .* · 10s$/)
+    h.advance(BEAT_MS); await h.tick()
+    expect(h.edits.at(-1)!.text).toMatch(/^🤖 Subagents\n1\. ⏳ general-purpose · .* · 12s$/)
   })
 
   test('a group whose rows have all left the message ends without an edit', async () => {
@@ -1955,7 +2086,7 @@ describe('createAgentStream', () => {
       h.events.push({ t: h.now(), event: 'stop', agent_id: 'fin' })
       await h.tick()
       expect(h.records.at(-1)).toEqual({ at: h.now(), op: 'write', chat: '1001', id: 7,
-        text: '🤖 Subagents\n1. 🔌 No longer followed after 6s · general-purpose · last: Starting…\n2. ✅ Done in 6s · general-purpose' })
+        text: '🤖 Subagents\n1. 🔌 No longer followed after 12s · general-purpose · last: Starting…\n2. ✅ Done in 12s · general-purpose' })
       expect(h.attempts.at(-1)!.at).toBe(h.records.at(-1)!.at)
       h.advance(CHAT_GAP_MS)
       h.events.push({ t: h.now(), event: 'stop', agent_id: 'run' })
@@ -1977,7 +2108,7 @@ describe('createAgentStream', () => {
         await h.stream.close(h.now() + CHAT_GAP_MS)
         const after = h.records.slice(before)
         expect(after[0]).toEqual({ at: h.now(), op: 'write', chat: '1001', id: 7,
-          text: '🤖 Subagents\n1. 🔌 No longer followed after 8s · general-purpose · last: Starting…' })
+          text: '🤖 Subagents\n1. 🔌 No longer followed after 14s · general-purpose · last: Starting…' })
         expect(after.slice(1).map(r => r.op)).toEqual(answer === 'refused' ? [] : ['remove'])
       }
     })
@@ -1988,7 +2119,7 @@ describe('createAgentStream', () => {
       h.events.push(start(h))
       await h.tick()
       h.failEditWith({ description: 'Bad Request: message to edit not found' })
-      h.advance(CLOCK_REFRESH_MS); await h.tick()
+      h.advance(BEAT_MS); await h.tick()
       h.failEditWith(undefined)
       expect(h.records.at(-1)).toMatchObject({ op: 'remove', id: 7 })
       h.advance(CHAT_GAP_MS); await h.tick()
@@ -2001,7 +2132,7 @@ describe('createAgentStream', () => {
       h.events.push(start(h, 'run'), start(h, 'fin'))
       await h.tick()
       h.failEditWith({ description: 'Bad Request: message thread not found' })
-      for (let i = 0; i < 5; i++) { h.advance(CLOCK_REFRESH_MS); await h.tick() }
+      for (let i = 0; i < 5; i++) { h.advance(BEAT_MS); await h.tick() }
       h.failEditWith(undefined)
       const tried = h.attempts.length
       h.advance(CHAT_GAP_MS)
@@ -2009,7 +2140,7 @@ describe('createAgentStream', () => {
       await h.tick()
       expect(h.attempts).toHaveLength(tried)
       expect(h.records.at(-1)).toEqual({ at: h.now(), op: 'write', chat: '1001', id: 7,
-        text: '🤖 Subagents\n1. ✅ Done in 56s · general-purpose\n2. ✅ Done in 56s · general-purpose' })
+        text: '🤖 Subagents\n1. ✅ Done in 1m 12s · general-purpose\n2. ✅ Done in 1m 12s · general-purpose' })
     })
 
     test('a row dropped after two hours of quiet keeps its dropped line in the record, with its clock read to the close', async () => {

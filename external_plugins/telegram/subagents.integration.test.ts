@@ -52,7 +52,7 @@ describe.skipIf(process.platform !== 'linux')('the subagents message in the runn
     const dir = state()
     const { channel, file } = await twoRows(dir)
     appendAgentEvent(file, { t: Date.now(), event: 'stop', agent_id: 'a2' })
-    await until(() => calls(dir).some(c => panelEdit(c) && c.payload.text.includes('\n2. ✅ Done in')), AGENT_TICK_MS + 4000)
+    await until(() => calls(dir).some(c => panelEdit(c) && c.payload.text.includes('\n2. ✅ Done in')), AGENT_TICK_MS + CHAT_GAP_MS + 4000)
     const shown = calls(dir).filter(panelEdit).at(-1)!
     const finished = shown.payload.text.split('\n')[2]
     expect(finished).toMatch(/^2\. ✅ Done in \d+s · general-purpose · Short job$/)
@@ -77,7 +77,7 @@ describe.skipIf(process.platform !== 'linux')('the subagents message in the runn
     // Telegram holds its answer to the edit that shows the finished row.
     const { channel, file } = await twoRows(dir, conflicts([{ method: 'editMessageText', has: '2. ✅ Done in', times: 1, holdMs: 1500 }]))
     appendAgentEvent(file, { t: Date.now(), event: 'stop', agent_id: 'a2' })
-    await until(() => calls(dir).some(c => panelEdit(c) && c.payload.text.includes('\n2. ✅ Done in')), AGENT_TICK_MS + 4000)
+    await until(() => calls(dir).some(c => panelEdit(c) && c.payload.text.includes('\n2. ✅ Done in')), AGENT_TICK_MS + CHAT_GAP_MS + 4000)
     const inflight = calls(dir).filter(panelEdit).at(-1)!
     await channel.close()
     const after = calls(dir).filter(c => isPanel(c) && c.at > inflight.at)
@@ -108,10 +108,10 @@ describe.skipIf(process.platform !== 'linux')('the subagents message in the runn
     expect(after[0]!.payload.text).toMatch(/^🤖 Subagents\n1\. 🔌 No longer followed after \d+s · general-purpose · Long job · last: Starting…$/)
   }, 20000)
 
-  // The message's six seconds are its own: a reply into the same chat right
+  // The message's twelve seconds are its own: a reply into the same chat right
   // after its send goes to Telegram at once, and the message's next edit still
   // waits for its slot.
-  test('a reply right after the subagents message\'s send goes out at once, and the message\'s next edit still comes 6 seconds after its send', async () => {
+  test('a reply right after the subagents message\'s send goes out at once, and the message\'s next edit still comes 12 seconds after its send', async () => {
     const dir = state()
     const { channel, file } = await twoRows(dir)
     const send = calls(dir).find(panelSend)!
@@ -120,10 +120,10 @@ describe.skipIf(process.platform !== 'linux')('the subagents message in the runn
     expect(r.isError).toBeFalsy()
     const reply = calls(dir).find(c => c.method === 'sendMessage' && c.payload.text === 'A reply inside the slot')!
     expect(reply.at - asked).toBeLessThanOrEqual(2 * STEP_MS)
-    expect(reply.at - send.at).toBeLessThan(6_000)
+    expect(reply.at - send.at).toBeLessThan(12_000)
     appendAgentEvent(file, { t: Date.now(), event: 'stop', agent_id: 'a2' })
-    await until(() => calls(dir).some(panelEdit), AGENT_TICK_MS + 6_000 + 4000)
-    expect(calls(dir).find(panelEdit)!.at - send.at).toBeGreaterThanOrEqual(6_000 - SLACK_MS)
+    await until(() => calls(dir).some(panelEdit), AGENT_TICK_MS + 12_000 + 4000)
+    expect(calls(dir).find(panelEdit)!.at - send.at).toBeGreaterThanOrEqual(12_000 - SLACK_MS)
     await channel.close()
   }, 20000)
 

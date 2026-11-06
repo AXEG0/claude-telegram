@@ -63,7 +63,8 @@ describe.skipIf(process.platform !== 'linux')('a row its transcript closed', () 
     expect(row(reopened.payload.text, 1)).toMatch(/ · 1m \d+s$/)
     s.begin('a1', 'Resumed job')
     const replaced = await s.next(t => row(t, 1).includes('Resumed job'), reopened.index + 1)
-    expect(row(replaced.payload.text, 1)).toMatch(/^1\. ⏳ general-purpose · Resumed job · Starting… · \ds$/)
+    // The new run's clock, shown at the chat's next slot, at most 12 seconds on.
+    expect(row(replaced.payload.text, 1)).toMatch(/^1\. ⏳ general-purpose · Resumed job · Starting… · 1?\ds$/)
     expect(replaced.payload.message_id).toBe(sent.message_id)
   }, 30000)
 
@@ -92,9 +93,10 @@ describe.skipIf(process.platform !== 'linux')('a row its transcript closed', () 
     s.begin('a1', 'Long job')
     s.write('a1', userText('u1', Date.now(), 'Long job'))
     const sent = await s.next(t => row(t, 1).startsWith('1. ⏳'))
-    // Past the chat's spacing, so the tick that reads the error also shows it,
-    // and the next tick is the one that would confirm it.
-    await wait(Math.max(0, sent.at + CHAT_GAP_MS + 500 - Date.now()))
+    // Up to the tick on which the chat's slot opens, so the tick that reads the
+    // error also shows it, before the clock refresh takes that slot, and the
+    // next tick is the one that would confirm it.
+    await wait(Math.max(0, sent.at + CHAT_GAP_MS - AGENT_TICK_MS + 500 - Date.now()))
     s.write('a1', apiError('e1', Date.now(), 'overloaded'))
     const failed = await s.next(t => row(t, 1).startsWith('1. ❌'), sent.index + 1)
     // The nudge Claude Code sends after a cut refusal, before the next tick.

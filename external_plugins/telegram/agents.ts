@@ -30,12 +30,12 @@ import { join } from 'path'
 
 export const AGENT_TICK_MS = 3000
 // Telegram limits messages per chat, so all subagents in a chat share one
-// budget: one send or edit per this gap. Six seconds, at most 600 an hour:
-// on one installation, a message edited every three seconds for about six
-// hours was followed by an 11-hour hold on every send into its chat, while
-// other installations' bots, editing at a 6 to 12 second median, were never
-// held. Telegram publishes no limit on edits.
-export const CHAT_GAP_MS = 6000
+// budget: one send or edit per this gap. Twelve seconds, at most 300 an hour
+// and 7,200 a day: two installations' chats were held for hours, every send
+// into them included, after about 10,800 sends and edits there in 24 hours,
+// nearly all of them edits of this message, one of them at a six-second gap,
+// while full days of about 9,000 drew no hold. Telegram publishes no limit.
+export const CHAT_GAP_MS = 12000
 // With no new step or token count, a message is edited only this often, to
 // move its clock.
 export const CLOCK_REFRESH_MS = 10_000

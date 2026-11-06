@@ -146,7 +146,9 @@ describe.skipIf(process.platform !== 'linux')('a failure read from the transcrip
     s.begin('a1', 'Long job')
     s.write('a1', userText('u1', Date.now(), 'Long job'))
     const sent = await s.next(t => row(t, 1).startsWith('1. ⏳'))
-    await wait(Math.max(0, sent.at + CHAT_GAP_MS + 500 - Date.now()))
+    // The error is read at the tick on which the chat's slot opens, so the
+    // failure shows at once, before the clock refresh takes that slot.
+    await wait(Math.max(0, sent.at + CHAT_GAP_MS - AGENT_TICK_MS + 500 - Date.now()))
     s.write('a1', apiError('e1', Date.now(), 'overloaded'))
     const failed = await s.next(t => row(t, 1).startsWith('1. ❌'), sent.index + 1)
     // About 400 KB of request records, before the next tick: the tail holds
