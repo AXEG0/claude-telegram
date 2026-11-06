@@ -334,16 +334,20 @@ const emptyText = (method: string, payload: Record<string, unknown>) =>
 
 // A caption as api.telegram.org keeps it, read live with an installation's bot
 // on 2026-11-06: it turns every control character below a space but the line
-// break into a space, a tab included, and drops every carriage return and
-// every character from U+2028 to U+202E, then trims spaces and line breaks
-// from both ends. It kept '\tx\t' and '\x01x\x01' as 'x', 'a\x0bb' and
-// 'a\x1fb' as 'a b', and 'a\rb' and 'a\u202eb' as 'ab'; it kept DEL, U+200B and
-// a no-break space at each end as sent; and it answered a caption edit to
-// ' \t\r ' with a message that has no caption. It counts a caption in
-// characters (code points): a send took 1024 characters outside the Basic
-// Multilingual Plane and refused 1025 of them, or 1025 'x', as too long.
-const captionKept = (caption: string) =>
-  trimmed(caption.replace(/[\r\u2028-\u202e]/g, '').replace(/[\x00-\x09\x0b\x0c\x0e-\x1f]/g, ' '))
+// break into a space, a tab included, and drops every carriage return, every
+// character from U+2028 to U+202E and the combining marks U+030A, U+0333 and
+// U+033F, then trims spaces and line breaks from both ends. It kept '\tx\t' and
+// '\x01x\x01' as 'x', 'a\x00b', 'a\x0bb' and 'a\x1fb' as 'a b', and 'a\rb',
+// 'a\u202eb' and 'a\u0333b' as 'ab'; it kept DEL, U+2027, U+202F, U+200B and a
+// no-break space at each end as sent; and it answered a caption edit to
+// ' \t\r ', to a no-break space alone and to U+200B alone with a message that
+// has no caption. It counts a caption in characters (code points): a send
+// took 1024 characters outside the Basic Multilingual Plane and refused 1025
+// of them, or 1025 'x', as too long.
+const captionKept = (caption: string) => {
+  const kept = trimmed(caption.replace(/[\r\u030a\u0333\u033f\u2028-\u202e]/g, '').replace(/[\x00-\x09\x0b\x0c\x0e-\x1f]/g, ' '))
+  return /^[ \n\u00a0\u200b]*$/.test(kept) ? '' : kept
+}
 const LONG_CAPTION = { error_code: 400, description: 'Bad Request: message caption is too long' }
 const longCaption = (method: string, payload: Record<string, unknown>) => {
   const captions = method === 'sendMediaGroup' ? (payload.media as Record<string, unknown>[]).map(m => m.caption)

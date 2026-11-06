@@ -303,15 +303,22 @@ const textTrim = (text: string): string => text.replace(TRIMMED, '')
 
 // A caption as Telegram keeps it, as api.telegram.org answered live reads: it
 // turns every control character below a space but the line break into a
-// space, a tab included, and drops every carriage return and every character
-// from U+2028 to U+202E, then removes spaces and line breaks from both ends.
-// So '\tx\t' is kept as 'x', 'a\x0bb' as 'a b', and 'a\rb' and 'a\u2028b' as
-// 'ab'. Any other character is left alone: DEL, U+200B and a no-break space,
-// at the ends too, came back as sent. A caption with nothing left is no
-// caption, so an edit to one would delete the text.
+// space, a tab included, and drops every carriage return, every character
+// from U+2028 to U+202E and the combining marks U+030A, U+0333 and U+033F,
+// then removes spaces and line breaks from both ends. So '\tx\t' is kept as
+// 'x', 'a\x0bb' as 'a b', and 'a\rb', 'a\u2028b' and 'a\u0333b' as 'ab'. A caption
+// left with nothing but no-break spaces and U+200B is no caption too, though
+// both stay in a caption with anything else, at its ends too. Any other
+// character is left alone: DEL, U+2027 and U+202F came back as sent. A
+// caption with nothing left is no caption, so an edit to one would delete the
+// text.
 const SPACED = /[\x00-\x09\x0b\x0c\x0e-\x1f]/g
-const DROPPED = /[\r\u2028-\u202e]/g
-export const telegramTrim = (text: string): string => textTrim(text.replace(DROPPED, '').replace(SPACED, ' '))
+const DROPPED = /[\r\u030a\u0333\u033f\u2028-\u202e]/g
+const BLANK = /^[ \n\u00a0\u200b]*$/
+export const telegramTrim = (text: string): string => {
+  const kept = textTrim(text.replace(DROPPED, '').replace(SPACED, ' '))
+  return BLANK.test(kept) ? '' : kept
+}
 
 // How long Telegram counts a caption: in characters (code points), so a
 // character outside the Basic Multilingual Plane, two UTF-16 units, counts

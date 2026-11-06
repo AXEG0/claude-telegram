@@ -699,16 +699,25 @@ describe('a reply with files to a bot', () => {
     expect(botReply('', files(1))).toEqual({ groups: [files(1)], pieces: [] })
     expect(botReply(' \n \n', files(1))).toEqual({ groups: [files(1)], pieces: [] })
     // Telegram turns every control character below a space but the line
-    // break into a space, a tab included, and drops every carriage return and
-    // every character from U+2028 to U+202E, then trims spaces and line breaks
-    // from both ends, as api.telegram.org answered live reads.
+    // break into a space, a tab included, and drops every carriage return,
+    // every character from U+2028 to U+202E and the combining marks U+030A,
+    // U+0333 and U+033F, then trims spaces and line breaks from both ends, as
+    // api.telegram.org answered live reads.
     for (const [sent, kept] of [
       ['\tx\t', 'x'], ['\x01x\x01', 'x'],
-      ['a\x01b', 'a b'], ['a\x0bb', 'a b'], ['a\x0cb', 'a b'], ['a\x1fb', 'a b'],
-      ['a\rb', 'ab'], ['a\u2028b', 'ab'], ['a\u2029b', 'ab'], ['a\u202ab', 'ab'], ['a\u202eb', 'ab'],
-      // It left DEL, U+200B, a no-break space at each end and a line break as sent.
-      ['a\x7fb', 'a\x7fb'], ['a\u200bb', 'a\u200bb'], ['\u00a0x\u00a0', '\u00a0x\u00a0'], ['a\nb', 'a\nb'],
+      ['a\x00b', 'a b'], ['a\x01b', 'a b'], ['a\x0bb', 'a b'], ['a\x0cb', 'a b'], ['a\x1fb', 'a b'],
+      ['a\rb', 'ab'], ['a\u2028b', 'ab'], ['a\u2029b', 'ab'], ['a\u202ab', 'ab'], ['a\u202bb', 'ab'], ['a\u202eb', 'ab'],
+      ['a\u030ab', 'ab'], ['a\u0333b', 'ab'], ['a\u033fb', 'ab'],
+      // It left DEL, U+2027, U+202F, U+200B, a no-break space at each end and
+      // a line break as sent.
+      ['a\x7fb', 'a\x7fb'], ['a\u2027b', 'a\u2027b'], ['a\u202fb', 'a\u202fb'], ['a\u200bb', 'a\u200bb'],
+      ['\u00a0x\u00a0', '\u00a0x\u00a0'], ['a\nb', 'a\nb'],
+      // It answered a caption edit to U+0333, a no-break space or U+200B alone
+      // with no caption, so a caption of nothing but those is none.
+      ['\u0333', ''], ['\u00a0', ''], ['\u200b', ''],
     ]) expect(telegramTrim(sent!)).toBe(kept!)
+    expect(telegramTrim(' \u200b\u00a0\n\u00a0 ')).toBe('')
+    expect(telegramTrim('\u00a0\u200bx\u200b')).toBe('\u00a0\u200bx\u200b')
     expect(telegramTrim('\r\n\ta\tb\r\n \r')).toBe('a b')
     expect(telegramTrim('\u2028\n\x00a\x0e\u202db\x1f\u2029')).toBe('a b')
     expect(botReply('a\rb', files(1))).toEqual(one('ab'))
@@ -717,10 +726,10 @@ describe('a reply with files to a bot', () => {
     // answered a caption edit to ' \t\r ' with no caption.
     expect(botReply(' \t\r ', files(1))).toEqual({ groups: [files(1)], pieces: [] })
     expect(botReply('\x01\u2028\x0b\u202e\x1f', files(1))).toEqual({ groups: [files(1)], pieces: [] })
-    // The rule leaves any other character alone, and it counts: a no-break
-    // space, which Telegram kept at each end and JavaScript's own trim would
-    // remove.
-    expect(botReply(' \t\u00a0\r\n', files(1))).toEqual(one('\u00a0'))
+    expect(botReply(' \t\u00a0\u0333\r\u200b\n', files(1))).toEqual({ groups: [files(1)], pieces: [] })
+    // A no-break space beside anything else stays, and it counts: Telegram
+    // kept one at each end, where JavaScript's own trim would remove it.
+    expect(botReply(' \t\u00a0x\r\n', files(1))).toEqual(one('\u00a0x'))
     expect(botReply('\u00a0' + 'x'.repeat(1024), files(1))).toEqual({ groups: [files(1)], pieces: ['\u00a0' + 'x'.repeat(1024)] })
     // The 1024 counts what Telegram keeps, in characters (code points): it
     // took 1024 characters between two tabs, and 1024 followed by a carriage
@@ -729,6 +738,7 @@ describe('a reply with files to a bot', () => {
     expect(botReply('\t' + 'x'.repeat(1024) + '\t', files(1))).toEqual(one('x'.repeat(1024)))
     expect(botReply('x'.repeat(1024) + '\r', files(1))).toEqual(one('x'.repeat(1024)))
     expect(botReply('\x01' + 'x'.repeat(512) + '\u2028' + 'x'.repeat(512) + '\u202e', files(1))).toEqual(one('x'.repeat(1024)))
+    expect(botReply('\u0333' + 'x'.repeat(512) + '\u030a' + 'x'.repeat(512) + '\u033f', files(1))).toEqual(one('x'.repeat(1024)))
     // 1,048 UTF-16 units, and 1,024 characters once its carriage returns go.
     const lines = Array.from({ length: 25 }, () => 'l'.repeat(40))
     expect(botReply(lines.join('\r\n'), files(1))).toEqual(one(lines.join('\n')))

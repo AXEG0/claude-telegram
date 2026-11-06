@@ -1297,22 +1297,25 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     expect((await edit(`  \n${most}\n  `)).content[0].text).toBe(edited)
     expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', most]])
     // Telegram turns every control character below a space but the line
-    // break into a space, a tab included, and drops every carriage return and
-    // every character from U+2028 to U+202E, then trims spaces and line breaks
-    // from both ends, as api.telegram.org answered live reads, and the edit
-    // sends what it keeps.
+    // break into a space, a tab included, and drops every carriage return,
+    // every character from U+2028 to U+202E and the combining marks U+030A,
+    // U+0333 and U+033F, then trims spaces and line breaks from both ends, as
+    // api.telegram.org answered live reads, and the edit sends what it keeps.
     from = calls(t.dir).length
     expect((await edit(' \n\tcorrected\r\nnote\tagain\t\r\n ')).content[0].text).toBe(edited)
     expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', 'corrected\nnote again']])
     from = calls(t.dir).length
     expect((await edit('\x0bthe\x0cfinal\u2028\u202e note\x1f\u2029')).content[0].text).toBe(edited)
     expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', 'the final note']])
-    // The rule leaves any other character alone: a no-break space, which
-    // Telegram kept at each end and JavaScript's own trim would remove.
     from = calls(t.dir).length
-    expect((await edit(' \u00a0\t\r')).content[0].text).toBe(edited)
+    expect((await edit('\u030aone\u0333 two\x00three\u033f\u202b')).content[0].text).toBe(edited)
+    expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', 'one two three']])
+    // A no-break space or U+200B beside anything else stays: Telegram kept a
+    // no-break space at each end, where JavaScript's own trim would remove it.
+    from = calls(t.dir).length
+    expect((await edit(' \u00a0x\u200b\t\r')).content[0].text).toBe(edited)
     expect(calls(t.dir).slice(from).map(c => [c.method, c.payload])).toEqual([
-      ['editMessageCaption', { chat_id: '7080', message_id: id, caption: '\u00a0' }],
+      ['editMessageCaption', { chat_id: '7080', message_id: id, caption: '\u00a0x\u200b' }],
     ])
     // The 1024 counts what Telegram keeps, in characters (code points): it
     // took 1024 characters between two tabs, and 1024 followed by a carriage
@@ -1323,6 +1326,7 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     for (const [text, kept] of [
       [` \t${'c'.repeat(1024)}\r\n`, 'c'.repeat(1024)],
       [`\x01${'d'.repeat(512)}\u2028${'d'.repeat(512)}\u202e`, 'd'.repeat(1024)],
+      [`\u0333${'e'.repeat(512)}\u030a${'e'.repeat(512)}\u033f`, 'e'.repeat(1024)],
       [lines.join('\r\n'), lines.join('\n')],
       ['\u{1F600}'.repeat(1024), '\u{1F600}'.repeat(1024)],
     ]) {
@@ -1337,9 +1341,10 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
         'edit_message failed: this text has 1025 characters, over the 1024 a caption holds; nothing was edited; send it as a new reply')
     }
     // A text that is empty as a caption makes no call: Telegram answered a
-    // caption edit to ' \t\r ' with a message that has no caption, so the
-    // edit would delete the text.
-    for (const text of ['  \n ', '', ' \t\r ', '\r\n\t', '\x01\u2028\x0b\u202e\x1f']) {
+    // caption edit to ' \t\r ', to U+0333, to a no-break space and to U+200B,
+    // each alone, with a message that has no caption, so the edit would
+    // delete the text.
+    for (const text of ['  \n ', '', ' \t\r ', '\r\n\t', '\x01\u2028\x0b\u202e\x1f', '\u0333', '\u00a0', '\u200b', ' \u00a0\u200b\n\u0333 ']) {
       expect(failure(await edit(text))).toBe('edit_message failed: a caption needs text once its ends are trimmed; nothing was edited')
     }
     expect(calls(t.dir).slice(from)).toEqual([])
