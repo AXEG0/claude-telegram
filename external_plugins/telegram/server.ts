@@ -681,8 +681,9 @@ const sentWords = createTextMemory()
 // What each recent message the bot sent through reply holds: text, a file
 // with no text, or a file whose caption holds text, as Telegram's answer for
 // the file says. A reply with files names it, and edit_message edits the
-// text where it lives. Like sentWords, it lives in this process, so a message
-// sent before the server started is edited as before.
+// text where it lives. Like sentWords, it lives in this process and keeps the
+// latest thousand messages, so a message sent before the server started, or
+// followed by a thousand newer ones through reply, is edited as before.
 type Holds = 'text' | 'file' | 'caption'
 const sentHolds = createTextMemory()
 const HOLDS_LABEL: Record<Holds, string> = { text: 'text', file: 'file', caption: 'file with text caption' }

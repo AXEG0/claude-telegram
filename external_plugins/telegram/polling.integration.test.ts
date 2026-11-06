@@ -1308,15 +1308,26 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
       expect(failure(await edit(text))).toBe('edit_message failed: a caption needs text once its ends are trimmed; nothing was edited')
     }
     expect(calls(t.dir).slice(from)).toEqual([])
+    // The count is of UTF-16 units, as the send counts a caption, so a
+    // character outside the Basic Multilingual Plane counts twice.
+    from = calls(t.dir).length
+    expect(failure(await edit('\u{1F600}'.repeat(513)))).toBe(
+      'edit_message failed: this text has 1026 characters, over the 1024 a caption holds; nothing was edited; send it as a new reply')
+    expect(calls(t.dir).slice(from)).toEqual([])
+    from = calls(t.dir).length
+    expect((await edit('\u{1F600}'.repeat(512))).content[0].text).toBe(edited)
+    expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', '\u{1F600}'.repeat(512)]])
     await t.sender.close()
   }, 15000)
 
-  test('a caption edit Telegram refuses says not edited with Telegram\'s reason, and one whose outcome is unknown says so in a result that is no error', async () => {
+  test('a caption edit Telegram refuses says not edited with Telegram\'s reason, one whose outcome is unknown says so in a result that is no error, and one Telegram answers with message is not modified counts as done', async () => {
     const NOT_FOUND = { error_code: 400, description: 'Bad Request: message to edit not found' }
     const GATEWAY = { error_code: 504, description: 'Gateway Timeout' }
+    const NOT_MODIFIED = { error_code: 400, description: 'Bad Request: message is not modified: specified new message content and reply markup are exactly the same as a current content and reply markup of the message' }
     const t = await toPeerBot({}, { TELEGRAM_TEST_RULES: JSON.stringify([
       { method: 'editMessageCaption', has: 'refuse this', error: NOT_FOUND },
-      { method: 'editMessageCaption', has: 'time this out', error: GATEWAY },
+      { method: 'editMessageCaption', has: 'time this out', times: 1, error: GATEWAY },
+      { method: 'editMessageCaption', has: 'time this out', error: NOT_MODIFIED },
     ]) })
     await t.reply({ text: 'the report', files: [t.file('report.pdf')] })
     const id = sends(t.dir)[0]!.message_id!
@@ -1325,9 +1336,14 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     const unknown = await edit('time this out')
     expect(unknown.isError).not.toBe(true)
     expect(unknown.content[0].text).toBe(`edit outcome unknown; repeating the same edit is safe (Telegram answered 504: ${GATEWAY.description})`)
+    // The same edit again, as that answer says is safe: the first one landed.
+    const repeated = await edit('time this out')
+    expect(repeated.isError).not.toBe(true)
+    expect(repeated.content[0].text).toBe(`edited (id: ${id}); its caption holds the new text`)
     expect(calls(t.dir).filter(c => c.method.startsWith('edit')).map(c => [c.method, c.payload.caption, c.refused])).toEqual([
       ['editMessageCaption', 'refuse this', NOT_FOUND.description],
       ['editMessageCaption', 'time this out', GATEWAY.description],
+      ['editMessageCaption', 'time this out', NOT_MODIFIED.description],
     ])
     await t.sender.close()
   }, 15000)
