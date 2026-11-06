@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test'
+import { mkdirSync, writeFileSync } from 'fs'
+import { join } from 'path'
 import { calls, cleanup, start, state, type Call, type Server } from './fixtures/harness.ts'
 
 afterEach(cleanup)
@@ -9,12 +11,13 @@ const ACCESS = { dmPolicy: 'allowlist', allowFrom: ['1', String(BOT.id)] }
 
 // The server of a session that does not poll: it calls Telegram only for
 // what a tool asks.
-async function sender(rich: boolean): Promise<{ dir: string; srv: Server }> {
-  const dir = state(ACCESS)
+async function sender(rich: boolean, o: { access?: object; rules?: object[] } = {}): Promise<{ dir: string; srv: Server }> {
+  const dir = state({ ...ACCESS, ...o.access })
   const srv = start(dir, ['claude', '-p', 'hello'], {
     TELEGRAM_RICH_MESSAGES: String(rich),
     TELEGRAM_TEST_USERS: JSON.stringify({ [BOT.id]: BOT }),
     TELEGRAM_TEST_CHATS: JSON.stringify({ ids: 100 }),
+    ...(o.rules ? { TELEGRAM_TEST_RULES: JSON.stringify(o.rules) } : {}),
   })
   await srv.ready()
   return { dir, srv }
@@ -67,6 +70,45 @@ describe.skipIf(process.platform !== 'linux')('the format of reply and edit_mess
         }
       }
       expect(calls(dir)).toEqual([])
+      await srv.close()
+    }, 20000)
+
+    test(`${mode}, a reply with a file to a person answers what each message holds, in each listed format`, async () => {
+      const { dir, srv } = await sender(rich)
+      mkdirSync(join(dir, 'inbox'))
+      const chart = join(dir, 'inbox', 'chart.png')
+      writeFileSync(chart, 'png')
+      for (const format of list) {
+        const from = calls(dir).length
+        const r = await tool(srv, 'reply', { chat_id: '1', text: `**the chart** in ${format}`, files: [chart], format })
+        const sent = calls(dir).slice(from).filter(c => c.method.startsWith('send'))
+        expect(sent.map(c => c.method)).toEqual([format === 'rich' ? 'sendRichMessage' : 'sendMessage', 'sendPhoto'])
+        const [text, photo] = sent.map(c => c.message_id!)
+        expect(text).not.toBe(photo)
+        expect(r.content[0].text).toBe(`sent 2 parts (ids: ${text}, ${photo}); what each holds: ${text} text, ${photo} file`)
+      }
+      await srv.close()
+    }, 20000)
+
+    test(`${mode}, a reply with a file to a person whose text goes as several messages answers what each of them holds, in each listed format`, async () => {
+      // Chunks of 10 characters; a rich part Telegram refuses goes out as plain chunks.
+      const REJECTED = { error_code: 400, description: 'Bad Request: RICH_MESSAGE_MARKDOWN_INVALID' }
+      const { dir, srv } = await sender(rich, { access: { textChunkLimit: 10 }, rules: [{ method: 'sendRichMessage', error: REJECTED }] })
+      mkdirSync(join(dir, 'inbox'))
+      const chart = join(dir, 'inbox', 'chart.png')
+      writeFileSync(chart, 'png')
+      for (const format of list) {
+        const from = calls(dir).length
+        const r = await tool(srv, 'reply', { chat_id: '1', text: 'a'.repeat(10) + 'b'.repeat(10), files: [chart], format })
+        const made = calls(dir).slice(from).filter(c => c.method.startsWith('send'))
+        expect(made.map(c => [c.method, c.refused])).toEqual([
+          ...(format === 'rich' ? [['sendRichMessage', REJECTED.description]] : []),
+          ['sendMessage', undefined], ['sendMessage', undefined], ['sendPhoto', undefined],
+        ])
+        const [a, b, c] = made.filter(m => !m.refused).map(m => m.message_id!)
+        expect(new Set([a, b, c]).size).toBe(3)
+        expect(r.content[0].text).toBe(`sent 3 parts (ids: ${a}, ${b}, ${c}); what each holds: ${a} text, ${b} text, ${c} file`)
+      }
       await srv.close()
     }, 20000)
 

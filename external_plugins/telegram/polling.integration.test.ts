@@ -792,7 +792,7 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     expect(photo).toBeDefined()
     // The offline Telegram gives every message the same id, so the photo's
     // words replace the text's.
-    const id = Number(/^sent 2 parts \(ids: (\d+), \1\)$/.exec(result.content[0].text)![1])
+    const id = Number(/^sent 2 parts \(ids: (\d+), \1\)/.exec(result.content[0].text)![1])
     writeFileSync(join(dir, 'inbound.json'), updates(react(OWNER, DM, id, [], ['👍'])))
     expect((await settled(channel)).map(n => n.content)).toEqual([`👍 on message ${id}: "(photo: chart.png)"`])
     await channel.close()
@@ -1160,7 +1160,12 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     const PEER = peerBot(7080, 'peer_eighty_bot')
     const dir = state({ dmPolicy: 'allowlist', allowFrom: ['1', '7080'], ...access })
     mkdirSync(join(dir, 'inbox'))
-    const sender = start(dir, ['claude', '-p', 'hello'], { TELEGRAM_TEST_USERS: JSON.stringify({ 7080: PEER }), ...env })
+    // Every message gets an id of its own, whatever chats setting the test
+    // passes, so what each holds is told apart.
+    const chats = JSON.parse(env.TELEGRAM_TEST_CHATS ?? '{}')
+    const sender = start(dir, ['claude', '-p', 'hello'], {
+      TELEGRAM_TEST_USERS: JSON.stringify({ 7080: PEER }), ...env, TELEGRAM_TEST_CHATS: JSON.stringify({ ...chats, ids: chats.ids ?? 500 }),
+    })
     await sender.ready()
     const file = (name: string) => { const path = join(dir, 'inbox', name); writeFileSync(path, name); return path }
     const reply = (args: object) => toolCall(sender, 'reply', { chat_id: '7080', ...args })
@@ -1170,17 +1175,22 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
   const mediaOf = (c: { payload: any }) => c.payload.media.map((m: any) => [m.type, m.media, m.caption])
   // An upload carries reply_parameters as JSON text.
   const threadOf = (c: { payload: any }) => typeof c.payload.reply_parameters === 'string' ? JSON.parse(c.payload.reply_parameters) : c.payload.reply_parameters
-  // What the reply tool returns for the messages the fake logged.
-  const sentAs = (logged: { message_id?: number; message_ids?: number[] }[]) => {
+  // What the reply tool returns for the messages the fake logged, each with
+  // its own id and holding what labels says, in order.
+  const sentAs = (logged: { message_id?: number; message_ids?: number[] }[], labels: string[]) => {
     const ids = logged.flatMap(c => c.message_ids ?? [c.message_id!])
-    return ids.length === 1 ? `sent (id: ${ids[0]})` : `sent ${ids.length} parts (ids: ${ids.join(', ')})`
+    expect(new Set(ids).size).toBe(ids.length)
+    expect(labels).toHaveLength(ids.length)
+    const sent = ids.length === 1 ? `sent (id: ${ids[0]})` : `sent ${ids.length} parts (ids: ${ids.join(', ')})`
+    return `${sent}; what each holds: ${ids.map((id, i) => `${id} ${labels[i]}`).join(', ')}`
   }
+  const CAPTION = 'file with text caption'
 
   test('to a bot, one file and a short text go as one document captioned with the text, threaded, and no text message follows', async () => {
     const t = await toPeerBot()
     const result = await t.reply({ text: 'the report', files: [t.file('report.pdf')], reply_to: '9' })
     expect(result.isError).not.toBe(true)
-    expect(result.content[0].text).toBe(sentAs(sends(t.dir)))
+    expect(result.content[0].text).toBe(sentAs(sends(t.dir), [CAPTION]))
     expect(sends(t.dir).map(c => [c.method, c.payload.chat_id, c.payload.document, c.payload.caption, threadOf(c)])).toEqual([
       ['sendDocument', t.to, 'file:report.pdf', 'the report', { message_id: 9 }],
     ])
@@ -1202,7 +1212,7 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
   test('to a bot, three files, a photo among them, go as one threaded album of documents with the text as the first one\'s caption', async () => {
     const t = await toPeerBot()
     const result = await t.reply({ text: 'three files', files: [t.file('chart.png'), t.file('notes.txt'), t.file('data.csv')], reply_to: '9' })
-    expect(result.content[0].text).toBe(sentAs(sends(t.dir)))
+    expect(result.content[0].text).toBe(sentAs(sends(t.dir), [CAPTION, 'file', 'file']))
     expect(sends(t.dir)[0]!.message_ids).toHaveLength(3)
     expect(sends(t.dir).map(c => [c.method, c.payload.chat_id, mediaOf(c), threadOf(c)])).toEqual([
       ['sendMediaGroup', t.to, [['document', 'file:chart.png', 'three files'], ['document', 'file:notes.txt', undefined], ['document', 'file:data.csv', undefined]], { message_id: 9 }],
@@ -1216,7 +1226,7 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     const files = names.map(t.file)
     const result = await t.reply({ text: 'eleven', files: files.slice(0, 11) })
     const eleven = sends(t.dir)
-    expect(result.content[0].text).toBe(sentAs(eleven))
+    expect(result.content[0].text).toBe(sentAs(eleven, [CAPTION, ...Array(10).fill('file')]))
     expect(result.content[0].text).toStartWith('sent 11 parts')
     expect(eleven.map(c => c.method)).toEqual(['sendMediaGroup', 'sendDocument'])
     expect(mediaOf(eleven[0]!)).toEqual(names.slice(0, 10).map((n, i) => ['document', `file:${n}`, i === 0 ? 'eleven' : undefined]))
@@ -1233,13 +1243,130 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     const text = 'a'.repeat(2000) + '\n\n' + 'b'.repeat(1500) + '\n' + 'c'.repeat(1497)
     const result = await t.reply({ text, files: [t.file('a.txt'), t.file('b.txt')], reply_to: '9' })
     const sent = sends(t.dir)
-    expect(result.content[0].text).toBe(sentAs(sent))
+    expect(result.content[0].text).toBe(sentAs(sent, ['file', 'file', 'text', 'text']))
     expect(result.content[0].text).toStartWith('sent 4 parts')
     expect(sent.map(c => c.method)).toEqual(['sendMediaGroup', 'sendMessage', 'sendMessage'])
     expect(mediaOf(sent[0]!)).toEqual([['document', 'file:a.txt', undefined], ['document', 'file:b.txt', undefined]])
     expect(sent.slice(1).map(c => c.payload.text.length)).toEqual([4096, 904])
     expect(sent.slice(1).map(c => c.payload.text).join('')).toBe(text)
     expect(sent.map(threadOf)).toEqual([{ message_id: 9 }, { message_id: 9 }, undefined])
+    await t.sender.close()
+  }, 15000)
+
+  test('to a bot, one file and a 1,087-character text answer that the file holds no text and the text message does, and eleven files and a 5,000-character text label all thirteen messages', async () => {
+    const t = await toPeerBot()
+    const one = await t.reply({ text: 'n'.repeat(1087), files: [t.file('log.txt')] })
+    const first = sends(t.dir)
+    expect(first.map(c => c.method)).toEqual(['sendDocument', 'sendMessage'])
+    expect(one.content[0].text).toBe(sentAs(first, ['file', 'text']))
+    const eleven = await t.reply({ text: 'x'.repeat(5000), files: Array.from({ length: 11 }, (_, i) => t.file(`f${i + 1}.txt`)) })
+    const second = sends(t.dir).slice(first.length)
+    expect(second.map(c => c.method)).toEqual(['sendMediaGroup', 'sendDocument', 'sendMessage', 'sendMessage'])
+    expect(eleven.content[0].text).toBe(sentAs(second, [...Array(11).fill('file'), 'text', 'text']))
+    await t.sender.close()
+  }, 15000)
+
+  test('to a bot, a file whose Telegram answer carries no caption is labelled a file, whatever caption the reply sent', async () => {
+    const t = await toPeerBot({}, { TELEGRAM_TEST_RULES: JSON.stringify([{ method: 'sendDocument', uncaptioned: true }]) })
+    const result = await t.reply({ text: 'the report', files: [t.file('report.pdf')] })
+    expect(sends(t.dir).map(c => [c.method, c.payload.caption])).toEqual([['sendDocument', 'the report']])
+    expect(result.content[0].text).toBe(sentAs(sends(t.dir), ['file']))
+    await t.sender.close()
+  }, 15000)
+
+  test('a reply with an empty files list answers exactly as one without files', async () => {
+    const t = await toPeerBot()
+    expect((await toolCall(t.sender, 'reply', { chat_id: '1', text: 'no files', files: [] })).content[0].text).toBe('sent (id: 500)')
+    expect(sends(t.dir).map(c => [c.method, c.payload.chat_id, c.message_id])).toEqual([['sendMessage', '1', 500]])
+    await t.sender.close()
+  }, 15000)
+
+  test('edit_message with text on a file whose caption holds the reply\'s text edits that caption, trimmed as Telegram trims it, up to 1024 characters, and makes no call for one empty once trimmed or longer', async () => {
+    const t = await toPeerBot()
+    await t.reply({ text: 'the report', files: [t.file('report.pdf')] })
+    const id = sends(t.dir)[0]!.message_id!
+    const edit = (text: string) => toolCall(t.sender, 'edit_message', { chat_id: '7080', message_id: String(id), text })
+    const edited = `edited (id: ${id}); its caption holds the new text`
+    let from = calls(t.dir).length
+    expect((await edit('  \n corrected note \n ')).content[0].text).toBe(edited)
+    expect(calls(t.dir).slice(from).map(c => [c.method, c.payload])).toEqual([
+      ['editMessageCaption', { chat_id: '7080', message_id: id, caption: 'corrected note' }],
+    ])
+    const most = 'y'.repeat(1024)
+    from = calls(t.dir).length
+    expect((await edit(`  \n${most}\n  `)).content[0].text).toBe(edited)
+    expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', most]])
+    // Telegram trims only spaces and line breaks, so a tab at each kept end stays.
+    from = calls(t.dir).length
+    expect((await edit(' \n\tcorrected note\t\n ')).content[0].text).toBe(edited)
+    expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', '\tcorrected note\t']])
+    // The count is of what Telegram would keep.
+    from = calls(t.dir).length
+    expect(failure(await edit(`  \n${'z'.repeat(1025)}\n  `))).toBe(
+      'edit_message failed: this text has 1025 characters, over the 1024 a caption holds; nothing was edited; send it as a new reply')
+    for (const text of ['  \n ', '']) {
+      expect(failure(await edit(text))).toBe('edit_message failed: a caption needs text once its ends are trimmed; nothing was edited')
+    }
+    expect(calls(t.dir).slice(from)).toEqual([])
+    // The count is of UTF-16 units, as the send counts a caption, so a
+    // character outside the Basic Multilingual Plane counts twice.
+    from = calls(t.dir).length
+    expect(failure(await edit('\u{1F600}'.repeat(513)))).toBe(
+      'edit_message failed: this text has 1026 characters, over the 1024 a caption holds; nothing was edited; send it as a new reply')
+    expect(calls(t.dir).slice(from)).toEqual([])
+    from = calls(t.dir).length
+    expect((await edit('\u{1F600}'.repeat(512))).content[0].text).toBe(edited)
+    expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', '\u{1F600}'.repeat(512)]])
+    await t.sender.close()
+  }, 15000)
+
+  test('a caption edit Telegram refuses says not edited with Telegram\'s reason, one whose outcome is unknown says so in a result that is no error, and one Telegram answers with message is not modified counts as done', async () => {
+    const NOT_FOUND = { error_code: 400, description: 'Bad Request: message to edit not found' }
+    const GATEWAY = { error_code: 504, description: 'Gateway Timeout' }
+    const NOT_MODIFIED = { error_code: 400, description: 'Bad Request: message is not modified: specified new message content and reply markup are exactly the same as a current content and reply markup of the message' }
+    const t = await toPeerBot({}, { TELEGRAM_TEST_RULES: JSON.stringify([
+      { method: 'editMessageCaption', has: 'refuse this', error: NOT_FOUND },
+      { method: 'editMessageCaption', has: 'time this out', times: 1, error: GATEWAY },
+      { method: 'editMessageCaption', has: 'time this out', error: NOT_MODIFIED },
+    ]) })
+    await t.reply({ text: 'the report', files: [t.file('report.pdf')] })
+    const id = sends(t.dir)[0]!.message_id!
+    const edit = (text: string) => toolCall(t.sender, 'edit_message', { chat_id: '7080', message_id: String(id), text })
+    expect(failure(await edit('refuse this'))).toBe(`edit_message failed: not edited (Telegram answered 400: ${NOT_FOUND.description})`)
+    const unknown = await edit('time this out')
+    expect(unknown.isError).not.toBe(true)
+    expect(unknown.content[0].text).toBe(`edit outcome unknown; repeating the same edit is safe (Telegram answered 504: ${GATEWAY.description})`)
+    // The same edit again, as that answer says is safe: the first one landed.
+    const repeated = await edit('time this out')
+    expect(repeated.isError).not.toBe(true)
+    expect(repeated.content[0].text).toBe(`edited (id: ${id}); its caption holds the new text`)
+    expect(calls(t.dir).filter(c => c.method.startsWith('edit')).map(c => [c.method, c.payload.caption, c.refused])).toEqual([
+      ['editMessageCaption', 'refuse this', NOT_FOUND.description],
+      ['editMessageCaption', 'time this out', GATEWAY.description],
+      ['editMessageCaption', 'time this out', NOT_MODIFIED.description],
+    ])
+    await t.sender.close()
+  }, 15000)
+
+  test('edit_message with text on a file with no text makes no call and says so, edits the text message as before, and sends an edit of a message the server has no record of to Telegram as before', async () => {
+    const NO_TEXT = { error_code: 400, description: 'Bad Request: there is no text in the message to edit' }
+    // 9002 stands for a file sent before the server started.
+    const t = await toPeerBot({}, { TELEGRAM_TEST_RULES: JSON.stringify([{ method: 'editMessageText', has: '"message_id":9002', error: NO_TEXT }]) })
+    await t.reply({ text: 'n'.repeat(1087), files: [t.file('log.txt')] })
+    const [file, note] = sends(t.dir).map(c => c.message_id!)
+    const edit = (message_id: number) => toolCall(t.sender, 'edit_message', { chat_id: '7080', message_id: String(message_id), text: 'corrected' })
+    let from = calls(t.dir).length
+    expect(failure(await edit(file!))).toBe(`edit_message failed: message ${file} holds a file with no text, so it has no text to edit; nothing was edited`)
+    expect(calls(t.dir).slice(from)).toEqual([])
+    from = calls(t.dir).length
+    expect((await edit(note!)).content[0].text).toBe(`edited (id: ${note})`)
+    expect((await edit(9001)).content[0].text).toBe('edited (id: 9001)')
+    expect(failure(await edit(9002))).toBe(`edit_message failed: not edited (Telegram answered 400: ${NO_TEXT.description})`)
+    expect(calls(t.dir).slice(from).map(c => [c.method, c.payload, c.refused])).toEqual([
+      ['editMessageText', { chat_id: '7080', message_id: note, text: 'corrected' }, undefined],
+      ['editMessageText', { chat_id: '7080', message_id: 9001, text: 'corrected' }, undefined],
+      ['editMessageText', { chat_id: '7080', message_id: 9002, text: 'corrected' }, NO_TEXT.description],
+    ])
     await t.sender.close()
   }, 15000)
 

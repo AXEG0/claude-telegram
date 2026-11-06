@@ -67,8 +67,9 @@ const users = JSON.parse(process.env.TELEGRAM_TEST_USERS || '{}') as Record<stri
 //   getChat, from its `from`-th send onward (1 or unset: from the start);
 //   messages sent to it get their own ids from `ids` on.
 // - hold: the answer to the `send`-th send of the process waits `ms`.
-// - ids: every message the process sends to a numeric chat gets its own
-//   id, from `ids` on; unset, every message gets the same id, as before.
+// - ids: every message the process sends gets its own id, from `ids` on, a
+//   message to a username included, unless `redirect` numbers that username
+//   itself; unset, every message gets the same id, as before.
 // An album (sendMediaGroup) is one send: it counts once for `redirect`'s
 // `from` and for `hold`. Its first message gets an id as any send does, and
 // each other message the next one where ids are counted, else the same id.
@@ -98,7 +99,9 @@ let nextId = chats.ids
 // failed; the log marks it `answered`. `hang` never answers: the call ends
 // only when its request's signal aborts, logged as aborted. `network` fails
 // the connection with that error code before the call reaches the fake, as a
-// refused connection does: logged as `failed`, never applied. A call whose
+// refused connection does: logged as `failed`, never applied. With
+// `uncaptioned`, a send goes as usual and its answer carries no caption, as
+// if Telegram had kept none. A call whose
 // request's signal aborts rejects at the abort, as a real fetch does, whatever
 // the fake was still doing for it, which runs on: a held poll (holdMs on
 // getUpdates) aborted before its hold ends answers nothing, and with `keep`
@@ -123,6 +126,7 @@ type Rule = {
   keep?: boolean
   error?: { error_code: number; description: string; parameters?: object }
   body?: string
+  uncaptioned?: boolean
 }
 const rules = (JSON.parse(process.env.TELEGRAM_TEST_RULES || '[]') as Rule[]).map(rule => ({ rule, seen: 0, used: 0 }))
 function ruleFor(method: string, payload: Record<string, unknown>): Rule | undefined {
@@ -193,7 +197,9 @@ function chat(chatId: unknown): object {
 }
 
 // The chat a send went to: a numeric chat_id as that number, a username as
-// its holder's id.
+// its holder's id. Its message id is the same fixed one for every send, or
+// the next of the redirect rule's own ids; `ids`, when set, numbers every
+// other send (see answerCall).
 function recipient(chatId: unknown): { id: number; message_id: number } | undefined {
   const to = String(chatId)
   if (!to.startsWith('@')) return { id: Number(to), message_id: 42 }
@@ -207,13 +213,16 @@ function recipient(chatId: unknown): { id: number; message_id: number } | undefi
   const user = holder(to.slice(1))
   return user && { id: user.id, message_id: 42 }
 }
+// Whether the redirect rule numbers the messages sent to the chat itself.
+function redirectNumbers(chatId: unknown): boolean {
+  const to = String(chatId)
+  return redirect?.ids !== undefined && to.startsWith('@') && lower(to.slice(1)) === redirect.username
+}
 // The id of an album's next message: the next of the counter that numbered
 // its first, or the first's own where none counts.
 function nextOf(chatId: unknown, first: number): number {
-  const to = String(chatId)
-  if (!to.startsWith('@')) return nextId === undefined ? first : nextId++
-  if (redirect && lower(to.slice(1)) === redirect.username && redirect.ids !== undefined) return redirect.ids + redirectIds++
-  return first
+  if (redirectNumbers(chatId)) return redirect!.ids! + redirectIds++
+  return nextId === undefined ? first : nextId++
 }
 
 function remember(updates: unknown[]): void {
@@ -323,6 +332,37 @@ const EMPTY_TEXT = { error_code: 400, description: 'Bad Request: message text is
 const emptyText = (method: string, payload: Record<string, unknown>) =>
   (method === 'sendMessage' || method === 'editMessageText') && typeof payload.text === 'string' && trimmed(payload.text) === ''
 
+// A sent message's own fields as Telegram answers a send: its text, or its
+// file and the caption Telegram kept, none when it is empty once trimmed. A
+// rich message's answer carries none of them.
+function contentOf(method: string, sent: Record<string, unknown>, uncaptioned: boolean): Record<string, unknown> {
+  if (method === 'sendMessage') return { text: trimmed(String(sent.text)) }
+  if (method === 'sendRichMessage') return {}
+  const type = method === 'sendMediaGroup' ? sent.type : method === 'sendPhoto' ? 'photo' : 'document'
+  const name = String(method === 'sendMediaGroup' ? sent.media : sent[String(type)]).replace(/^file:/, '')
+  const kept = typeof sent.caption === 'string' && !uncaptioned ? trimmed(sent.caption) : ''
+  return {
+    ...(type === 'photo'
+      ? { photo: [{ file_id: `file-of-${name}`, file_unique_id: `u-${name}`, width: 1, height: 1 }] }
+      : { document: { file_id: `file-of-${name}`, file_unique_id: `u-${name}`, file_name: name } }),
+    ...(kept ? { caption: kept } : {}),
+  }
+}
+// What each message the process sent holds, by chat and id: its kind and its
+// fields. Telegram refuses a text edit of a file and a caption edit of a
+// text, and answers a caption edit of a file with the message and its new
+// caption. An id the process never sent is edited as before.
+const sentContent = new Map<string, { kind: 'text' | 'file'; chat: object; content: Record<string, unknown> }>()
+const NO_TEXT = { error_code: 400, description: 'Bad Request: there is no text in the message to edit' }
+const NO_CAPTION = { error_code: 400, description: 'Bad Request: there is no caption in the message to edit' }
+const editedOf = (payload: Record<string, unknown>) => sentContent.get(`${payload.chat_id}:${payload.message_id}`)
+function editRefused(method: string, payload: Record<string, unknown>) {
+  const kind = editedOf(payload)?.kind
+  if (method === 'editMessageText' && kind === 'file') return NO_TEXT
+  if (method === 'editMessageCaption' && kind === 'text') return NO_CAPTION
+  return undefined
+}
+
 // The test's own Telegram identity: what getMe answers, and the sender of
 // every update the bridge delivers.
 const ME = { id: 123, is_bot: true, first_name: 'Test', username: 'test_bot' }
@@ -397,10 +437,10 @@ const answerCall = (async (url: string | URL | Request, options: RequestInit | u
     appendFileSync(process.env.TELEGRAM_TEST_API_LOG!, JSON.stringify({ pid: process.pid, method, payload, at: Date.now(), failed: rule.network }) + '\n')
     throw Object.assign(new TypeError(`${rule.network}: Unable to connect. Is the computer able to access the url?`), { code: rule.network })
   }
-  const refusal = emptyText(method, payload) ? EMPTY_TEXT : rule?.lands ? undefined : rule?.error
+  const refusal = emptyText(method, payload) ? EMPTY_TEXT : editRefused(method, payload) ?? (rule?.lands ? undefined : rule?.error)
   if (rule?.preMs) await Bun.sleep(rule.preMs)
   const to = n && !refusal ? recipient(payload.chat_id) : undefined
-  if (to && nextId !== undefined && !String(payload.chat_id).startsWith('@')) to.message_id = nextId++
+  if (to && nextId !== undefined && !redirectNumbers(payload.chat_id)) to.message_id = nextId++
   const album = to && method === 'sendMediaGroup'
     ? [to.message_id, ...(payload.media as unknown[]).slice(1).map(() => nextOf(payload.chat_id, to.message_id))]
     : undefined
@@ -424,8 +464,22 @@ const answerCall = (async (url: string | URL | Request, options: RequestInit | u
   if (n) {
     if (chats.hold?.send === n) await Bun.sleep(chats.hold.ms)
     if (!to) return json(notFound)
-    const sent = (album ?? [to.message_id]).map(message_id => ({ message_id, date: 0, chat: { id: to.id, type: to.id < 0 ? 'supergroup' : 'private' } }))
+    const where = { id: to.id, type: to.id < 0 ? 'supergroup' : 'private' }
+    const items = album ? payload.media as Record<string, unknown>[] : [payload]
+    const sent = (album ?? [to.message_id]).map((message_id, i) => {
+      const content = contentOf(method, items[i]!, rule?.uncaptioned === true)
+      const kind = method === 'sendMessage' || method === 'sendRichMessage' ? 'text' : 'file'
+      sentContent.set(`${to.id}:${message_id}`, { kind, chat: where, content })
+      return { message_id, date: 0, chat: where, ...content }
+    })
     result = album ? sent : sent[0]
+  }
+  const captioned = method === 'editMessageCaption' ? editedOf(payload) : undefined
+  if (captioned?.kind === 'file') {
+    const { caption: _, ...file } = captioned.content
+    const kept = typeof payload.caption === 'string' ? trimmed(payload.caption) : ''
+    captioned.content = { ...file, ...(kept ? { caption: kept } : {}) }
+    result = { message_id: payload.message_id, date: 0, edit_date: 0, chat: captioned.chat, ...captioned.content }
   }
   if (method === 'getChatMember') return json(member(Number(payload.user_id)))
   if (method === 'getChat') return json(chat(payload.chat_id))
