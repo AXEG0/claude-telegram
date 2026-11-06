@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, test } from 'bun:test'
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -33,6 +33,11 @@ import workflowHooks from './fixtures/workflow-hooks.json'
 import failureHooks from './fixtures/failure-hooks.json'
 import { runRegistered } from './fixtures/hooks.ts'
 import { apiError, assistantText, line, requestBlob, userText } from './fixtures/transcript.ts'
+
+// Each test's folders go when it ends.
+const made: string[] = []
+const scratch = (prefix: string) => { const dir = mkdtempSync(join(tmpdir(), prefix)); made.push(dir); return dir }
+afterEach(() => { for (const dir of made.splice(0)) rmSync(dir, { recursive: true, force: true }) })
 
 const assistant = (content: unknown[], usage?: Record<string, number>, ts = '2026-10-08T15:00:00.000Z') =>
   JSON.stringify({ type: 'assistant', timestamp: ts, message: { content, usage } })
@@ -134,7 +139,7 @@ describe('shellEventFromHook', () => {
 describe('shellOutputFile', () => {
   const uid = process.getuid?.() ?? 0
   function tree() {
-    const tmp = mkdtempSync(join(tmpdir(), 'shell-out-'))
+    const tmp = scratch('shell-out-')
     const tasks = join(tmp, `claude-${uid}`, '-home-me-project', 'sess-1', 'tasks')
     mkdirSync(tasks, { recursive: true })
     mkdirSync(join(tmp, `claude-${uid}`, '-other-project', 'sess-2'), { recursive: true })
@@ -206,7 +211,7 @@ describe('newestEntry', () => {
 
 describe('createEventReader', () => {
   test('reads only what was appended, whole lines only', () => {
-    const f = join(mkdtempSync(join(tmpdir(), 'agents-')), 'pid-1.jsonl')
+    const f = join(scratch('agents-'), 'pid-1.jsonl')
     writeFileSync(f, JSON.stringify({ t: 1, event: 'start', agent_id: 'old' }) + '\n')
     const read = createEventReader([f, '/nonexistent/file'])
     expect(read()).toEqual([])
@@ -217,7 +222,7 @@ describe('createEventReader', () => {
   })
 
   test('reads shell events beside subagent events, and drops lines without an id', () => {
-    const f = join(mkdtempSync(join(tmpdir(), 'agents-')), 'pid-1.jsonl')
+    const f = join(scratch('agents-'), 'pid-1.jsonl')
     const read = createEventReader([f], false)
     const lines: unknown[] = [
       { t: 1, event: 'shell_start', task_id: 'b1', description: 'Build', output: '/t/b1.output' },
@@ -2164,7 +2169,7 @@ describe('createAgentStream', () => {
 
 describe('hooks/subagent.ts', () => {
   test('appends the event to the file named for the Claude Code pid', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'agents-'))
+    const dir = scratch('agents-')
     const r = Bun.spawnSync(['bun', join(import.meta.dir, 'hooks', 'subagent.ts')], {
       stdin: new TextEncoder().encode(JSON.stringify({
         hook_event_name: 'SubagentStart',
@@ -2182,7 +2187,7 @@ describe('hooks/subagent.ts', () => {
   test('the registered TaskStop hook appends a successful stop with its outcome', () => {
     const hooks = JSON.parse(readFileSync(join(import.meta.dir, 'hooks', 'hooks.json'), 'utf8')).hooks
     expect(hooks.PostToolUse.some((h: { matcher: string }) => h.matcher === 'TaskStop')).toBe(true)
-    const dir = mkdtempSync(join(tmpdir(), 'agents-'))
+    const dir = scratch('agents-')
     const r = Bun.spawnSync(['bun', join(import.meta.dir, 'hooks', 'subagent.ts')], {
       stdin: new TextEncoder().encode(JSON.stringify({
         hook_event_name: 'PostToolUse', tool_name: 'TaskStop', tool_input: { task_id: 'a9' },
@@ -2201,8 +2206,8 @@ describe('hooks/subagent.ts', () => {
     const hooks = JSON.parse(readFileSync(join(import.meta.dir, 'hooks', 'hooks.json'), 'utf8')).hooks
     const bashHook = hooks.PostToolUse.find((h: { matcher: string }) => h.matcher === 'Bash')
     expect(bashHook.hooks).toMatchObject([{ command: 'bun "${CLAUDE_PLUGIN_ROOT}/hooks/subagent.ts"', async: true }])
-    const dir = mkdtempSync(join(tmpdir(), 'agents-'))
-    const tmp = mkdtempSync(join(tmpdir(), 'shell-tmp-'))
+    const dir = scratch('agents-')
+    const tmp = scratch('shell-tmp-')
     const input = shellHooks.background_bash
     const tasks = join(tmp, `claude-${process.getuid?.() ?? 0}`, '-srv-probe-shell-probe-890-work', input.session_id, 'tasks')
     mkdirSync(tasks, { recursive: true })
@@ -2246,56 +2251,51 @@ describe('hooks/subagent.ts', () => {
   // The real hook, the subagents' files in Claude Code's own layout and the
   // stream's own file readers: a workflow of four subagents stopped by TaskStop.
   test('a stopped workflow through the hook: four SubagentStart inputs, a TaskStop result that appends nothing, then the stop lines close every row', async () => {
-    const state = mkdtempSync(join(tmpdir(), 'agents-'))
-    const projects = mkdtempSync(join(tmpdir(), 'projects-'))
-    try {
-      const { session_id } = workflowHooks.subagent_start_workflow
-      const transcript = join(projects, `${session_id}.jsonl`)
-      const runDir = join(projects, session_id, 'subagents', 'workflows', WORKFLOW_RUN)
-      mkdirSync(runDir, { recursive: true })
-      const hook = (stdin: unknown) => Bun.spawnSync(['bun', join(import.meta.dir, 'hooks', 'subagent.ts')], {
-        stdin: new TextEncoder().encode(JSON.stringify(stdin)),
-        env: { PATH: process.env.PATH!, HOME: process.env.HOME!, TELEGRAM_STATE_DIR: state, CLAUDE_PID: '4242' },
-      })
-      const file = agentEventFile(state, 4242)
-      const ids = [1, 2, 3, 4].map(n => `${workflowHooks.subagent_start_workflow.agent_id.slice(0, -1)}${n}`)
-      for (const [i, id] of ids.entries()) {
-        expect(hook(workflowStartInput(id, transcript)).exitCode).toBe(0)
-        writeFileSync(join(runDir, `agent-${id}.meta.json`), workflowMeta(`check:${i + 1}`))
-        writeFileSync(join(runDir, `agent-${id}.jsonl`), toolCall(Date.now(), 'Work', 100) + '\n')
-      }
-
-      let clock = Date.now()
-      const sent: string[] = []
-      const stream = createAgentStream({
-        readEvents: createEventReader([file], false),
-        chat: () => '1001',
-        send: async (_c, text) => { sent.push(text); return 7 },
-        edit: async (_c, _id, text) => { sent.push(text) },
-        now: () => clock,
-      })
-      stream.tick()
-      await new Promise(r => setTimeout(r, 0))
-      expect(sent).toHaveLength(1)
-      expect(sent[0]).toMatch(new RegExp('^🤖 Subagents'
-        + ids.map((_, i) => `\\n${i + 1}\\. ⏳ workflow-subagent · check:${i + 1} · Work · \\d+s · 100 tokens`).join('') + '$'))
-
-      const before = readFileSync(file, 'utf8')
-      expect(hook({ ...workflowHooks.task_stop_workflow, transcript_path: transcript }).exitCode).toBe(0)
-      expect(readFileSync(file, 'utf8')).toBe(before)
-
-      for (const [i, id] of ids.entries()) appendFileSync(join(runDir, `agent-${id}.jsonl`), interrupted(Date.now(), i === 1) + '\n')
-      clock = Date.now() + CHAT_GAP_MS
-      stream.tick()
-      await new Promise(r => setTimeout(r, 0))
-      expect(sent).toHaveLength(2)
-      expect(sent[1]).toMatch(new RegExp('^🤖 Subagents'
-        + ids.map((_, i) => `\\n${i + 1}\\. ⏹ Stopped after \\d+s · workflow-subagent · check:${i + 1} · 100 tokens`).join('') + '$'))
-      expect(stream.agents()).toEqual([])
-    } finally {
-      rmSync(state, { recursive: true, force: true })
-      rmSync(projects, { recursive: true, force: true })
+    const state = scratch('agents-')
+    const projects = scratch('projects-')
+    const { session_id } = workflowHooks.subagent_start_workflow
+    const transcript = join(projects, `${session_id}.jsonl`)
+    const runDir = join(projects, session_id, 'subagents', 'workflows', WORKFLOW_RUN)
+    mkdirSync(runDir, { recursive: true })
+    const hook = (stdin: unknown) => Bun.spawnSync(['bun', join(import.meta.dir, 'hooks', 'subagent.ts')], {
+      stdin: new TextEncoder().encode(JSON.stringify(stdin)),
+      env: { PATH: process.env.PATH!, HOME: process.env.HOME!, TELEGRAM_STATE_DIR: state, CLAUDE_PID: '4242' },
+    })
+    const file = agentEventFile(state, 4242)
+    const ids = [1, 2, 3, 4].map(n => `${workflowHooks.subagent_start_workflow.agent_id.slice(0, -1)}${n}`)
+    for (const [i, id] of ids.entries()) {
+      expect(hook(workflowStartInput(id, transcript)).exitCode).toBe(0)
+      writeFileSync(join(runDir, `agent-${id}.meta.json`), workflowMeta(`check:${i + 1}`))
+      writeFileSync(join(runDir, `agent-${id}.jsonl`), toolCall(Date.now(), 'Work', 100) + '\n')
     }
+
+    let clock = Date.now()
+    const sent: string[] = []
+    const stream = createAgentStream({
+      readEvents: createEventReader([file], false),
+      chat: () => '1001',
+      send: async (_c, text) => { sent.push(text); return 7 },
+      edit: async (_c, _id, text) => { sent.push(text) },
+      now: () => clock,
+    })
+    stream.tick()
+    await new Promise(r => setTimeout(r, 0))
+    expect(sent).toHaveLength(1)
+    expect(sent[0]).toMatch(new RegExp('^🤖 Subagents'
+      + ids.map((_, i) => `\\n${i + 1}\\. ⏳ workflow-subagent · check:${i + 1} · Work · \\d+s · 100 tokens`).join('') + '$'))
+
+    const before = readFileSync(file, 'utf8')
+    expect(hook({ ...workflowHooks.task_stop_workflow, transcript_path: transcript }).exitCode).toBe(0)
+    expect(readFileSync(file, 'utf8')).toBe(before)
+
+    for (const [i, id] of ids.entries()) appendFileSync(join(runDir, `agent-${id}.jsonl`), interrupted(Date.now(), i === 1) + '\n')
+    clock = Date.now() + CHAT_GAP_MS
+    stream.tick()
+    await new Promise(r => setTimeout(r, 0))
+    expect(sent).toHaveLength(2)
+    expect(sent[1]).toMatch(new RegExp('^🤖 Subagents'
+      + ids.map((_, i) => `\\n${i + 1}\\. ⏹ Stopped after \\d+s · workflow-subagent · check:${i + 1} · 100 tokens`).join('') + '$'))
+    expect(stream.agents()).toEqual([])
   })
 
   // The registered hooks with the inputs Claude Code sent for a subagent whose
@@ -2303,48 +2303,43 @@ describe('hooks/subagent.ts', () => {
   // stream's own file readers: an Agent call's subagent and a workflow's.
   for (const kind of ['an Agent call', 'a workflow'] as const) {
     test(`a subagent of ${kind} that fails on an API error closes as failed on the next tick through the registered hooks`, async () => {
-      const state = mkdtempSync(join(tmpdir(), 'agents-'))
-      const projects = mkdtempSync(join(tmpdir(), 'projects-'))
-      try {
-        const [startInput, failure] = kind === 'a workflow'
-          ? [failureHooks.workflow_subagent_start, failureHooks.workflow_subagent_stop_failure]
-          : [failureHooks.subagent_start, failureHooks.subagent_stop_failure]
-        const transcript = join(projects, `${startInput.session_id}.jsonl`)
-        const folder = kind === 'a workflow'
-          ? join(projects, startInput.session_id, 'subagents', 'workflows', WORKFLOW_RUN)
-          : join(projects, startInput.session_id, 'subagents')
-        mkdirSync(folder, { recursive: true })
-        const env = { TELEGRAM_STATE_DIR: state, CLAUDE_PID: '4242' }
-        expect(runRegistered('SubagentStart', { ...startInput, transcript_path: transcript }, env)).toEqual([0])
-        writeFileSync(join(folder, `agent-${startInput.agent_id}.meta.json`), JSON.stringify({ agentType: 'failing-probe', description: 'Say hello' }))
-        writeFileSync(join(folder, `agent-${startInput.agent_id}.jsonl`), JSON.stringify({ type: 'user', message: { role: 'user', content: 'Say hello.' } }) + '\n')
+      const state = scratch('agents-')
+      const projects = scratch('projects-')
+      const [startInput, failure] = kind === 'a workflow'
+        ? [failureHooks.workflow_subagent_start, failureHooks.workflow_subagent_stop_failure]
+        : [failureHooks.subagent_start, failureHooks.subagent_stop_failure]
+      const transcript = join(projects, `${startInput.session_id}.jsonl`)
+      const folder = kind === 'a workflow'
+        ? join(projects, startInput.session_id, 'subagents', 'workflows', WORKFLOW_RUN)
+        : join(projects, startInput.session_id, 'subagents')
+      mkdirSync(folder, { recursive: true })
+      const env = { TELEGRAM_STATE_DIR: state, CLAUDE_PID: '4242' }
+      expect(runRegistered('SubagentStart', { ...startInput, transcript_path: transcript }, env)).toEqual([0])
+      writeFileSync(join(folder, `agent-${startInput.agent_id}.meta.json`), JSON.stringify({ agentType: 'failing-probe', description: 'Say hello' }))
+      writeFileSync(join(folder, `agent-${startInput.agent_id}.jsonl`), JSON.stringify({ type: 'user', message: { role: 'user', content: 'Say hello.' } }) + '\n')
 
-        let clock = Date.now()
-        const sent: string[] = []
-        const stream = createAgentStream({
-          readEvents: createEventReader([agentEventFile(state, 4242)], false),
-          chat: () => '1001',
-          send: async (_c, text) => { sent.push(text); return 7 },
-          edit: async (_c, _id, text) => { sent.push(text) },
-          now: () => clock,
-        })
-        stream.tick()
-        await new Promise(r => setTimeout(r, 0))
-        expect(sent).toEqual(['🤖 Subagents\n1. ⏳ failing-probe · Say hello · Starting… · 0s'])
+      let clock = Date.now()
+      const sent: string[] = []
+      const stream = createAgentStream({
+        readEvents: createEventReader([agentEventFile(state, 4242)], false),
+        chat: () => '1001',
+        send: async (_c, text) => { sent.push(text); return 7 },
+        edit: async (_c, _id, text) => { sent.push(text) },
+        now: () => clock,
+      })
+      stream.tick()
+      await new Promise(r => setTimeout(r, 0))
+      expect(sent).toEqual(['🤖 Subagents\n1. ⏳ failing-probe · Say hello · Starting… · 0s'])
 
-        expect(runRegistered('StopFailure', { ...failure, transcript_path: transcript }, env)).toEqual([0, 0])
-        // The session's turn goes on: no turn end is written.
-        expect(existsSync(join(state, 'turns'))).toBe(false)
-        clock += CHAT_GAP_MS
-        stream.tick()
-        await new Promise(r => setTimeout(r, 0))
-        expect(sent).toHaveLength(2)
-        expect(sent[1]).toMatch(/^🤖 Subagents\n1\. ❌ Failed after \d+s \(model_not_found\) · failing-probe · Say hello$/)
-        expect(stream.agents()).toEqual([])
-      } finally {
-        rmSync(state, { recursive: true, force: true })
-        rmSync(projects, { recursive: true, force: true })
-      }
+      expect(runRegistered('StopFailure', { ...failure, transcript_path: transcript }, env)).toEqual([0, 0])
+      // The session's turn goes on: no turn end is written.
+      expect(existsSync(join(state, 'turns'))).toBe(false)
+      clock += CHAT_GAP_MS
+      stream.tick()
+      await new Promise(r => setTimeout(r, 0))
+      expect(sent).toHaveLength(2)
+      expect(sent[1]).toMatch(/^🤖 Subagents\n1\. ❌ Failed after \d+s \(model_not_found\) · failing-probe · Say hello$/)
+      expect(stream.agents()).toEqual([])
     })
   }
 })
