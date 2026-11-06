@@ -339,14 +339,15 @@ const emptyText = (method: string, payload: Record<string, unknown>) =>
 // U+033F, then trims spaces and line breaks from both ends. It kept '\tx\t' and
 // '\x01x\x01' as 'x', 'a\x00b', 'a\x0bb' and 'a\x1fb' as 'a b', and 'a\rb',
 // 'a\u202eb' and 'a\u0333b' as 'ab'; it kept DEL, U+2027, U+202F, U+200B and a
-// no-break space at each end as sent; and it answered a caption edit to
-// ' \t\r ', to a no-break space alone and to U+200B alone with a message that
-// has no caption. It counts a caption in characters (code points): a send
-// took 1024 characters outside the Basic Multilingual Plane and refused 1025
-// of them, or 1025 'x', as too long.
+// no-break space at each end as sent, and U+2060 alone; and it answered a
+// send or a caption edit of ' \t\r ', or of nothing but U+00A0, U+2000, U+2009
+// to U+200F, U+202F, U+2800, U+3000 and U+FEFF, alone or mixed, with a
+// message that has no caption. It counts a caption in characters (code
+// points): a send took 1024 characters outside the Basic Multilingual Plane
+// and refused 1025 of them, or 1025 'x', as too long.
 const captionKept = (caption: string) => {
   const kept = trimmed(caption.replace(/[\r\u030a\u0333\u033f\u2028-\u202e]/g, '').replace(/[\x00-\x09\x0b\x0c\x0e-\x1f]/g, ' '))
-  return /^[ \n\u00a0\u200b]*$/.test(kept) ? '' : kept
+  return /^[ \n\u00a0\u2000\u2009-\u200f\u202f\u2800\u3000\ufeff]*$/.test(kept) ? '' : kept
 }
 const LONG_CAPTION = { error_code: 400, description: 'Bad Request: message caption is too long' }
 const longCaption = (method: string, payload: Record<string, unknown>) => {

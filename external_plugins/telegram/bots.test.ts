@@ -712,11 +712,16 @@ describe('a reply with files to a bot', () => {
       // a line break as sent.
       ['a\x7fb', 'a\x7fb'], ['a\u2027b', 'a\u2027b'], ['a\u202fb', 'a\u202fb'], ['a\u200bb', 'a\u200bb'],
       ['\u00a0x\u00a0', '\u00a0x\u00a0'], ['a\nb', 'a\nb'],
-      // It answered a caption edit to U+0333, a no-break space or U+200B alone
-      // with no caption, so a caption of nothing but those is none.
-      ['\u0333', ''], ['\u00a0', ''], ['\u200b', ''],
+      // It answered a send or a caption edit of U+0333 or of one of these
+      // invisible characters alone with no caption, so a caption of nothing
+      // but those is none, while U+2060 alone was kept.
+      ['\u0333', ''], ['\u00a0', ''], ['\u200b', ''], ['\u202f', ''], ['\u200c', ''], ['\u200d', ''],
+      ['\u200e', ''], ['\u200f', ''], ['\ufeff', ''], ['\u2000', ''], ['\u2009', ''], ['\u200a', ''],
+      ['\u3000', ''], ['\u2800', ''], ['\u00a0\u200b', ''], ['\u2060', '\u2060'],
     ]) expect(telegramTrim(sent!)).toBe(kept!)
     expect(telegramTrim(' \u200b\u00a0\n\u00a0 ')).toBe('')
+    expect(telegramTrim('\u3000\u2800\ufeff\n\u200e\u202f\u2000\u200a')).toBe('')
+    expect(telegramTrim('\u202fx\u3000')).toBe('\u202fx\u3000')
     expect(telegramTrim('\u00a0\u200bx\u200b')).toBe('\u00a0\u200bx\u200b')
     expect(telegramTrim('\r\n\ta\tb\r\n \r')).toBe('a b')
     expect(telegramTrim('\u2028\n\x00a\x0e\u202db\x1f\u2029')).toBe('a b')
@@ -727,6 +732,8 @@ describe('a reply with files to a bot', () => {
     expect(botReply(' \t\r ', files(1))).toEqual({ groups: [files(1)], pieces: [] })
     expect(botReply('\x01\u2028\x0b\u202e\x1f', files(1))).toEqual({ groups: [files(1)], pieces: [] })
     expect(botReply(' \t\u00a0\u0333\r\u200b\n', files(1))).toEqual({ groups: [files(1)], pieces: [] })
+    expect(botReply('\u202f\u200c\ufeff\u2009\u2800', files(1))).toEqual({ groups: [files(1)], pieces: [] })
+    expect(botReply('\u2060', files(1))).toEqual(one('\u2060'))
     // A no-break space beside anything else stays, and it counts: Telegram
     // kept one at each end, where JavaScript's own trim would remove it.
     expect(botReply(' \t\u00a0x\r\n', files(1))).toEqual(one('\u00a0x'))

@@ -1310,6 +1310,10 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     from = calls(t.dir).length
     expect((await edit('\u030aone\u0333 two\x00three\u033f\u202b')).content[0].text).toBe(edited)
     expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', 'one two three']])
+    // U+2060 alone stays, as Telegram kept it.
+    from = calls(t.dir).length
+    expect((await edit('\u2060')).content[0].text).toBe(edited)
+    expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', '\u2060']])
     // A no-break space or U+200B beside anything else stays: Telegram kept a
     // no-break space at each end, where JavaScript's own trim would remove it.
     from = calls(t.dir).length
@@ -1341,10 +1345,11 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
         'edit_message failed: this text has 1025 characters, over the 1024 a caption holds; nothing was edited; send it as a new reply')
     }
     // A text that is empty as a caption makes no call: Telegram answered a
-    // caption edit to ' \t\r ', to U+0333, to a no-break space and to U+200B,
-    // each alone, with a message that has no caption, so the edit would
-    // delete the text.
-    for (const text of ['  \n ', '', ' \t\r ', '\r\n\t', '\x01\u2028\x0b\u202e\x1f', '\u0333', '\u00a0', '\u200b', ' \u00a0\u200b\n\u0333 ']) {
+    // caption edit to ' \t\r ', to U+0333, U+00A0, U+200B, U+202F, U+200C,
+    // U+FEFF and U+2009, each alone, with a message that has no caption, so
+    // the edit would delete the text.
+    for (const text of ['  \n ', '', ' \t\r ', '\r\n\t', '\x01\u2028\x0b\u202e\x1f', '\u0333', '\u00a0', '\u200b', ' \u00a0\u200b\n\u0333 ',
+      '\u202f', '\u200c', '\ufeff', '\u2009', '\u3000\u2800\u200d\u200e\u200f\u2000\u200a']) {
       expect(failure(await edit(text))).toBe('edit_message failed: a caption needs text once its ends are trimmed; nothing was edited')
     }
     expect(calls(t.dir).slice(from)).toEqual([])

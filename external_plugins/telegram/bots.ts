@@ -307,14 +307,15 @@ const textTrim = (text: string): string => text.replace(TRIMMED, '')
 // from U+2028 to U+202E and the combining marks U+030A, U+0333 and U+033F,
 // then removes spaces and line breaks from both ends. So '\tx\t' is kept as
 // 'x', 'a\x0bb' as 'a b', and 'a\rb', 'a\u2028b' and 'a\u0333b' as 'ab'. A caption
-// left with nothing but no-break spaces and U+200B is no caption too, though
-// both stay in a caption with anything else, at its ends too. Any other
-// character is left alone: DEL, U+2027 and U+202F came back as sent. A
-// caption with nothing left is no caption, so an edit to one would delete the
-// text.
+// left with nothing but the invisible characters Telegram answered as no
+// caption, alone or mixed (U+00A0, U+2000, U+2009 to U+200F, U+202F, U+2800,
+// U+3000 and U+FEFF), is no caption too, though each stays in a caption with
+// anything else, at its ends too. Any other character is left alone: DEL,
+// U+2027 and U+2060 came back as sent, U+2060 alone included. A caption with
+// nothing left is no caption, so an edit to one would delete the text.
 const SPACED = /[\x00-\x09\x0b\x0c\x0e-\x1f]/g
 const DROPPED = /[\r\u030a\u0333\u033f\u2028-\u202e]/g
-const BLANK = /^[ \n\u00a0\u200b]*$/
+const BLANK = /^[ \n\u00a0\u2000\u2009-\u200f\u202f\u2800\u3000\ufeff]*$/
 export const telegramTrim = (text: string): string => {
   const kept = textTrim(text.replace(DROPPED, '').replace(SPACED, ' '))
   return BLANK.test(kept) ? '' : kept
