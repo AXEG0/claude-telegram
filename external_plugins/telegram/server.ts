@@ -40,7 +40,7 @@ import { createTextMemory, editEvent } from './edit.ts'
 import { opening, reactionEvent } from './reaction.ts'
 import { channelMode, UPDATE_KINDS } from './polling.ts'
 import { alertConfig, createIdleAlarm, idleText, NO_OWNER, RECOVERED_TEXT, stuckText } from './alerts.ts'
-import { botReply, CHAT_ID, createBotLookup, createConfirm, createPeers, listed, noticeChat, plainObject, sendStyle } from './bots.ts'
+import { BOT_CAPTION_MAX, botReply, CHAT_ID, createBotLookup, createConfirm, createPeers, listed, noticeChat, plainObject, sendStyle, telegramTrim } from './bots.ts'
 import { cleanFiles, createFailureWatch, failureFiles, HOLD_MS } from './failures.ts'
 import { askOwner, NO_ASKS, ownerAnswers } from './asks.ts'
 import { createPermitReader, permitDetail, permitFile, permitText, type PermitEvent } from './permit.ts'
@@ -678,6 +678,16 @@ class WentElsewhere extends Error {}
 // last wrote with edit_message, for the reaction event. See reaction.ts.
 const sentWords = createTextMemory()
 
+// What each recent message the bot sent through reply holds: text, a file
+// with no text, or a file whose caption holds text, as Telegram's answer for
+// the file says. A reply with files names it, and edit_message edits the
+// text where it lives. Like sentWords, it lives in this process, so a message
+// sent before the server started is edited as before.
+type Holds = 'text' | 'file' | 'caption'
+const sentHolds = createTextMemory()
+const HOLDS_LABEL: Record<Holds, string> = { text: 'text', file: 'file', caption: 'file with text caption' }
+const fileHolds = (sent: { caption?: string }): Holds => sent.caption ? 'caption' : 'file'
+
 const mcp = new Server(
   { name: 'telegram', version: '1.0.0' },
   {
@@ -754,7 +764,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'reply',
       description:
-        'Reply on Telegram. Pass chat_id from the inbound message, or the numeric id of an allowlisted chat that has written to this bot, or of a bot the owner added with its username; chat ids are numeric, and only the owner adds another bot, in the terminal, with /telegram:access bot <id> @username. A message to a bot goes to its @username as plain text, whatever the format, and the reply stops at a message Telegram says went to another chat. Optionally pass reply_to (message_id) for threading, files (absolute paths) to attach images or documents, and buttons for fixed answers the user taps.',
+        'Reply on Telegram. Pass chat_id from the inbound message, or the numeric id of an allowlisted chat that has written to this bot, or of a bot the owner added with its username; chat ids are numeric, and only the owner adds another bot, in the terminal, with /telegram:access bot <id> @username. A message to a bot goes to its @username as plain text, whatever the format, and the reply stops at a message Telegram says went to another chat. Optionally pass reply_to (message_id) for threading, files (absolute paths) to attach images or documents, and buttons for fixed answers the user taps. With files, the answer also says what each message holds: text, a file, or a file with a text caption.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -805,7 +815,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'edit_message',
-      description: 'Edit a message the bot previously sent. Useful for interim progress updates. Edits don\'t trigger push notifications — send a new reply when a long task completes so the user\'s device pings. Pass text, buttons, or both: with text and no buttons the message loses its buttons; buttons alone change only the buttons, under a file too, and an empty list removes them.',
+      description: 'Edit a message the bot previously sent. Useful for interim progress updates. Edits don\'t trigger push notifications — send a new reply when a long task completes so the user\'s device pings. Pass text, buttons, or both: with text and no buttons the message loses its buttons; buttons alone change only the buttons, under a file too, and an empty list removes them. Text on a file whose caption holds a reply\'s text edits that caption, 1 to 1024 characters; text on a file with no text is refused, and nothing is edited.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -1094,13 +1104,20 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const total = toBotPlan ? files.length + toBotPlan.pieces.length : chunks.length + files.length
         const ids = () => sentIds.length ? ` (ids: ${sentIds.join(', ')})` : ''
         const sentText = () => sentIds.length === 1 ? `sent (id: ${sentIds[0]})` : `sent ${sentIds.length} parts (ids: ${sentIds.join(', ')})`
-        const sentTo = (sent: { message_id: number; chat: { id: number } }, words: string) => {
+        // With files, the answer ends with what each message holds, read from
+        // the record edit_message reads.
+        const holdsText = () => files.length === 0 ? '' : `; what each holds: ${sentIds.flatMap(id => {
+          const holds = sentHolds.get(chat_id, id) as Holds | undefined
+          return holds ? [`${id} ${HOLDS_LABEL[holds]}`] : []
+        }).join(', ')}`
+        const sentTo = (sent: { message_id: number; chat: { id: number } }, words: string, holds: Holds) => {
           sentIds.push(sent.message_id)
-          wentTo(sent, words)
+          wentTo(sent, words, holds)
         }
-        const wentTo = (sent: { message_id: number; chat: { id: number } }, words: string) => {
+        const wentTo = (sent: { message_id: number; chat: { id: number } }, words: string, holds: Holds) => {
           if (!toBot || String(sent.chat.id) === chat_id) {
             sentWords.remember(String(sent.chat.id), sent.message_id, opening(words))
+            sentHolds.remember(String(sent.chat.id), sent.message_id, holds)
             return
           }
           peers.forget(chat_id)
@@ -1145,15 +1162,15 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
             // One call sent every message of an album, so all of them count
             // as sent before any is checked.
             for (const m of sent) sentIds.push(m.message_id)
-            sent.forEach((m, i) => wentTo(m, i === 0 && caption !== undefined ? caption : `(document: ${basename(group[i]!)})`))
+            sent.forEach((m, i) => wentTo(m, i === 0 && caption !== undefined ? caption : `(document: ${basename(group[i]!)})`, fileHolds(m)))
           }
           for (const [i, piece] of toBotPlan.pieces.entries()) {
             const threaded = reply_to != null && replyMode !== 'off' && (replyMode === 'all' || i === 0)
             const at = await target()
             const sent = await send(undefined, () => bot.api.sendMessage(at, piece, threaded ? { reply_parameters: { message_id: reply_to } } : {}))
-            sentTo(sent, piece)
+            sentTo(sent, piece, 'text')
           }
-          return { content: [{ type: 'text', text: sentText() }] }
+          return { content: [{ type: 'text', text: sentText() + holdsText() }] }
         }
 
         // The keyboard goes on the last message sent, a text part or a file,
@@ -1199,7 +1216,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
                   replyTo: n => reply_to != null && replyMode !== 'off' && (replyMode === 'all' || n === 0) ? reply_to : undefined,
                   plainChunks: t => chunk(t, limit, mode),
                   progress: rich,
-                  sent: (id, words) => sentWords.remember(chat_id, id, opening(words)),
+                  sent: (id, words) => {
+                    sentWords.remember(chat_id, id, opening(words))
+                    sentHolds.remember(chat_id, id, 'text')
+                  },
                   markup: textMarkup,
                 })
               } catch (err) {
@@ -1224,7 +1244,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
               } catch (err) {
                 throw stop(err, i + 1, !!withKeyboard, () => textFailed(err))
               }
-              sentTo(sent, chunks[i])
+              sentTo(sent, chunks[i], 'text')
               if (withKeyboard) carrier = sent.message_id
             }
           } catch (err) {
@@ -1247,7 +1267,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
               : undefined
             const photo = PHOTO_EXTS.has(ext)
             const fileFailed = (err: unknown) => new Error(`reply failed after ${sentIds.length} of ${sentIds.length + files.length - k} message(s) sent${ids()}: ${reason(err)}`)
-            let sent: { message_id: number; chat: { id: number } }
+            let sent: { message_id: number; chat: { id: number }; caption?: string }
             let at: string
             try {
               at = await dest()
@@ -1259,7 +1279,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
             } catch (err) {
               throw stop(err, parts() - files.length + k + 1, !!withKeyboard, () => fileFailed(err))
             }
-            sentTo(sent, photo ? `(photo: ${basename(f)})` : `(document: ${basename(f)})`)
+            sentTo(sent, photo ? `(photo: ${basename(f)})` : `(document: ${basename(f)})`, fileHolds(sent))
             if (withKeyboard) carrier = sent.message_id
           }
         } catch (err) {
@@ -1273,7 +1293,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           await joinKeyboard(chat_id, keyboard, carrier, sentIds, files.length === 0 && sentIds.length === 1 ? text : undefined)
         }
 
-        const result = sentText() + (carrier !== undefined ? `; buttons on message ${carrier}` : '')
+        const result = sentText() + (carrier !== undefined ? `; buttons on message ${carrier}` : '') + holdsText()
         return { content: [{ type: 'text', text: result }] }
       }
       case 'react': {
@@ -1312,6 +1332,17 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const rows = args.buttons !== undefined ? parseButtons(args.buttons, true) : undefined
         if (rows?.length) assertPressesReachHere()
         assertAllowedChat(chat_id)
+        // Text goes where the message holds it, as the reply that sent it
+        // recorded: a file's caption takes what Telegram keeps of it, 1 to
+        // 1024 characters, and a file with no text takes none. A message the
+        // record does not hold is edited as before.
+        const holds = text !== undefined ? sentHolds.get(chat_id, message_id) as Holds | undefined : undefined
+        if (holds === 'file') throw new Error(`message ${message_id} holds a file with no text, so it has no text to edit; nothing was edited`)
+        const caption = holds === 'caption' ? telegramTrim(text!) : undefined
+        if (caption === '') throw new Error('a caption needs text once its ends are trimmed; nothing was edited')
+        if (caption !== undefined && caption.length > BOT_CAPTION_MAX) {
+          throw new Error(`this text has ${caption.length} characters, over the ${BOT_CAPTION_MAX} a caption holds; nothing was edited; send it as a new reply`)
+        }
         const toBot = await peers.botChat(chat_id)
         if (rows?.length && toBot) throw new Error(BOT_BUTTONS)
         // An edit Telegram refused says it was not edited; one whose outcome
@@ -1330,6 +1361,13 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           await edited(() => changeKeyboard(chat_id, message_id, rows!, (markup, limit) =>
             limit(signal => bot.api.editMessageReplyMarkup(chat_id, message_id, markup ? { reply_markup: markup as never } : undefined, signal))))
           return { content: [{ type: 'text', text: `edited (id: ${args.message_id})` }] }
+        }
+        if (caption !== undefined) {
+          // A caption goes plain, as every message to a bot does.
+          await edited(() => changeKeyboard(chat_id, message_id, rows, (markup, limit) =>
+            limit(signal => bot.api.editMessageCaption(chat_id, message_id, { caption, ...(markup ? { reply_markup: markup as never } : {}) }, signal)), text))
+          sentWords.remember(chat_id, message_id, opening(text))
+          return { content: [{ type: 'text', text: `edited (id: ${args.message_id}); its caption holds the new text` }] }
         }
         // An edit in a bot's chat goes plain, like a reply. See bots.ts.
         const editFormat = sendStyle(format, toBot)

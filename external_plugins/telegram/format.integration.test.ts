@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test'
+import { mkdirSync, writeFileSync } from 'fs'
+import { join } from 'path'
 import { calls, cleanup, start, state, type Call, type Server } from './fixtures/harness.ts'
 
 afterEach(cleanup)
@@ -67,6 +69,23 @@ describe.skipIf(process.platform !== 'linux')('the format of reply and edit_mess
         }
       }
       expect(calls(dir)).toEqual([])
+      await srv.close()
+    }, 20000)
+
+    test(`${mode}, a reply with a file to a person answers what each message holds, in each listed format`, async () => {
+      const { dir, srv } = await sender(rich)
+      mkdirSync(join(dir, 'inbox'))
+      const chart = join(dir, 'inbox', 'chart.png')
+      writeFileSync(chart, 'png')
+      for (const format of list) {
+        const from = calls(dir).length
+        const r = await tool(srv, 'reply', { chat_id: '1', text: `**the chart** in ${format}`, files: [chart], format })
+        const sent = calls(dir).slice(from).filter(c => c.method.startsWith('send'))
+        expect(sent.map(c => c.method)).toEqual([format === 'rich' ? 'sendRichMessage' : 'sendMessage', 'sendPhoto'])
+        const [text, photo] = sent.map(c => c.message_id!)
+        expect(text).not.toBe(photo)
+        expect(r.content[0].text).toBe(`sent 2 parts (ids: ${text}, ${photo}); what each holds: ${text} text, ${photo} file`)
+      }
       await srv.close()
     }, 20000)
 

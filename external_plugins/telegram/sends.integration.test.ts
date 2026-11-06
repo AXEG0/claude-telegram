@@ -18,7 +18,7 @@ const PEER = { id: 7080, is_bot: true, first_name: 'Peer', username: 'peer_eight
 const DM = { id: 1, type: 'private' }
 const now = () => Math.floor(Date.now() / 1000)
 const SENDS = ['sendMessage', 'sendPhoto', 'sendDocument', 'sendRichMessage', 'sendMediaGroup']
-const EDITS = ['editMessageText', 'editMessageReplyMarkup']
+const EDITS = ['editMessageText', 'editMessageCaption', 'editMessageReplyMarkup']
 const UNKNOWN = 'delivery unknown: Telegram may still deliver it, even minutes later; do not resend unless the recipient says it did not arrive'
 const UNKNOWN_EDIT = 'edit outcome unknown; repeating the same edit is safe'
 const GATEWAY = { error_code: 504, description: 'Gateway Timeout' }

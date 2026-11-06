@@ -14,7 +14,7 @@ afterEach(cleanup)
 const OWNER = { id: 1, is_bot: false, first_name: 'Owner', username: 'owner' }
 const DM = { id: 1, type: 'private' }
 const SENDS = ['sendMessage', 'sendPhoto', 'sendDocument', 'sendRichMessage', 'sendMediaGroup']
-const EDITS = ['editMessageText', 'editMessageReplyMarkup']
+const EDITS = ['editMessageText', 'editMessageCaption', 'editMessageReplyMarkup']
 const now = () => Math.floor(Date.now() / 1000)
 const TOO_MANY = { error_code: 429, description: 'Too Many Requests: retry after 5', parameters: { retry_after: 5 } }
 const REJECTED = { error_code: 400, description: 'Bad Request: RICH_MESSAGE_MARKDOWN_INVALID' }
@@ -117,8 +117,8 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
       [{ text: 'a'.repeat(10) + 'b'.repeat(10), format: 'text' }, ['sendMessage', 'sendMessage'], 'sent 2 parts (ids: 100, 101); buttons on message 101'],
       [{ text: '*Merge?*', format: 'markdownv2' }, ['sendMessage'], 'sent (id: 102); buttons on message 102'],
       [{ text: '**Merge?**' }, ['sendRichMessage'], 'sent (id: 103); buttons on message 103'],
-      [{ text: 'the files', format: 'text', files: [join(dir, 'inbox', 'chart.png'), join(dir, 'inbox', 'notes.txt')] }, ['sendMessage', 'sendPhoto', 'sendDocument'], 'sent 3 parts (ids: 104, 105, 106); buttons on message 106'],
-      [{ text: '**the chart**', files: [join(dir, 'inbox', 'chart.png')] }, ['sendRichMessage', 'sendPhoto'], 'sent 2 parts (ids: 107, 108); buttons on message 108'],
+      [{ text: 'the files', format: 'text', files: [join(dir, 'inbox', 'chart.png'), join(dir, 'inbox', 'notes.txt')] }, ['sendMessage', 'sendPhoto', 'sendDocument'], 'sent 3 parts (ids: 104, 105, 106); buttons on message 106; what each holds: 104 text, 105 file, 106 file'],
+      [{ text: '**the chart**', files: [join(dir, 'inbox', 'chart.png')] }, ['sendRichMessage', 'sendPhoto'], 'sent 2 parts (ids: 107, 108); buttons on message 108; what each holds: 107 text, 108 file'],
     ]
     for (const [args, methods, result] of cases) {
       const from = calls(dir).length
@@ -129,7 +129,7 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
       expect(sent.slice(0, -1).map(markupOf)).toEqual(sent.slice(0, -1).map(() => undefined))
       const carrier = sent.at(-1)!
       expect(markupOf(carrier).inline_keyboard.map((row: any[]) => row.map(b => b.text))).toEqual([['Yes', 'No']])
-      expect(Number(/(\d+)$/.exec(result)![1])).toBe(carrier.message_id!)
+      expect(Number(/; buttons on message (\d+)/.exec(result)![1])).toBe(carrier.message_id!)
     }
     // Without buttons, a reply returns what it always did.
     expect(ok(await tool(srv, 'reply', { chat_id: '1', text: 'plain', format: 'text' }))).toBe('sent (id: 109)')
@@ -308,7 +308,7 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     expect(sendsSince(from)).toEqual([['sendRichMessage', true], ['sendMessage', false]])
     from = calls(dir).length
     expect(ok(await tool(srv, 'reply', { chat_id: '1', text: '**BODY-BUTTON**', files: [join(dir, 'inbox', 'chart.png')], buttons: [['Yes']] }))).toBe(
-      'sent 2 parts (ids: 101, 102); buttons on message 102')
+      'sent 2 parts (ids: 101, 102); buttons on message 102; what each holds: 101 text, 102 file')
     expect(sendsSince(from)).toEqual([['sendRichMessage', true], ['sendMessage', false], ['sendPhoto', false]])
     // The failed replies left no reservation behind.
     expect(record(dir).entries).toEqual([expect.objectContaining({ chat: '1', message: 102 })])
@@ -396,7 +396,7 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     mkdirSync(join(dir, 'inbox'))
     writeFileSync(join(dir, 'inbox', 'chart.png'), 'png')
     const srv = await channel(dir)
-    expect(ok(await tool(srv, 'reply', { chat_id: '1', text: 'the chart', files: [join(dir, 'inbox', 'chart.png')] }))).toBe('sent 2 parts (ids: 100, 101)')
+    expect(ok(await tool(srv, 'reply', { chat_id: '1', text: 'the chart', files: [join(dir, 'inbox', 'chart.png')] }))).toBe('sent 2 parts (ids: 100, 101); what each holds: 100 text, 101 file')
     for (const m of [101, 100]) {
       const from = calls(dir).length
       ok(await tool(srv, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [['Keep', 'Drop']] }))
@@ -410,6 +410,43 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
       expect(entryOf(dir, m)).toBeUndefined()
     }
     await srv.close()
+  }, 15000)
+
+  test('edit_message with text and buttons on a file with no text answers that it has none and makes no call, in a person\'s chat and before the bot-buttons refusal in a bot\'s', async () => {
+    const BOT = { id: 7092, is_bot: true, first_name: 'Peer', username: 'peer_ninety_two_bot' }
+    const dir = state({ dmPolicy: 'allowlist', allowFrom: ['1', String(BOT.id)] })
+    mkdirSync(join(dir, 'inbox'))
+    writeFileSync(join(dir, 'inbox', 'chart.png'), 'png')
+    writeFileSync(join(dir, 'inbox', 'log.txt'), 'log')
+    const srv = await channel(dir, { env: { TELEGRAM_TEST_USERS: JSON.stringify({ [BOT.id]: BOT }) } })
+    // To the bot the file goes first, and a text over 1024 characters after it.
+    expect(ok(await tool(srv, 'reply', { chat_id: String(BOT.id), text: 'n'.repeat(1087), files: [join(dir, 'inbox', 'log.txt')] }))).toBe(
+      'sent 2 parts (ids: 100, 101); what each holds: 100 file, 101 text')
+    expect(ok(await tool(srv, 'reply', { chat_id: '1', text: 'the chart', files: [join(dir, 'inbox', 'chart.png')], buttons: [['Yes', 'No']] }))).toBe(
+      'sent 2 parts (ids: 102, 103); buttons on message 103; what each holds: 102 text, 103 file')
+    // Every call the fake took since, but the polls.
+    const since = (from: number) => calls(dir).slice(from).filter(c => c.method !== 'getUpdates')
+    for (const [chat_id, m] of [[String(BOT.id), 100], ['1', 103]] as [string, number][]) {
+      const from = calls(dir).length
+      expect(failed(await tool(srv, 'edit_message', { chat_id, message_id: String(m), text: 'corrected', buttons: [['Yes']] }))).toBe(
+        `edit_message failed: message ${m} holds a file with no text, so it has no text to edit; nothing was edited`)
+      expect(since(from)).toEqual([])
+    }
+    await srv.close()
+  }, 20000)
+
+  test('in a server that does not poll, an edit with text and buttons of a file it sent is refused for its buttons first, as any such edit is, and makes no call', async () => {
+    const dir = state()
+    mkdirSync(join(dir, 'inbox'))
+    writeFileSync(join(dir, 'inbox', 'chart.png'), 'png')
+    const probe = await sender(dir)
+    expect(ok(await tool(probe, 'reply', { chat_id: '1', text: 'the chart', files: [join(dir, 'inbox', 'chart.png')] }))).toBe(
+      'sent 2 parts (ids: 900, 901); what each holds: 900 text, 901 file')
+    const from = calls(dir).length
+    expect(failed(await tool(probe, 'edit_message', { chat_id: '1', message_id: '901', text: 'the new chart', buttons: [['Yes']] }))).toBe(
+      'edit_message failed: buttons are refused here: this server does not poll the bot, so a press would reach whichever process polls')
+    expect(calls(dir).slice(from)).toEqual([])
+    await probe.close()
   }, 15000)
 
   test('edit_message refuses a call with neither text nor buttons, and counts message is not modified as done', async () => {
