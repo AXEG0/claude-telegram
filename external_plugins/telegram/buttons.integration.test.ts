@@ -426,7 +426,7 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
       'sent 2 parts (ids: 102, 103); buttons on message 103; what each holds: 102 text, 103 file')
     // Every call the fake took since, but the polls.
     const since = (from: number) => calls(dir).slice(from).filter(c => c.method !== 'getUpdates')
-    for (const [chat_id, m] of [[String(BOT.id), 100], ['1', 103]] as [string, number][]) {
+    for (const [chat_id, m] of [['1', 103], [String(BOT.id), 100]] as [string, number][]) {
       const from = calls(dir).length
       expect(failed(await tool(srv, 'edit_message', { chat_id, message_id: String(m), text: 'corrected', buttons: [['Yes']] }))).toBe(
         `edit_message failed: message ${m} holds a file with no text, so it has no text to edit; nothing was edited`)
