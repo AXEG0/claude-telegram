@@ -265,8 +265,9 @@ const USAGE = 'usage: TELEGRAM_LIVE_CHECK_TOKEN=<bot token> bun live-check.ts --
 async function main(): Promise<number> {
   const token = process.env.TELEGRAM_LIVE_CHECK_TOKEN ?? ''
   const mask = masker(token)
-  const say = (line: string) => console.log(mask(line))
-  const warn = (line: string) => console.error(mask(line))
+  // Its own output, not the server's, so it writes to its own stdout and stderr.
+  const say = (line: string) => { process.stdout.write(mask(line) + '\n') }
+  const warn = (line: string) => { process.stderr.write(mask(line) + '\n') }
   const args = process.argv.slice(2)
   let chat: string | undefined
   let pace = 1000
@@ -313,4 +314,4 @@ async function main(): Promise<number> {
   return differ.length ? 1 : 0
 }
 
-if (import.meta.main) process.exit(await main())
+if (import.meta.main) process.exitCode = await main()
