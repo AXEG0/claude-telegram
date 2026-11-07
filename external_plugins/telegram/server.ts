@@ -40,7 +40,7 @@ import { createTextMemory, editEvent } from './edit.ts'
 import { opening, reactionEvent } from './reaction.ts'
 import { channelMode, UPDATE_KINDS } from './polling.ts'
 import { alertConfig, createIdleAlarm, idleText, NO_OWNER, RECOVERED_TEXT, stuckText } from './alerts.ts'
-import { BOT_CAPTION_MAX, botReply, CHAT_ID, createBotLookup, createConfirm, createPeers, listed, noticeChat, plainObject, sendStyle, telegramTrim } from './bots.ts'
+import { BOT_CAPTION_MAX, botReply, captionLength, CHAT_ID, createBotLookup, createConfirm, createPeers, listed, noticeChat, plainObject, sendStyle, telegramTrim } from './bots.ts'
 import { cleanFiles, createFailureWatch, failureFiles, HOLD_MS } from './failures.ts'
 import { askOwner, NO_ASKS, ownerAnswers } from './asks.ts'
 import { createPermitReader, permitDetail, permitFile, permitText, type PermitEvent } from './permit.ts'
@@ -1335,14 +1335,16 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         assertAllowedChat(chat_id)
         // Text goes where the message holds it, as the reply that sent it
         // recorded: a file's caption takes what Telegram keeps of it, 1 to
-        // 1024 characters, and a file with no text takes none. A message the
-        // record does not hold is edited as before.
+        // 1024 characters as Telegram counts them on a send and an edit alike,
+        // and a file with no text
+        // takes none. A message the record does not hold is edited as before.
+        // See telegramTrim and captionLength in bots.ts for the evidence.
         const holds = text !== undefined ? sentHolds.get(chat_id, message_id) as Holds | undefined : undefined
         if (holds === 'file') throw new Error(`message ${message_id} holds a file with no text, so it has no text to edit; nothing was edited`)
         const caption = holds === 'caption' ? telegramTrim(text!) : undefined
         if (caption === '') throw new Error('a caption needs text once its ends are trimmed; nothing was edited')
-        if (caption !== undefined && caption.length > BOT_CAPTION_MAX) {
-          throw new Error(`this text has ${caption.length} characters, over the ${BOT_CAPTION_MAX} a caption holds; nothing was edited; send it as a new reply`)
+        if (caption !== undefined && captionLength(caption) > BOT_CAPTION_MAX) {
+          throw new Error(`this text has ${captionLength(caption)} characters, over the ${BOT_CAPTION_MAX} a caption holds; nothing was edited; send it as a new reply`)
         }
         const toBot = await peers.botChat(chat_id)
         if (rows?.length && toBot) throw new Error(BOT_BUTTONS)

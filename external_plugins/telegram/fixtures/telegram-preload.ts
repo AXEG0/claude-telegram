@@ -4,6 +4,7 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renam
 import { join } from 'path'
 import * as grammy from 'grammy'
 import { pollFetch } from '../deadline.ts'
+import { BOT_CAPTION_MAX, captionLength, telegramClean, telegramTrim } from '../bots.ts'
 
 // A file upload goes as a multipart stream; its fields are logged as text and
 // each file as its name.
@@ -325,22 +326,40 @@ async function holdPoll(payload: Record<string, unknown>, signal: AbortSignal | 
 
 const SENDS = ['sendMessage', 'sendPhoto', 'sendDocument', 'sendRichMessage', 'sendMediaGroup']
 
-// Telegram trims spaces and line breaks from both ends of a text or caption,
-// and refuses a text message, or a text edit, with nothing left.
+// Telegram trims spaces and line breaks from both ends of a text, and refuses
+// a text message, or a text edit, with nothing left.
 const trimmed = (text: string) => text.replace(/^[ \n]+|[ \n]+$/g, '')
 const EMPTY_TEXT = { error_code: 400, description: 'Bad Request: message text is empty' }
 const emptyText = (method: string, payload: Record<string, unknown>) =>
   (method === 'sendMessage' || method === 'editMessageText') && typeof payload.text === 'string' && trimmed(payload.text) === ''
 
+// A caption as api.telegram.org keeps and counts it is the plugin's own rule,
+// telegramTrim, telegramClean and captionLength in bots.ts, where each part
+// names its evidence, so the fake cannot keep a rule the plugin has dropped.
+// The differences from Telegram named at the end of telegramTrim's comment hold
+// for the fake too. A send whose caption is over 1024 characters once cleaned
+// and trimmed is refused, before the empty check, as TDLib counts it: a live
+// read of sendDocument answered so for 1025 'x' and for 1025 U+1F600, and by
+// TDLib's code a blank one over 1024 is refused the same way; no read covered
+// that or an album's caption.
+const captionKept = telegramTrim
+const LONG_CAPTION = { error_code: 400, description: 'Bad Request: message caption is too long' }
+const longCaption = (method: string, payload: Record<string, unknown>) => {
+  const captions = method === 'sendMediaGroup' ? (payload.media as Record<string, unknown>[]).map(m => m.caption)
+    : method === 'sendDocument' || method === 'sendPhoto' ? [payload.caption]
+    : []
+  return captions.some(c => typeof c === 'string' && captionLength(telegramClean(c)) > BOT_CAPTION_MAX)
+}
+
 // A sent message's own fields as Telegram answers a send: its text, or its
-// file and the caption Telegram kept, none when it is empty once trimmed. A
+// file and the caption Telegram kept, none when it is empty as a caption. A
 // rich message's answer carries none of them.
 function contentOf(method: string, sent: Record<string, unknown>, uncaptioned: boolean): Record<string, unknown> {
   if (method === 'sendMessage') return { text: trimmed(String(sent.text)) }
   if (method === 'sendRichMessage') return {}
   const type = method === 'sendMediaGroup' ? sent.type : method === 'sendPhoto' ? 'photo' : 'document'
   const name = String(method === 'sendMediaGroup' ? sent.media : sent[String(type)]).replace(/^file:/, '')
-  const kept = typeof sent.caption === 'string' && !uncaptioned ? trimmed(sent.caption) : ''
+  const kept = typeof sent.caption === 'string' && !uncaptioned ? captionKept(sent.caption) : ''
   return {
     ...(type === 'photo'
       ? { photo: [{ file_id: `file-of-${name}`, file_unique_id: `u-${name}`, width: 1, height: 1 }] }
@@ -386,7 +405,7 @@ function bridgeSend(method: string, payload: Record<string, unknown>): void {
   const chat = { id: ME.id, type: 'private', first_name: ME.first_name, username: ME.username }
   const file = (type: unknown, media: unknown, caption: unknown, n: number) => {
     const name = String(media).replace(/^file:/, '')
-    const kept = typeof caption === 'string' ? trimmed(caption) : ''
+    const kept = typeof caption === 'string' ? captionKept(caption) : ''
     return {
       ...(type === 'photo'
         ? { photo: [{ file_id: `file-of-${name}`, file_unique_id: `u${n}`, width: 1, height: 1 }] }
@@ -437,7 +456,7 @@ const answerCall = (async (url: string | URL | Request, options: RequestInit | u
     appendFileSync(process.env.TELEGRAM_TEST_API_LOG!, JSON.stringify({ pid: process.pid, method, payload, at: Date.now(), failed: rule.network }) + '\n')
     throw Object.assign(new TypeError(`${rule.network}: Unable to connect. Is the computer able to access the url?`), { code: rule.network })
   }
-  const refusal = emptyText(method, payload) ? EMPTY_TEXT : editRefused(method, payload) ?? (rule?.lands ? undefined : rule?.error)
+  const refusal = emptyText(method, payload) ? EMPTY_TEXT : longCaption(method, payload) ? LONG_CAPTION : editRefused(method, payload) ?? (rule?.lands ? undefined : rule?.error)
   if (rule?.preMs) await Bun.sleep(rule.preMs)
   const to = n && !refusal ? recipient(payload.chat_id) : undefined
   if (to && nextId !== undefined && !redirectNumbers(payload.chat_id)) to.message_id = nextId++
@@ -477,7 +496,7 @@ const answerCall = (async (url: string | URL | Request, options: RequestInit | u
   const captioned = method === 'editMessageCaption' ? editedOf(payload) : undefined
   if (captioned?.kind === 'file') {
     const { caption: _, ...file } = captioned.content
-    const kept = typeof payload.caption === 'string' ? trimmed(payload.caption) : ''
+    const kept = typeof payload.caption === 'string' ? captionKept(payload.caption) : ''
     captioned.content = { ...file, ...(kept ? { caption: kept } : {}) }
     result = { message_id: payload.message_id, date: 0, edit_date: 0, chat: captioned.chat, ...captioned.content }
   }
