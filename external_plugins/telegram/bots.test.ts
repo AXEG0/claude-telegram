@@ -751,6 +751,9 @@ describe('a reply with files to a bot', () => {
     expect(botReply('\x01\u2028\x0b\u202e\x1f', files(1))).toEqual({ groups: [files(1)], pieces: [] })
     expect(botReply(' \t\u00a0\u0333\r\u200b\n', files(1))).toEqual({ groups: [files(1)], pieces: [] })
     expect(botReply('\u202f\u200c\ufeff\u2009\u2800', files(1))).toEqual({ groups: [files(1)], pieces: [] })
+    // A space between blank characters, here the one a tab becomes, is blank
+    // too (code: misc.cpp:231, through is_empty_string; no read).
+    expect(botReply('\u200b\t\u200b', files(1))).toEqual({ groups: [files(1)], pieces: [] })
     // A text over 1024 characters as written that telegramTrim finds empty
     // sends the file alone, where it once went after the files as text
     // messages, which TDLib refuses with nothing in them (code:
@@ -794,6 +797,11 @@ describe('a reply with files to a bot', () => {
     // count is in code points, not clusters.
     const marked = 'x\u0301'.repeat(512) + 'x'
     expect(botReply(marked, files(1))).toEqual({ groups: [files(1)], pieces: [marked] })
+    // A text over 32,768 bytes as written goes as the caption the rule keeps,
+    // where the Bot API server would refuse the raw text as too long (code:
+    // Client.cpp:11957-11959 at e3e9dd8e; no read). The plugin adds no
+    // refusal of its own (see the end of telegramTrim's comment).
+    expect(botReply('x' + '\t'.repeat(33000), files(1))).toEqual(one('x'))
     // A longer text goes as text messages, as before: only spaces and line
     // breaks are trimmed from its ends, and its tabs and carriage returns go
     // as written.

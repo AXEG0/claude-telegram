@@ -335,11 +335,11 @@ const emptyText = (method: string, payload: Record<string, unknown>) =>
 
 // A caption as api.telegram.org keeps and counts it is the plugin's own rule,
 // telegramTrim, telegramClean and captionLength in bots.ts, where each part
-// names its evidence and the two steps of TDLib's it leaves out, which change
-// no count and no empty check, so the fake cannot keep a rule the plugin has
-// dropped. A send whose caption is over 1024 characters once cleaned and
-// trimmed is refused, before the empty check, as TDLib counts it: a live read
-// of sendDocument answered so for 1025 'x' and for 1025 U+1F600, and by
+// names its evidence, so the fake cannot keep a rule the plugin has dropped.
+// The differences from Telegram named at the end of telegramTrim's comment hold
+// for the fake too. A send whose caption is over 1024 characters once cleaned
+// and trimmed is refused, before the empty check, as TDLib counts it: a live
+// read of sendDocument answered so for 1025 'x' and for 1025 U+1F600, and by
 // TDLib's code a blank one over 1024 is refused the same way; no read covered
 // that or an album's caption.
 const captionKept = telegramTrim
