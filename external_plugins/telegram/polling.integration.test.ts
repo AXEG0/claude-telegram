@@ -1366,8 +1366,8 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     // caption edit to ' \t\r ', to U+0333, U+00A0, U+200B, U+202F, U+200C,
     // U+FEFF and U+2009, each alone, with a message that has no caption, so
     // the edit would delete the text. The other characters below were read
-    // alone on a send, and the mixes rest on TDLib's code. Two blank texts
-    // over 1024 characters are refused the same way, each for its own reason.
+    // alone on a send, and the mixes rest on TDLib's code. Blank texts over
+    // 1024 characters are refused the same way, each for its own reason.
     // 1,500 tabs are spaces once cleaned and are cleared by TDLib's code
     // (MessageEntity.cpp:4513-4517, reached through
     // MessagesManager.cpp:23805-23806), so that edit would delete the text.
