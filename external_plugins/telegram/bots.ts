@@ -303,8 +303,8 @@ export function botReply(text: string, files: string[]): BotReply {
 const TRIMMED = /^[ \n]+|[ \n]+$/g
 const textTrim = (text: string): string => text.replace(TRIMMED, '')
 
-// A caption as Telegram keeps it, but for the two steps of TDLib's named at
-// the end. Each part names its evidence: "read" is a live read of
+// A caption as Telegram keeps it, but for the three differences named at the
+// end. Each part names its evidence: "read" is a live read of
 // api.telegram.org with an installation's bot, "code" is TDLib at bc9c263e,
 // the commit the Bot API server pins, and a part with neither says so.
 // - Every control character below a space but the line break becomes a space,
@@ -354,15 +354,20 @@ const textTrim = (text: string): string => text.replace(TRIMMED, '')
 //   alone each kept as sent (live8, 2026-11-06). Code for the other characters
 //   in an edit: it parses its caption as a send does
 //   (MessagesManager.cpp:23805-23806).
-// Two steps of TDLib's are left out, since neither changes a count or the
-// empty check (code; no read). It turns each U+200E or U+200F directly
-// followed by another of the two into U+200C (misc.cpp:62-73, called at
-// :158), and all three are one character each and in BLANK. It cuts a text
-// at 35,000 bytes (misc.cpp:150-153, MessageEntity.cpp:4584-4595), which no
-// caption reaches: one the plugin sends or edits holds at most 1024
-// characters, so at most 4,096 bytes, and the Bot API server refuses any
-// caption over 32,768 bytes as too long before TDLib sees it (its Client.cpp
-// at e3e9dd8e, :11957-11959).
+// Three differences from Telegram are left out (code; no read). Two are steps
+// of TDLib's that change no count and no empty check. It turns each U+200E or
+// U+200F directly followed by another of the two into U+200C (misc.cpp:62-73,
+// called at :158), and all three are one character each and in BLANK. It cuts
+// a text at 35,000 bytes (misc.cpp:150-153, MessageEntity.cpp:4584-4595),
+// which no caption the plugin sends or edits reaches, since one holds at most
+// 1024 characters, so at most 4,096 bytes. The third is the Bot API server's:
+// it refuses any caption over 32,768 bytes as written as too long, before
+// TDLib sees it (its Client.cpp at e3e9dd8e, :11957-11959). The plugin sends
+// only what this rule keeps, so when that is a caption of up to 1024
+// characters, such a text goes as that caption, or the edit is made, where
+// the raw text would be refused: 'x' followed by 33,000 tabs goes as the
+// caption 'x'. That is the one outcome that does not fail, so the plugin adds
+// no refusal of its own.
 // A caption with nothing left is no caption, so an edit to one would delete
 // the text.
 const SPACED = /[\x00-\x09\x0b\x0c\x0e-\x1f]/g
