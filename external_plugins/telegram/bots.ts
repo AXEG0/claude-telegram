@@ -332,11 +332,14 @@ const textTrim = (text: string): string => text.replace(TRIMMED, '')
 //   (MessageEntity.cpp:4578-4581, with :4665) and refuses it as too long
 //   (MessageContent.cpp:5293). A text with nothing left once cleaned and
 //   trimmed, such as tabs alone, is cleared before the count
-//   (MessageEntity.cpp:4513-4517), so it is no caption at any length. No read
-//   covered either. telegramTrim gives '' for a longer one all the same, the
-//   plugin's own choice: by TDLib's code no way of sending such a text
-//   succeeds, so the file goes alone, and an edit to it is refused with no
-//   call. telegramClean gives the text a send counts, before this check.
+//   (MessageEntity.cpp:4513-4517), so it is no caption up to the 32,768 bytes
+//   the Bot API server takes as written, and over that the server refuses it
+//   as too long before TDLib sees it (its Client.cpp at e3e9dd8e,
+//   :11957-11959). No read covered either. telegramTrim gives '' for a longer
+//   one all the same, the plugin's own choice: by TDLib's code no way of
+//   sending such a text succeeds, so the file goes alone, and an edit to it is
+//   refused with no call. telegramClean gives the text a send counts, before
+//   this check.
 // - Each of BLANK's characters stays beside anything else. Read: a no-break
 //   space at each end, U+202F and U+200B inside. Code for the others, but for
 //   a run of U+200E and U+200F (see the end).

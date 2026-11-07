@@ -1359,10 +1359,15 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     // caption edit to ' \t\r ', to U+0333, U+00A0, U+200B, U+202F, U+200C,
     // U+FEFF and U+2009, each alone, with a message that has no caption, so
     // the edit would delete the text. The other characters below were read
-    // alone on a send, and the mixes rest on TDLib's code.
+    // alone on a send, and the mixes rest on TDLib's code. A blank text over
+    // 1024 characters is refused the same way, the plugin's own choice (see
+    // telegramTrim): by TDLib's code 1,500 tabs are spaces once cleaned and
+    // are cleared, so that edit would delete the text, and 1,500 no-break
+    // spaces are kept for Telegram's server, whose answer no read covered.
     for (const text of ['  \n ', '', ' \t\r ', '\r\n\t', '\x01\u2028\x0b\u202e\x1f', '\u0333', '\u00a0', '\u200b', ' \u00a0\u200b\n\u0333 ',
       '\u202f', '\u200c', '\ufeff', '\u2009', '\u3000\u2800\u200d\u200e\u200f\u2000\u200a',
-      '\u1680', '\u180e', '\u{e0000}', '\u{e007f}', '\ufffc\u205f\u2005\u{e0041}']) {
+      '\u1680', '\u180e', '\u{e0000}', '\u{e007f}', '\ufffc\u205f\u2005\u{e0041}',
+      '\u00a0'.repeat(1500), '\t'.repeat(1500)]) {
       expect(failure(await edit(text))).toBe('edit_message failed: a caption needs text once its ends are trimmed; nothing was edited')
     }
     expect(calls(t.dir).slice(from)).toEqual([])
