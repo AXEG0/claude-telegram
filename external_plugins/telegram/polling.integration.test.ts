@@ -1375,11 +1375,14 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     // (see telegramTrim), since TDLib passes them to Telegram's server and no
     // read covered its answer. U+200B, a tab and U+200B is blank by TDLib's
     // code too, since its tab becomes a space between them and a space counts
-    // as empty there (misc.cpp:231, through is_empty_string).
+    // as empty there (misc.cpp:231, through is_empty_string). 33,000 tabs, a
+    // blank text over 32,768 bytes as written, are refused the same way, where
+    // the Bot API server would refuse the raw text as too long (code:
+    // Client.cpp:11957-11959 at e3e9dd8e; no read).
     for (const text of ['  \n ', '', ' \t\r ', '\r\n\t', '\x01\u2028\x0b\u202e\x1f', '\u0333', '\u00a0', '\u200b', ' \u00a0\u200b\n\u0333 ',
       '\u202f', '\u200c', '\ufeff', '\u2009', '\u3000\u2800\u200d\u200e\u200f\u2000\u200a',
       '\u1680', '\u180e', '\u{e0000}', '\u{e007f}', '\ufffc\u205f\u2005\u{e0041}',
-      '\u00a0'.repeat(1500), '\t'.repeat(1500), '\u200b\t\u200b']) {
+      '\u00a0'.repeat(1500), '\t'.repeat(1500), '\u200b\t\u200b', '\t'.repeat(33000)]) {
       expect(failure(await edit(text))).toBe('edit_message failed: a caption needs text once its ends are trimmed; nothing was edited')
     }
     expect(calls(t.dir).slice(from)).toEqual([])

@@ -802,6 +802,10 @@ describe('a reply with files to a bot', () => {
     // Client.cpp:11957-11959 at e3e9dd8e; no read). The plugin adds no
     // refusal of its own (see the end of telegramTrim's comment).
     expect(botReply('x' + '\t'.repeat(33000), files(1))).toEqual(one('x'))
+    // 33,000 tabs, a blank text over 32,768 bytes as written, send the file
+    // alone, where the Bot API server would refuse the raw text as too long
+    // (code: Client.cpp:11957-11959 at e3e9dd8e; no read).
+    expect(botReply('\t'.repeat(33000), files(1))).toEqual({ groups: [files(1)], pieces: [] })
     // A longer text goes as text messages, as before: only spaces and line
     // breaks are trimmed from its ends, and its tabs and carriage returns go
     // as written.
