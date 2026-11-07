@@ -320,7 +320,8 @@ const textTrim = (text: string): string => text.replace(TRIMMED, '')
 // - Spaces and line breaks are then trimmed from both ends. Read: spaces at the
 //   ends, the ones the clean step makes from a tab or a control character, and
 //   a line break at each end of a send, so '\nx\n' is kept as 'x' (live8,
-//   2026-11-06). Code: MessageEntity.cpp:4296-4298 and :4530-4570.
+//   2026-11-06). Code: MessageEntity.cpp:4271-4282, the path a text with no
+//   entities takes, as the plugin's caption has none, and :4530-4570.
 // - A result of nothing but BLANK's characters, alone or mixed, of up to 1024
 //   characters is no caption. Read: each one alone, on a send or an edit, but
 //   for the tags, of which U+E0000, U+E0001, U+E0020, U+E0041 and U+E007F were
