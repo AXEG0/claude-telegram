@@ -309,7 +309,7 @@ describe.skipIf(process.platform !== 'linux')('the polling server\'s sweep', () 
     const first = edits(dir, 801)[0]!
     expect(first.refused).toBe('Bad Request: RICH_MESSAGE_INVALID')
     expect(first.payload.text).toBeUndefined()
-    expect(first.payload.rich_message.blocks.map((b: { type: string; text: string }) => `${b.type}:${b.text}`)).toEqual(rich.split('\n').map(l => `paragraph:${l}`))
+    expect(first.payload.rich_message.blocks).toEqual([{ type: 'paragraph', text: rich }])
     await until(() => existsSync(file) && JSON.parse(readFileSync(file, 'utf8')).rich === undefined, WAIT_MS)
     expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ chat: '1', message: 801, text, writer: W(9) })
     await until(() => edits(dir, 801).length === 2, WAIT_MS)

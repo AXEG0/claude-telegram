@@ -624,7 +624,7 @@ shows at the next of those slots. The clocks move at least every 12 seconds
 while nothing else changes, and a rate limit on any of the plugin's calls in
 the chat holds it for as long as Telegram asks
 ([flood control](#flood-control)). With [rich messages](#rich-messages) on,
-the message goes as one rich message of plain paragraphs, one for each line,
+the message goes as one rich message, one plain paragraph holding every line,
 which keeps every row whole up to the cap of 100 rows for rows in English.
 Rows shorten only past its size, about 30,000 bytes, or in the plain message
 used with rich messages off, which holds 4,096 characters. There the room goes
@@ -654,7 +654,7 @@ With `TELEGRAM_RICH_MESSAGES=true`, replies and edits render as Telegram rich
 messages: Claude writes GitHub Markdown and Telegram shows native headings,
 tables, task lists, quotes, code blocks and collapsible `<details>` sections.
 The [subagents message](#subagents-and-shells) goes as a rich message too, of
-plain paragraphs that parse no Markdown, so its rows show as written and
+one plain paragraph that parses no Markdown, so its rows show as written and
 whole.
 The server parses the Markdown as Telegram reads it, Markdown inside `<details>`
 included, and sends it through `sendRichMessage` and `editMessageText`. A `$` in

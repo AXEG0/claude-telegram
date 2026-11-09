@@ -682,8 +682,9 @@ export function richTextPlain(text: unknown): string | undefined {
 }
 
 // The text of a rich message made of plain paragraphs, as Telegram returns its
-// blocks: each paragraph's text flattened, one line each. undefined when the
-// blocks are missing or hold anything but paragraphs.
+// blocks: each paragraph's text flattened, line breaks inside it kept, and the
+// paragraphs joined by line breaks. undefined when the blocks are missing or
+// hold anything but paragraphs.
 export function paragraphsText(blocks: unknown): string | undefined {
   if (!Array.isArray(blocks) || blocks.length === 0) return undefined
   const lines: string[] = []

@@ -4,7 +4,7 @@ import { join } from 'path'
 import { fromMarkdown } from 'mdast-util-from-markdown'
 import { gfmFromMarkdown } from 'mdast-util-gfm'
 import { gfm } from 'micromark-extension-gfm'
-import { editRich, plainFallback, RICH_INSTRUCTIONS, richEditParse, richEnabled, richMarkdown, richParts, richPartsAsync, sendRich, type RawApi } from './rich.ts'
+import { editRich, paragraphsText, plainFallback, RICH_INSTRUCTIONS, richEditParse, richEnabled, richMarkdown, richParts, richPartsAsync, richTextPlain, sendRich, type RawApi } from './rich.ts'
 
 describe('richEnabled', () => {
   test('on only when asked', () => {
@@ -247,6 +247,39 @@ describe('plainFallback', () => {
     expect(plainFallback({ error_code: 400, description: 'Bad Request: message is not modified: specified new message content and reply markup are exactly the same' })).toBe(false)
     expect(plainFallback({ error_code: 429, description: 'Too Many Requests: retry after 5' })).toBe(false)
     expect(plainFallback(new Error('Network request failed'))).toBe(false)
+  })
+
+  // Telegram's answers to a send of 600 and of 501 paragraphs and to a block
+  // of an unknown type, read live.
+  test('Telegram\'s refusals of a paragraph message, too many blocks or an unknown block, are refusals', () => {
+    expect(plainFallback({ error_code: 400, description: 'Bad Request: RICH_MESSAGE_BLOCKS_TOO_MANY' })).toBe(true)
+    expect(plainFallback({ error_code: 400, description: 'Bad Request: can\'t parse InputRichBlock: type "no_such_block_type" is unsupported' })).toBe(true)
+  })
+})
+
+// What Telegram answered, read live, for a paragraph of literal text and for
+// one of two lines: the text a list of strings and the pieces its own
+// detection typed, and the line break kept.
+describe('paragraphsText', () => {
+  const LITERAL = '*a* $x$ | <b>b</b> ==m== ||s|| https://example.com @name #tag /cmd'
+  const DETECTED = [{ type: 'paragraph', text: [
+    '*a* $x$ | <b>b</b> ==m== ||s|| ',
+    { type: 'url', text: 'https://example.com', url: 'https://example.com' },
+    ' ', { type: 'mention', text: '@name', username: 'name' },
+    ' ', { type: 'hashtag', text: '#tag', hashtag: 'tag' },
+    ' ', { type: 'bot_command', text: '/cmd', bot_command: 'cmd' },
+  ] }]
+  test('flattens each paragraph, typed pieces to their own text, and keeps line breaks', () => {
+    expect(paragraphsText(DETECTED)).toBe(LITERAL)
+    expect(paragraphsText([{ type: 'paragraph', text: 'row one\nrow two' }])).toBe('row one\nrow two')
+    expect(richTextPlain([{ type: 'custom_emoji', custom_emoji_id: '5', alternative_text: '👍' }, ' ok'])).toBe('👍 ok')
+  })
+  test('anything but paragraphs of readable text is unreadable', () => {
+    expect(paragraphsText(undefined)).toBeUndefined()
+    expect(paragraphsText([])).toBeUndefined()
+    expect(paragraphsText([{ type: 'list', items: [] }])).toBeUndefined()
+    expect(paragraphsText([{ type: 'paragraph', text: 'row' }, { type: 'pre', text: 'echo hi' }])).toBeUndefined()
+    expect(paragraphsText([{ type: 'paragraph', text: [{ type: 'button', button: {} }] }])).toBeUndefined()
   })
 })
 

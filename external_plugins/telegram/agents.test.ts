@@ -30,7 +30,7 @@ import {
   type StreamEvent,
   type SweepSlots,
 } from './agents.ts'
-import { plainFallback, RICH_PART_BLOCKS, RICH_PART_BYTES } from './rich.ts'
+import { plainFallback, RICH_PART_BYTES } from './rich.ts'
 import shellHooks from './fixtures/shell-hooks.json'
 import workflowHooks from './fixtures/workflow-hooks.json'
 import failureHooks from './fixtures/failure-hooks.json'
@@ -345,7 +345,7 @@ describe('createAgentStream', () => {
         edits.push({ id, text, ...formed(form) })
         await editWait
       },
-      rich: richOn ? { bytes: RICH_PART_BYTES, blocks: RICH_PART_BLOCKS, refused: plainFallback, log: line => logs.push(line) } : undefined,
+      rich: richOn ? { bytes: RICH_PART_BYTES, refused: plainFallback, log: line => logs.push(line) } : undefined,
       readFile: p => files.get(p),
       mtime: p => mtimes.get(p),
       listDir: dir => {
@@ -2241,7 +2241,6 @@ describe('createAgentStream', () => {
       expect(rows(sent.text)).toEqual(Array.from({ length: 45 }, (_, i) => thinkingRow(i + 1)))
       expect(sent.text.length).toBeGreaterThan(AGENT_MESSAGE_LIMIT)
       expect(utf8(sent.text)).toBeLessThanOrEqual(RICH_PART_BYTES)
-      expect(sent.text.split('\n').length).toBeLessThanOrEqual(RICH_PART_BLOCKS)
       // The record written once the send is answered.
       const first = h.records.at(-1)!
       expect(first).toMatchObject({ op: 'write', id: 7 })

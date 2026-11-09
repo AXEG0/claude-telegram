@@ -21,8 +21,8 @@ function ownerWrites(dir: string, text: string): void {
   }]))
 }
 
-// A panel call's text: a plain call's text, or a rich call's paragraphs, one
-// line each.
+// A panel call's text: a plain call's text, or a rich call's paragraphs
+// joined by line breaks.
 const blocksOf = (c: Call): { type: string; text: unknown }[] | undefined =>
   Array.isArray(c.payload.rich_message?.blocks) ? c.payload.rich_message.blocks : undefined
 const textOf = (c: Call): string | undefined => c.payload.text ?? blocksOf(c)?.map(b => b.text).join('\n')
@@ -170,8 +170,8 @@ describe.skipIf(process.platform !== 'linux')('the subagents message in the runn
   const RICH_ON = { TELEGRAM_RICH_MESSAGES: 'true' }
   const REFUSED = { error_code: 400, description: 'Bad Request: RICH_MESSAGE_INVALID' }
   const lines = (channel: { stderr(): string }, text: string) => channel.stderr().split('\n').filter(l => l.includes(text))
-  // Two running subagents, the first described with a link; resolves once the
-  // message's first call is made.
+  // Two running subagents, the first described with a link, a mention, a
+  // hashtag and a command; resolves once the message's first call is made.
   async function running(dir: string, env: Record<string, string>) {
     ownerWrites(dir, 'rich test')
     const channel = start(dir, fixture.argv, env)
@@ -179,7 +179,7 @@ describe.skipIf(process.platform !== 'linux')('the subagents message in the runn
     const file = agentEventFile(dir, channel.child.pid!)
     const base = join(dir, 'transcripts')
     mkdirSync(base)
-    writeFileSync(join(base, 'agent-a1.meta.json'), JSON.stringify({ description: 'Read https://example.com/notes and *list* $each | gap' }))
+    writeFileSync(join(base, 'agent-a1.meta.json'), JSON.stringify({ description: 'Read https://example.com/notes for @name #tag /cmd and *list* $each | gap' }))
     writeFileSync(join(base, 'agent-a2.meta.json'), JSON.stringify({ description: 'Short job' }))
     for (const id of ['a1', 'a2']) {
       appendAgentEvent(file, { t: Date.now(), event: 'start', agent_id: id, agent_type: 'general-purpose', agent_base: join(base, `agent-${id}`) })
@@ -188,22 +188,22 @@ describe.skipIf(process.platform !== 'linux')('the subagents message in the runn
     return { channel, file, panels: () => calls(dir).filter(isPanel) }
   }
 
-  test('with rich messages on, the message is one silent rich message of plain paragraphs, sent and edited as one, and a link Telegram returns as its own piece logs nothing', async () => {
+  test('with rich messages on, the message is one silent rich message of one plain paragraph, sent and edited as one, and the pieces Telegram types in its answer log nothing', async () => {
     const dir = state()
     const { channel, file, panels } = await running(dir, { ...RICH_ON,
-      ...conflicts([{ method: ['sendRichMessage', 'editMessageText'], has: '🤖 Subagents', richUrl: true }]) })
+      ...conflicts([{ method: ['sendRichMessage', 'editMessageText'], has: '🤖 Subagents', richEntities: true }]) })
     const send = panels()[0]!
     expect(send.method).toBe('sendRichMessage')
     expect(send.payload.disable_notification).toBe(true)
     expect(send.payload.rich_message.markdown).toBeUndefined()
-    expect(blocksOf(send)!.every(b => b.type === 'paragraph' && typeof b.text === 'string')).toBe(true)
-    expect(textOf(send)).toMatch(/^🤖 Subagents\n1\. ⏳ general-purpose · Read https:\/\/example\.com\/notes and \*list\* \$each \| gap · Starting… · \d+s\n2\. ⏳ general-purpose · Short job · Starting… · \d+s$/)
+    expect(blocksOf(send)).toEqual([{ type: 'paragraph', text: textOf(send) }])
+    expect(textOf(send)).toMatch(/^🤖 Subagents\n1\. ⏳ general-purpose · Read https:\/\/example\.com\/notes for @name #tag \/cmd and \*list\* \$each \| gap · Starting… · \d+s\n2\. ⏳ general-purpose · Short job · Starting… · \d+s$/)
     appendAgentEvent(file, { t: Date.now(), event: 'stop', agent_id: 'a2' })
     await until(() => panels().some(c => c.method === 'editMessageText' && textOf(c)!.includes('\n2. ✅ Done in')), AGENT_TICK_MS + CHAT_GAP_MS + 4000)
     const edit = panels().find(c => c.method === 'editMessageText')!
     expect(edit.payload.message_id).toBe(send.message_id)
     expect(edit.payload.text).toBeUndefined()
-    expect(blocksOf(edit)!.every(b => b.type === 'paragraph')).toBe(true)
+    expect(blocksOf(edit)).toEqual([{ type: 'paragraph', text: textOf(edit) }])
     await channel.close()
     expect(lines(channel, 'subagents message:')).toEqual([])
     expect(calls(dir).some(c => c.method === 'sendMessage' && c.payload.text?.startsWith('🤖'))).toBe(false)

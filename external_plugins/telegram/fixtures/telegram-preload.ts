@@ -106,9 +106,10 @@ let nextId = chats.ids
 // answered with the message and the blocks it carried, which Telegram calls
 // its rich_message; with `richless` the answer carries no rich_message, with
 // `richCut` it keeps only that many UTF-8 bytes of the paragraphs' text, as
-// Telegram cuts a long rich text without an error, and with `richUrl` each
-// https:// address in a paragraph comes back as a typed url piece, as
-// Telegram's own detection returns it. A call whose
+// Telegram cuts a long rich text without an error, and with `richEntities`
+// each address, @mention, #hashtag and /command in a paragraph comes back as
+// a typed piece, the paragraph's text a list of strings and pieces, as a live
+// read of Telegram's own detection returned them. A call whose
 // request's signal aborts rejects at the abort, as a real fetch does, whatever
 // the fake was still doing for it, which runs on: a held poll (holdMs on
 // getUpdates) aborted before its hold ends answers nothing, and with `keep`
@@ -136,7 +137,7 @@ type Rule = {
   uncaptioned?: boolean
   richless?: boolean
   richCut?: number
-  richUrl?: boolean
+  richEntities?: boolean
 }
 const rules = (JSON.parse(process.env.TELEGRAM_TEST_RULES || '[]') as Rule[]).map(rule => ({ rule, seen: 0, used: 0 }))
 function ruleFor(method: string, payload: Record<string, unknown>): Rule | undefined {
@@ -376,14 +377,24 @@ function richAnswer(payload: Record<string, unknown>, rule: Rule | undefined): R
       if (bytes.length > left) text = bytes.subarray(0, left).toString().replace(/\uFFFD+$/, '')
       left -= bytes.length
     }
-    if (typeof text === 'string' && rule?.richUrl) {
-      const pieces = text.split(/(https:\/\/\S+)/).filter(p => p !== '')
-        .map(p => p.startsWith('https://') ? { type: 'url', text: p, url: p } : p)
+    if (typeof text === 'string' && rule?.richEntities) {
+      const pieces = text.split(/(https?:\/\/\S+|(?<!\S)[@#/]\w+)/).filter(p => p !== '').map(entityOf)
       text = pieces.length === 1 ? pieces[0] : pieces
     }
     kept.push({ ...block, text })
   }
   return { rich_message: { blocks: kept } }
+}
+
+// A piece of a paragraph as Telegram's detection returns it: a link, a
+// mention, a hashtag or a bot command as its typed piece, any other text as
+// it was.
+function entityOf(piece: string): string | Record<string, string> {
+  if (/^https?:\/\//.test(piece)) return { type: 'url', text: piece, url: piece }
+  if (/^@\w+$/.test(piece)) return { type: 'mention', text: piece, username: piece.slice(1) }
+  if (/^#\w+$/.test(piece)) return { type: 'hashtag', text: piece, hashtag: piece.slice(1) }
+  if (/^\/\w+$/.test(piece)) return { type: 'bot_command', text: piece, bot_command: piece.slice(1) }
+  return piece
 }
 
 // A sent message's own fields as Telegram answers a send: its text, or its

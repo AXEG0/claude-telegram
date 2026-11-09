@@ -636,12 +636,11 @@ export const AGENT_MESSAGE_LIMIT = 4096
 const MAX_PANEL_ROWS = 100
 
 // A frame's room: its size in its form's unit, and the rows it shows at most.
-// A plain message holds 4,096 UTF-16 units; a rich one the bytes and blocks
-// the server gives, one block for each line, the header and the count of
-// more rows included.
+// A plain message holds 4,096 UTF-16 units; a rich one the bytes the server
+// gives, in its one paragraph.
 type Room = { size: number; measure: Measure; rows: number }
 const PLAIN_ROOM: Room = { size: AGENT_MESSAGE_LIMIT, measure: UNITS, rows: MAX_PANEL_ROWS }
-const richRoom = (rich: RichPanel): Room => ({ size: rich.bytes, measure: BYTES, rows: Math.min(MAX_PANEL_ROWS, rich.blocks - 2) })
+const richRoom = (rich: RichPanel): Room => ({ size: rich.bytes, measure: BYTES, rows: MAX_PANEL_ROWS })
 
 // Each row's share of the room, taken from the shortest row up: its whole
 // length, or an equal share of the room still left, whichever is less, so the
@@ -715,16 +714,17 @@ export type PanelRecords = {
 }
 
 // A message is plain text or, with rich messages on, a rich message of one
-// plain-string paragraph for each line of its text.
+// plain-string paragraph holding its text, its lines joined by line breaks,
+// which Telegram keeps and shows as line breaks.
 export type PanelForm = 'plain' | 'rich'
 
 // With rich messages on: the room of a rich frame, which Telegram answers
 // count as refusing a rich call (rich.ts's plainFallback), and where the
-// stream's lines go (the server's log). This file stays free of rich.ts, which
+// stream's lines go (the server's log). A frame is one paragraph, one block,
+// so the room is its bytes alone. This file stays free of rich.ts, which
 // imports packages the hook cannot load before `bun install`.
 export type RichPanel = {
   bytes: number
-  blocks: number
   refused: (err: unknown) => boolean
   log: (line: string) => void
 }

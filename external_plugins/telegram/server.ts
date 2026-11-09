@@ -29,7 +29,7 @@ import { createArrivals, type DoneSeed, type StartLine } from './arrivals.ts'
 import { AGENT_TICK_MS, agentEventFile, CHAT_GAP_MS, CLOSING_EDIT_MS, createAgentStream, createEventReader } from './agents.ts'
 import { createPanelStore } from './panels.ts'
 import { logCall, setupLog } from './log.ts'
-import { editRichParsed, formatOf, formatSchema, paragraphsText, plainFallback, RICH_INSTRUCTIONS, RICH_PART_BLOCKS, RICH_PART_BYTES, richEditParse, richEnabled, sendRich, type RawApi } from './rich.ts'
+import { editRichParsed, formatOf, formatSchema, paragraphsText, plainFallback, RICH_INSTRUCTIONS, RICH_PART_BYTES, richEditParse, richEnabled, sendRich, type RawApi } from './rich.ts'
 import { metaText, replyMeta, richText } from './reply.ts'
 import { heartbeatTransformer } from './heartbeat.ts'
 import { deadlineTransformer, pollFetch } from './deadline.ts'
@@ -315,10 +315,11 @@ setInterval(() => {
 const RICH = richEnabled()
 const richApi = bot.api.raw as unknown as RawApi
 
-// A rich subagents message is one plain-string paragraph for each line of its
-// text, so no Markdown is parsed: a description's *, $, | or <tag> shows as
+// A rich subagents message is one plain-string paragraph holding its text,
+// its lines joined by line breaks, which Telegram keeps and shows as line
+// breaks. No Markdown is parsed: a description's *, $, | or <tag> shows as
 // written, and the rows keep their numbers.
-const panelBlocks = (text: string) => text.split('\n').map(line => ({ type: 'paragraph', text: line }))
+const panelBlocks = (text: string) => [{ type: 'paragraph', text }]
 const panelLog = (line: string) => process.stderr.write(`telegram channel: ${line}\n`)
 // Telegram cuts rich text past about 35,000 bytes with no error, so what it
 // answers a rich send or edit of the message with is compared with what was
@@ -364,7 +365,7 @@ const agentStream = createAgentStream({
     }
     comparePanel(await richApi.editMessageText({ chat_id, message_id, rich_message: { blocks: panelBlocks(text) } }), text, message_id)
   },
-  rich: RICH ? { bytes: RICH_PART_BYTES, blocks: RICH_PART_BLOCKS, refused: plainFallback, log: panelLog } : undefined,
+  rich: RICH ? { bytes: RICH_PART_BYTES, refused: plainFallback, log: panelLog } : undefined,
   records: panels,
   sweep: POLLING ? panels.sweep : undefined,
   // A chat Telegram asked to wait gets nothing until the wait ends.
