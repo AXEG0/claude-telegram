@@ -2553,6 +2553,58 @@ describe('createAgentStream', () => {
       expect(late.at(-1)!.text).toBe('🤖 Subagents\n1. ✅ Done in 36s · general-purpose')
     })
 
+    test('a late stop of a rich message keeps its rich frame in the records written for its late edit, so a server that dies before the edit leaves its rows whole', async () => {
+      const h = richHarness('1001')
+      await h.tick()
+      h.events.push(start(h, 'a1'))
+      h.write('/s/agent-a1.jsonl', line(userText('u-a1', h.now(), 'Job')))
+      await h.tick()
+      h.advance(CHAT_GAP_MS)
+      h.write('/s/agent-a1.jsonl', line(userText('u-a1', h.now() - CHAT_GAP_MS, 'Job')) + line(apiError('e-a1', h.now(), 'overloaded')))
+      await h.tick()
+      // The next tick confirms the failure and ends the group.
+      h.advance(CHAT_GAP_MS); await h.tick()
+      const before = h.records.length
+      const shown = h.attempts.length
+      h.failEditWith({ error_code: 502, description: 'Bad Gateway' })
+      h.advance(CHAT_GAP_MS)
+      h.events.push({ t: h.now(), event: 'stop', agent_id: 'a1' })
+      await h.tick()
+      expect(h.attempts.slice(shown).map(a => a.form)).toEqual(['rich'])
+      const written = h.records.slice(before)
+      expect(written.map(r => r.op)).toEqual(['write', 'write'])
+      for (const r of written) expect(r.rich).toBe('🤖 Subagents\n1. ✅ Done in 36s · general-purpose')
+    })
+
+    test('a rich message gone after five failed edits leaves a record that keeps its rich frame, whether its rows end after it went or as it goes', async () => {
+      // The rows end after the message went: the group's last flush writes the record.
+      const after = richHarness('1001')
+      await after.tick()
+      after.events.push(start(after, 'run'), start(after, 'fin'))
+      await after.tick()
+      after.failEditWith({ error_code: 502, description: 'Bad Gateway' })
+      for (let i = 0; i < 5; i++) { after.advance(BEAT_MS); await after.tick() }
+      after.failEditWith(undefined)
+      after.advance(CHAT_GAP_MS)
+      after.events.push({ t: after.now(), event: 'stop', agent_id: 'fin' }, { t: after.now(), event: 'stop', agent_id: 'run' })
+      await after.tick()
+      expect(after.attempts.every(a => a.form === 'rich')).toBe(true)
+      expect(after.records.at(-1)).toMatchObject({ op: 'write', id: 7, rich: '🤖 Subagents\n1. ✅ Done in 1m 12s · general-purpose\n2. ✅ Done in 1m 12s · general-purpose' })
+      // The rows end before it goes: the fifth failed edit of the final frame writes the record.
+      const final = richHarness('1001')
+      await final.tick()
+      final.events.push(start(final, 'fin'))
+      await final.tick()
+      final.failEditWith({ error_code: 502, description: 'Bad Gateway' })
+      final.advance(CHAT_GAP_MS)
+      final.events.push({ t: final.now(), event: 'stop', agent_id: 'fin' })
+      await final.tick()
+      for (let i = 0; i < 4; i++) { final.advance(CHAT_GAP_MS); await final.tick() }
+      expect(final.attempts.map(a => a.form)).toEqual(['rich', 'rich', 'rich', 'rich', 'rich'])
+      expect(final.records.at(-1)).toMatchObject({ op: 'write', id: 7, rich: final.records.at(-1)!.text })
+      expect(final.records.at(-1)!.rich).toMatch(/^🤖 Subagents\n1\. ✅ Done in /)
+    })
+
     test('the shutdown edit of a rich message is rich, its rows whole, and its record keeps them; a refused one leaves a record without a rich frame and is logged', async () => {
       for (const refused of [false, true]) {
         const h = richHarness('1001')
