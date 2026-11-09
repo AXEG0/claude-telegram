@@ -21,7 +21,12 @@ function ownerWrites(dir: string, text: string): void {
   }]))
 }
 
-const isPanel = (c: Call) => (c.method === 'sendMessage' || c.method === 'editMessageText') && c.payload.text?.startsWith('🤖 Subagents')
+// A panel call's text: a plain call's text, or a rich call's paragraphs, one
+// line each.
+const blocksOf = (c: Call): { type: string; text: unknown }[] | undefined =>
+  Array.isArray(c.payload.rich_message?.blocks) ? c.payload.rich_message.blocks : undefined
+const textOf = (c: Call): string | undefined => c.payload.text ?? blocksOf(c)?.map(b => b.text).join('\n')
+const isPanel = (c: Call) => ['sendMessage', 'sendRichMessage', 'editMessageText'].includes(c.method) && !!textOf(c)?.startsWith('🤖 Subagents')
 const panelSend = (c: Call) => c.method === 'sendMessage' && isPanel(c)
 const panelEdit = (c: Call) => c.method === 'editMessageText' && isPanel(c)
 // The fake logs a call when it arrives, a few milliseconds after the stream
@@ -159,6 +164,109 @@ describe.skipIf(process.platform !== 'linux')('the subagents message in the runn
     expect(calls(dir).find(panelEdit)!.at - send.at).toBeGreaterThanOrEqual(12_000 - SLACK_MS)
     await channel.close()
   }, 20000)
+
+  // The message as one rich message, with rich messages on, through the fake
+  // Telegram: what the server sends and edits, and what it logs.
+  const RICH_ON = { TELEGRAM_RICH_MESSAGES: 'true' }
+  const REFUSED = { error_code: 400, description: 'Bad Request: RICH_MESSAGE_INVALID' }
+  const lines = (channel: { stderr(): string }, text: string) => channel.stderr().split('\n').filter(l => l.includes(text))
+  // Two running subagents, the first described with a link; resolves once the
+  // message's first call is made.
+  async function running(dir: string, env: Record<string, string>) {
+    ownerWrites(dir, 'rich test')
+    const channel = start(dir, fixture.argv, env)
+    await channel.ready()
+    const file = agentEventFile(dir, channel.child.pid!)
+    const base = join(dir, 'transcripts')
+    mkdirSync(base)
+    writeFileSync(join(base, 'agent-a1.meta.json'), JSON.stringify({ description: 'Read https://example.com/notes and *list* $each | gap' }))
+    writeFileSync(join(base, 'agent-a2.meta.json'), JSON.stringify({ description: 'Short job' }))
+    for (const id of ['a1', 'a2']) {
+      appendAgentEvent(file, { t: Date.now(), event: 'start', agent_id: id, agent_type: 'general-purpose', agent_base: join(base, `agent-${id}`) })
+    }
+    await until(() => calls(dir).some(isPanel), AGENT_TICK_MS + 4000)
+    return { channel, file, panels: () => calls(dir).filter(isPanel) }
+  }
+
+  test('with rich messages on, the message is one silent rich message of plain paragraphs, sent and edited as one, and a link Telegram returns as its own piece logs nothing', async () => {
+    const dir = state()
+    const { channel, file, panels } = await running(dir, { ...RICH_ON,
+      ...conflicts([{ method: ['sendRichMessage', 'editMessageText'], has: '🤖 Subagents', richUrl: true }]) })
+    const send = panels()[0]!
+    expect(send.method).toBe('sendRichMessage')
+    expect(send.payload.disable_notification).toBe(true)
+    expect(send.payload.rich_message.markdown).toBeUndefined()
+    expect(blocksOf(send)!.every(b => b.type === 'paragraph' && typeof b.text === 'string')).toBe(true)
+    expect(textOf(send)).toMatch(/^🤖 Subagents\n1\. ⏳ general-purpose · Read https:\/\/example\.com\/notes and \*list\* \$each \| gap · Starting… · \d+s\n2\. ⏳ general-purpose · Short job · Starting… · \d+s$/)
+    appendAgentEvent(file, { t: Date.now(), event: 'stop', agent_id: 'a2' })
+    await until(() => panels().some(c => c.method === 'editMessageText' && textOf(c)!.includes('\n2. ✅ Done in')), AGENT_TICK_MS + CHAT_GAP_MS + 4000)
+    const edit = panels().find(c => c.method === 'editMessageText')!
+    expect(edit.payload.message_id).toBe(send.message_id)
+    expect(edit.payload.text).toBeUndefined()
+    expect(blocksOf(edit)!.every(b => b.type === 'paragraph')).toBe(true)
+    await channel.close()
+    expect(lines(channel, 'subagents message:')).toEqual([])
+    expect(calls(dir).some(c => c.method === 'sendMessage' && c.payload.text?.startsWith('🤖'))).toBe(false)
+  }, 20000)
+
+  test('with rich messages off, the message goes only as plain text', async () => {
+    const dir = state()
+    const { channel, file, panels } = await running(dir, {})
+    appendAgentEvent(file, { t: Date.now(), event: 'stop', agent_id: 'a2' })
+    await until(() => panels().some(c => c.method === 'editMessageText'), AGENT_TICK_MS + CHAT_GAP_MS + 4000)
+    await channel.close()
+    expect(panels().length).toBeGreaterThanOrEqual(3)
+    expect(panels().every(c => (c.method === 'sendMessage' || c.method === 'editMessageText') && typeof c.payload.text === 'string' && c.payload.rich_message === undefined)).toBe(true)
+  }, 20000)
+
+  test('a refused rich send is logged, and the next panel call, a slot later, sends the message plain and silent', async () => {
+    const dir = state()
+    const { channel, panels } = await running(dir, { ...RICH_ON,
+      ...conflicts([{ method: 'sendRichMessage', has: '🤖 Subagents', times: 1, error: REFUSED }]) })
+    const refused = panels()[0]!
+    expect(refused).toMatchObject({ method: 'sendRichMessage', refused: REFUSED.description })
+    await until(() => panels().length >= 2, AGENT_TICK_MS + CHAT_GAP_MS + 4000)
+    const next = panels()[1]!
+    expect(next.method).toBe('sendMessage')
+    expect(next.payload.disable_notification).toBe(true)
+    expect(next.at - refused.at).toBeGreaterThanOrEqual(CHAT_GAP_MS - SLACK_MS)
+    expect(lines(channel, 'subagents message:').map(l => l.slice(0, l.indexOf('slot:') + 5)))
+      .toEqual(['telegram channel: subagents message: rich send refused, plain from the next slot:'])
+    await channel.close()
+  }, 20000)
+
+  test('an answer with no rich text logs one line and changes nothing, and a cut Telegram makes logs one line over two cut edits', async () => {
+    const dir = state()
+    const { channel, panels } = await running(dir, { ...RICH_ON, ...conflicts([
+      { method: 'sendRichMessage', has: '🤖 Subagents', times: 1, richless: true },
+      { method: 'editMessageText', has: '🤖 Subagents', times: 2, richCut: 40 },
+    ]) })
+    const send = panels()[0]!
+    await until(() => panels().filter(c => c.method === 'editMessageText').length >= 3, 3 * CHAT_GAP_MS + AGENT_TICK_MS + 4000)
+    const later = panels().slice(1)
+    expect(later.every(c => c.method === 'editMessageText' && c.payload.message_id === send.message_id && blocksOf(c) !== undefined)).toBe(true)
+    await channel.close()
+    expect(lines(channel, 'subagents message:')).toEqual([
+      `telegram channel: subagents message: Telegram's answer holds no rich text to compare (message ${send.message_id})`,
+      expect.stringMatching(new RegExp(`^telegram channel: subagents message: Telegram stored \\d+ of \\d+ bytes \\(message ${send.message_id}\\)$`)),
+    ])
+  }, 30000)
+
+  test('five rich edits in a row answered with no rich text log one line, and the next frame still edits the message as a rich message', async () => {
+    const dir = state()
+    const { channel, panels } = await running(dir, { ...RICH_ON,
+      ...conflicts([{ method: 'editMessageText', has: '🤖 Subagents', times: 5, richless: true }]) })
+    const send = panels()[0]!
+    await until(() => panels().filter(c => c.method === 'editMessageText').length >= 6, 6 * CHAT_GAP_MS + AGENT_TICK_MS + 4000)
+    const edits = panels().filter(c => c.method === 'editMessageText')
+    expect(edits[5]!.payload.message_id).toBe(send.message_id)
+    expect(blocksOf(edits[5]!)).toBeDefined()
+    expect(panels().filter(c => c.method !== 'editMessageText')).toEqual([send])
+    await channel.close()
+    expect(lines(channel, 'subagents message:')).toEqual([
+      `telegram channel: subagents message: Telegram's answer holds no rich text to compare (message ${send.message_id})`,
+    ])
+  }, 60000)
 
   // The registered hooks with the inputs Claude Code sent for a subagent whose
   // model call failed, written for the server's own Claude Code process.

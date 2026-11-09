@@ -417,13 +417,37 @@ function stepFor(tool: string, input: Record<string, unknown>): string {
   return tool
 }
 
+// A field on one line, within max UTF-16 units, cut between graphemes.
 function oneLine(s: string, max = 80): string {
   const t = s.replace(/\s+/g, ' ').trim()
   if (t.length <= max) return t
-  let end = Math.max(0, max - 1)
-  // Telegram counts UTF-16 units; never cut an emoji between its surrogates.
-  if (end > 0 && /[\uD800-\uDBFF]/.test(t[end - 1]!)) end--
-  return t.slice(0, end) + '…'
+  return cut(t, max, UNITS) ?? '…'
+}
+
+// Telegram counts a plain message in UTF-16 units, and this plugin measured a
+// rich one in UTF-8 bytes (rich.ts), so a frame is measured in its form's own
+// unit, the … included: 1 unit, or 3 bytes.
+type Measure = (s: string) => number
+const UNITS: Measure = s => s.length
+const BYTES: Measure = s => Buffer.byteLength(s, 'utf8')
+
+// A cut falls only between graphemes, so an emoji with its variation selector
+// (⚠️), a ZWJ sequence (👩‍💻), a flag (🇩🇪) and a keycap (1️⃣) stay whole or
+// go whole.
+const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+const graphemesOf = (s: string) => Array.from(GRAPHEMES.segment(s), g => g.segment)
+
+// The longest start of s, whole graphemes only, that fits room with … after
+// it; undefined when not even one grapheme does.
+function cut(s: string, room: number, measure: Measure): string | undefined {
+  let kept = ''
+  let used = measure('…')
+  for (const g of graphemesOf(s)) {
+    used += measure(g)
+    if (used > room) break
+    kept += g
+  }
+  return kept ? kept + '…' : undefined
 }
 
 export function formatDuration(ms: number): string {
@@ -495,6 +519,9 @@ type Batch = {
   numbers: Map<string, number>
   lastNumber: number
   msgId?: number
+  // Set once Telegram refused the message as a rich message: it is plain for
+  // the rest of its life. A replacement chooses its form again.
+  plain?: boolean
   gone?: boolean
   failures: number
   sending?: boolean
@@ -512,40 +539,91 @@ type Batch = {
 // was followed.
 const unfollowed = (a: Agent, closedAt: number) => `🔌 No longer followed after ${formatDuration(closedAt - a.started)}`
 
+// A row's parts, in the order they show: its status, its type, its
+// description, its step and its end (its clock and token count). A running
+// row's status is followed by a space, any other's by ` · `.
+type Row = {
+  status: string
+  running: boolean
+  type: string
+  description?: string
+  // `last: ` before the step of a row no longer running.
+  stepLead?: string
+  step?: string
+  end: string[]
+}
+
 // A shell's line carries its description and clock; it ends as done, failed
 // with its exit code, or stopped. It never goes quiet: a shell can wait in
 // silence for as long as it likes, and Claude Code marks every ending.
-function renderShell(a: Agent, now: number, closedAt?: number): string {
-  const label = `shell${a.description ? ` · ${oneLine(a.description)}` : ''}`
-  if (a.done === undefined && closedAt !== undefined) return `${unfollowed(a, closedAt)} · ${label}`
-  if (a.done === undefined) return `⏳ ${label} · ${formatDuration(now - a.started)}`
+function shellRow(a: Agent, now: number, closedAt?: number): Row {
+  const row = { type: 'shell', description: a.description ? oneLine(a.description) : undefined, running: false, end: [] as string[] }
+  if (a.done === undefined && closedAt !== undefined) return { ...row, status: unfollowed(a, closedAt) }
+  if (a.done === undefined) return { ...row, status: '⏳', running: true, end: [formatDuration(now - a.started)] }
   const took = formatDuration(a.done - a.started)
-  if (a.outcome === 'stopped') return `⏹ Stopped after ${took} · ${label}`
-  if (a.outcome === 'failed') return `❌ Failed after ${took}${a.exitCode !== undefined ? ` (exit ${a.exitCode})` : ''} · ${label}`
-  return `✅ Done in ${took} · ${label}`
+  if (a.outcome === 'stopped') return { ...row, status: `⏹ Stopped after ${took}` }
+  if (a.outcome === 'failed') return { ...row, status: `❌ Failed after ${took}${a.exitCode !== undefined ? ` (exit ${a.exitCode})` : ''}` }
+  return { ...row, status: `✅ Done in ${took}` }
 }
 
 const isQuiet = (a: Agent, now: number) => a.kind !== 'shell' && a.done === undefined && now - a.quietSince > AGENT_STALE_MS
 
 // With closedAt, the frame is the server's last: a row still running reads as
 // no longer followed, and every other row as it was.
-export function render(a: Agent, now: number, closedAt?: number): string {
-  if (a.kind === 'shell') return renderShell(a, now, closedAt)
-  const label = `${oneLine(a.type, 32)}${a.description ? ` · ${oneLine(a.description)}` : ''}`
-  const tokens = a.progress.tokens ? ` · ${formatTokens(a.progress.tokens)} tokens` : ''
+function rowOf(a: Agent, now: number, closedAt?: number): Row {
+  if (a.kind === 'shell') return shellRow(a, now, closedAt)
+  const type = oneLine(a.type, 32)
+  const description = a.description ? oneLine(a.description) : undefined
+  const tokens = a.progress.tokens ? [`${formatTokens(a.progress.tokens)} tokens`] : []
   if (a.done !== undefined) {
     const took = formatDuration(a.done - a.started)
-    const ending = a.outcome === 'stopped' ? `⏹ Stopped after ${took}`
+    const status = a.outcome === 'stopped' ? `⏹ Stopped after ${took}`
       : a.outcome === 'failed' ? `❌ Failed after ${took}${a.error ? ` (${a.error})` : ''}`
       : `✅ Done in ${took}`
-    return `${ending} · ${label}${tokens}`
+    return { status, running: false, type, description, end: tokens }
   }
   const step = oneLine(a.progress.step ?? 'Starting…')
-  if (closedAt !== undefined && !a.dropped) return `${unfollowed(a, closedAt)} · ${label} · last: ${step}${tokens}`
+  if (closedAt !== undefined && !a.dropped) return { status: unfollowed(a, closedAt), running: false, type, description, stepLead: 'last: ', step, end: tokens }
   if (isQuiet(a, now)) {
-    return `⚠️ No activity for ${formatDuration(now - a.quietSince)} · ${label} · last: ${step}${tokens}`
+    return { status: `⚠️ No activity for ${formatDuration(now - a.quietSince)}`, running: false, type, description, stepLead: 'last: ', step, end: tokens }
   }
-  return `⏳ ${label} · ${step} · ${formatDuration(now - a.started)}${tokens}`
+  return { status: '⏳', running: true, type, description, step, end: [formatDuration(now - a.started), ...tokens] }
+}
+
+// A row's line with its type or not, and the description and step given.
+function rowLine(r: Row, type: boolean, description: string | undefined, step: string | undefined): string {
+  const parts = [type ? r.type : undefined, description, step === undefined ? undefined : `${r.stepLead ?? ''}${step}`, ...r.end]
+    .filter((p): p is string => p !== undefined)
+  return parts.length ? `${r.status}${r.running ? ' ' : ' · '}${parts.join(' · ')}` : r.status
+}
+
+// A row's whole line.
+export function render(a: Agent, now: number, closedAt?: number): string {
+  const r = rowOf(a, now, closedAt)
+  return rowLine(r, true, r.description, r.step)
+}
+
+// A row within its share: whole if it fits; else it gives up its type, then
+// its description, in part or whole, then part of its step, each … inside the
+// part it shortens. Its status, clock and token count go only when they alone
+// pass the share; then the row's end goes.
+function fit(lead: string, r: Row, share: number, measure: Measure): string {
+  const whole = lead + rowLine(r, true, r.description, r.step)
+  if (measure(whole) <= share) return whole
+  const untyped = lead + rowLine(r, false, r.description, r.step)
+  if (measure(untyped) <= share) return untyped
+  // What the rest of the line takes, beside a one-unit stand-in for the part
+  // that shortens.
+  const beside = (description: string | undefined, step: string | undefined) => measure(lead + rowLine(r, false, description, step)) - 1
+  if (r.description !== undefined) {
+    const description = cut(r.description, share - beside('x', r.step), measure)
+    if (description !== undefined) return lead + rowLine(r, false, description, r.step)
+  }
+  if (r.step !== undefined) {
+    const step = cut(r.step, share - beside(undefined, 'x'), measure)
+    if (step !== undefined) return lead + rowLine(r, false, undefined, step)
+  }
+  return cut(lead + rowLine(r, false, undefined, r.step), share, measure) ?? ''
 }
 
 // What the message says apart from its clock.
@@ -557,30 +635,58 @@ function contentKey(a: Agent, now: number): string {
 export const AGENT_MESSAGE_LIMIT = 4096
 const MAX_PANEL_ROWS = 100
 
+// A frame's room: its size in its form's unit, and the rows it shows at most.
+// A plain message holds 4,096 UTF-16 units; a rich one the bytes and blocks
+// the server gives, one block for each line, the header and the count of
+// more rows included.
+type Room = { size: number; measure: Measure; rows: number }
+const PLAIN_ROOM: Room = { size: AGENT_MESSAGE_LIMIT, measure: UNITS, rows: MAX_PANEL_ROWS }
+const richRoom = (rich: RichPanel): Room => ({ size: rich.bytes, measure: BYTES, rows: Math.min(MAX_PANEL_ROWS, rich.blocks - 2) })
+
+// Each row's share of the room, taken from the shortest row up: its whole
+// length, or an equal share of the room still left, whichever is less, so the
+// room a short row leaves goes to the longer ones, and no row gets less than
+// an equal share of the whole room.
+function shares(lengths: number[], room: number): number[] {
+  const out = lengths.map(() => 0)
+  const order = lengths.map((_, i) => i).sort((a, b) => lengths[a]! - lengths[b]! || a - b)
+  let left = room
+  let rows = lengths.length
+  for (const i of order) {
+    out[i] = Math.min(lengths[i]!, Math.floor(left / rows))
+    left -= out[i]!
+    rows--
+  }
+  return out
+}
+
 const isEnded = (a: Agent) => a.done !== undefined || !!a.dropped
 const hasLeft = (a: Agent, t: number) => a.endShownAt !== undefined && t - a.endShownAt >= FINISHED_ROW_MS
 
-function panel(batch: Batch, agents: Map<string, Agent>, t: number, closedAt?: number) {
+function panel(batch: Batch, agents: Map<string, Agent>, t: number, closedAt?: number, room: Room = PLAIN_ROOM) {
   // Only the rows still in the message count: for the cap, the count of more
-  // rows, the header and each row's width.
+  // rows, the header and each row's share.
   const members = [...batch.members.values()].filter(a => !hasLeft(a, t))
   let shown = members.map(a => ({ a, ordinal: batch.numbers.get(a.key)!, key: contentKey(a, t), ended: isEnded(a) }))
     .sort((a, b) => a.ordinal - b.ordinal)
-  if (shown.length > MAX_PANEL_ROWS) {
+  if (shown.length > room.rows) {
     // If even shortened rows cannot all fit, show unacknowledged endings and
     // new agents first, then running agents, ahead of finished history.
     const priority = (a: Agent) => a.done !== undefined && agents.get(a.key) === a ? 0
       : !a.shown ? 1 : a.done === undefined && !a.dropped ? 2 : 3
     shown.sort((a, b) => priority(a.a) - priority(b.a) || a.ordinal - b.ordinal)
-    shown = shown.slice(0, MAX_PANEL_ROWS).sort((a, b) => a.ordinal - b.ordinal)
+    shown = shown.slice(0, room.rows).sort((a, b) => a.ordinal - b.ordinal)
   }
   const shells = members.some(a => a.kind === 'shell')
   const subagents = members.some(a => a.kind !== 'shell')
   const header = [subagents && '🤖 Subagents', shells && '🐚 Shells'].filter(Boolean).join(' · ')
   const noun = shells && subagents ? 'tasks' : shells ? 'shells' : 'agents'
   const suffix = members.length > shown.length ? `\n… ${members.length - shown.length} more ${noun}` : ''
-  const width = Math.floor((AGENT_MESSAGE_LIMIT - header.length - suffix.length - shown.length) / Math.max(1, shown.length))
-  const text = header + shown.map(({ a, ordinal }) => '\n' + oneLine(`${ordinal}. ${render(a, t, closedAt)}`, width)).join('') + suffix
+  const rows = shown.map(({ a, ordinal }) => ({ lead: `${ordinal}. `, row: rowOf(a, t, closedAt) }))
+  const { measure } = room
+  const given = shares(rows.map(({ lead, row }) => measure(lead + rowLine(row, true, row.description, row.step))),
+    room.size - measure(header) - measure(suffix) - shown.length)
+  const text = header + rows.map(({ lead, row }, i) => '\n' + fit(lead, row, given[i]!, measure)).join('') + suffix
   const key = JSON.stringify([members.map(a => [a.key, contentKey(a, t)]), shown.map(s => s.ordinal)])
   return { text, key, shown }
 }
@@ -601,9 +707,26 @@ export type AgentStream = {
 // frame that edit sends, and right after a first send is answered, and
 // deletes it once the message needs no closing: the group's final frame or
 // the closing edit was accepted, or the message was replaced. See panels.ts.
+// text is the plain closing frame, within 4,096 units; rich, the rich one,
+// every row whole, is there only while the message is a rich message.
 export type PanelRecords = {
-  write(chatId: string, msgId: number, text: string): void
+  write(chatId: string, msgId: number, text: string, rich?: string): void
   remove(chatId: string, msgId: number): void
+}
+
+// A message is plain text or, with rich messages on, a rich message of one
+// plain-string paragraph for each line of its text.
+export type PanelForm = 'plain' | 'rich'
+
+// With rich messages on: the room of a rich frame, which Telegram answers
+// count as refusing a rich call (rich.ts's plainFallback), and where the
+// stream's lines go (the server's log). This file stays free of rich.ts, which
+// imports packages the hook cannot load before `bun install`.
+export type RichPanel = {
+  bytes: number
+  blocks: number
+  refused: (err: unknown) => boolean
+  log: (line: string) => void
 }
 
 // What the polling server's sweep of the records of servers that are gone
@@ -615,7 +738,7 @@ export type SweepSlots = {
   take(chatId: string): boolean
   // Holds the chat until then, after Telegram asked to wait.
   holdUntil(chatId: string, t: number): void
-  edit(chatId: string, msgId: number, text: string): Promise<void>
+  edit(chatId: string, msgId: number, text: string, form?: PanelForm): Promise<void>
 }
 
 type ApiError = { description?: string; parameters?: { retry_after?: number } }
@@ -624,8 +747,10 @@ export function createAgentStream(opts: {
   readEvents: () => StreamEvent[]
   // The private chat to stream into, or undefined while there is none.
   chat: () => string | undefined
-  send: (chatId: string, text: string) => Promise<number | undefined>
-  edit: (chatId: string, msgId: number, text: string) => Promise<void>
+  send: (chatId: string, text: string, form?: PanelForm) => Promise<number | undefined>
+  edit: (chatId: string, msgId: number, text: string, form?: PanelForm) => Promise<void>
+  // With rich messages on, each message starts as a rich message.
+  rich?: RichPanel
   readFile?: (path: string) => string | undefined
   mtime?: (path: string) => number | undefined
   listDir?: (path: string) => string[] | undefined
@@ -644,6 +769,18 @@ export function createAgentStream(opts: {
   const listDir = opts.listDir ?? listDirOf
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms)))
   const records = opts.records
+  const rich = opts.rich
+  // A message's form, and the room of its frames.
+  const formOf = (b: Batch): PanelForm => rich && !b.plain ? 'rich' : 'plain'
+  const roomOf = (form: PanelForm): Room => form === 'rich' && rich ? richRoom(rich) : PLAIN_ROOM
+  // A rich call Telegram refused: the message goes plain from the chat's next
+  // slot, and stays plain.
+  function refusedRich(b: Batch, form: PanelForm, call: 'send' | 'edit', err: unknown): boolean {
+    if (form !== 'rich' || !rich?.refused(err)) return false
+    b.plain = true
+    rich.log(`subagents message: rich ${call} refused, plain from the next slot: ${String((err as ApiError | undefined)?.description ?? err)}`)
+    return true
+  }
   const agents = new Map<string, Agent>()
   // Rows whose transcript closed them after the message showed it: they are
   // out of the rows, and their transcript is still read, so a run that goes
@@ -666,8 +803,8 @@ export function createAgentStream(opts: {
   // The current tick's time, which the sweep's slots share with the flush.
   let tickAt = 0
   let closing: Promise<void> | undefined
-  // The close-time frame's text of each message, once the stream closes.
-  const closeTexts = new Map<Batch, string>()
+  // The close-time frames of each message, once the stream closes.
+  const closeTexts = new Map<Batch, Closing>()
 
   // A row out of the rows: one its transcript closed stays watched, as long
   // as the stream still follows it; a row a later start replaced is done
@@ -721,7 +858,7 @@ export function createAgentStream(opts: {
     if (!b || b.gone || b.msgId === undefined || batches.get(b.chatId) === b) return
     if (!late.has(b)) b.failures = 0
     late.add(b)
-    records?.write(b.chatId, b.msgId, closingText(b, b.frameAt ?? t))
+    keep(b, b.msgId, closingOf(b, b.frameAt ?? t))
   }
 
   // The one more edit an ended group's message owes, at its chat's next slot:
@@ -733,20 +870,23 @@ export function createAgentStream(opts: {
     if (b.sending) return
     const msgId = b.msgId!
     const at = b.frameAt ?? t
-    const frame = panel(b, agents, at)
+    const form = formOf(b)
+    const frame = panel(b, agents, at, undefined, roomOf(form))
     const finish = () => { late.delete(b); records?.remove(b.chatId, msgId) }
     if (frame.key === b.sentKey) return finish()
     if (t < nextSlot(b.chatId)) return
     chatNext.set(b.chatId, t + CHAT_GAP_MS)
     b.sending = true
-    records?.write(b.chatId, msgId, closingText(b, at))
-    b.inflight = Promise.resolve().then(() => opts.edit(b.chatId, msgId, frame.text)).then(() => { b.sentKey = frame.key }, (err: unknown) => {
+    keep(b, msgId, closingOf(b, at))
+    b.inflight = Promise.resolve().then(() => opts.edit(b.chatId, msgId, frame.text, form)).then(() => { b.sentKey = frame.key }, (err: unknown) => {
       const e = (err ?? {}) as ApiError
       const desc = String(e.description ?? err)
       const retry = e.parameters?.retry_after
       if (/message is not modified/i.test(desc)) b.sentKey = frame.key
       else if (retry) chatNext.set(b.chatId, now() + retry * 1000)
       else if (/message to edit not found|message can't be edited/i.test(desc)) finish()
+      // A refusal is no failure: the edit goes plain at the chat's next slot.
+      else if (refusedRich(b, form, 'edit', err)) {}
       else if (++b.failures >= 5) late.delete(b)
     }).finally(() => {
       b.sending = false
@@ -842,9 +982,15 @@ export function createAgentStream(opts: {
   // shows it for one tick never closes the message on a run that goes on.
   const settled = (a: Agent) => !!a.dropped || (a.done !== undefined && (a.endedBy !== 'transcript' || !!a.confirmed))
 
-  // The closing text of a frame: every row still running reads as no longer
-  // followed, every other row as it was.
-  const closingText = (batch: Batch, t: number) => panel(batch, agents, t, t).text
+  // The closing frames of a frame: every row still running reads as no longer
+  // followed, every other row as it was. text is plain, within 4,096 units;
+  // rich, every row whole, is there while the message is a rich message.
+  type Closing = { text: string; rich?: string }
+  const closingOf = (batch: Batch, t: number): Closing => {
+    const text = panel(batch, agents, t, t).text
+    return formOf(batch) === 'rich' ? { text, rich: panel(batch, agents, t, t, roomOf('rich')).text } : { text }
+  }
+  const keep = (batch: Batch, msgId: number, c: Closing) => records?.write(batch.chatId, msgId, c.text, c.rich)
 
   // A group whose rows have all ended, and whose final frame Telegram has
   // accepted or whose message is gone, ends: its message stays as it is, and
@@ -860,7 +1006,7 @@ export function createAgentStream(opts: {
     if (batch.msgId === undefined) return
     // A gone message keeps its record, with the final frame, for the next
     // server; a message whose final frame went out needs no closing.
-    if (batch.gone) records?.write(batch.chatId, batch.msgId, closingText(batch, now()))
+    if (batch.gone) keep(batch, batch.msgId, closingOf(batch, now()))
     else records?.remove(batch.chatId, batch.msgId)
   }
 
@@ -873,7 +1019,7 @@ export function createAgentStream(opts: {
       if (![...batch.members.values()].some(a => a.done === undefined && !a.dropped)) {
         // The gone message's record first takes this final frame, so rows this
         // server saw finish keep their lines when the next server closes it.
-        if (batch.msgId !== undefined) records?.write(batch.chatId, batch.msgId, closingText(batch, t))
+        if (batch.msgId !== undefined) keep(batch, batch.msgId, closingOf(batch, t))
         batches.delete(batch.chatId)
       }
       return
@@ -885,7 +1031,8 @@ export function createAgentStream(opts: {
     const leaving = [...batch.members].filter(([key, a]) => hasLeft(a, t) && agents.get(key) !== a)
     if (leaving.length === batch.members.size) return endIfFinished(batch, true)
     for (const [key] of leaving) batch.members.delete(key)
-    const frame = panel(batch, agents, t)
+    const form = formOf(batch)
+    const frame = panel(batch, agents, t, undefined, roomOf(form))
     const running = [...batch.members.values()].some(a => a.done === undefined && !a.dropped)
     if (frame.key === batch.sentKey && (!running || t - batch.lastEdit < CLOCK_REFRESH_MS)) {
       // The tick that confirms a transcript ending has nothing new to show,
@@ -922,9 +1069,13 @@ export function createAgentStream(opts: {
       if (retry) { chatNext.set(chatId, now() + retry * 1000); return }
       if (/message to edit not found|message can't be edited/i.test(desc)) {
         // Replace a deleted panel on the next chat slot; the old one's record
-        // would only spend the next server a call.
+        // would only spend the next server a call. The replacement chooses
+        // its form again.
         if (batch.msgId !== undefined) records?.remove(chatId, batch.msgId)
         batch.msgId = undefined
+        batch.plain = undefined
+      } else if (refusedRich(batch, form, batch.msgId === undefined ? 'send' : 'edit', err)) {
+        // The refusal took this slot; the frame goes plain at the next.
       } else if (++batch.failures >= 5) batch.gone = true
     }
     const done = () => {
@@ -932,17 +1083,17 @@ export function createAgentStream(opts: {
       endIfFinished(batch)
     }
     if (batch.msgId === undefined) {
-      const closeText = closingText(batch, t)
-      batch.inflight = Promise.resolve().then(() => opts.send(chatId, frame.text)).then(id => {
+      const closing = closingOf(batch, t)
+      batch.inflight = Promise.resolve().then(() => opts.send(chatId, frame.text, form)).then(id => {
         if (id === undefined) { fail(new Error('Telegram send returned no message id')); return }
         batch.msgId = id
         // Once the stream is closing, the record takes the close-time frame.
-        records?.write(chatId, id, closeTexts.get(batch) ?? closeText)
+        keep(batch, id, closeTexts.get(batch) ?? closing)
         ok()
       }, fail).finally(done)
     } else {
-      records?.write(chatId, batch.msgId, closingText(batch, t))
-      batch.inflight = Promise.resolve().then(() => opts.edit(chatId, batch.msgId!, frame.text)).then(ok, fail).finally(done)
+      keep(batch, batch.msgId, closingOf(batch, t))
+      batch.inflight = Promise.resolve().then(() => opts.edit(chatId, batch.msgId!, frame.text, form)).then(ok, fail).finally(done)
     }
   }
 
@@ -957,7 +1108,9 @@ export function createAgentStream(opts: {
     // A group whose final frame went out in that answer has ended, and its
     // message stays as it is.
     if (batch.gone || batch.msgId === undefined || batches.get(batch.chatId) !== batch) return
-    const text = closeTexts.get(batch) ?? panel(batch, agents, closedAt, closedAt).text
+    const closing = closeTexts.get(batch) ?? closingOf(batch, closedAt)
+    const form = formOf(batch)
+    const text = form === 'rich' && closing.rich !== undefined ? closing.rich : closing.text
     for (;;) {
       const slot = Math.max(now(), nextSlot(batch.chatId))
       if (slot > startBy) return
@@ -967,10 +1120,19 @@ export function createAgentStream(opts: {
     chatNext.set(batch.chatId, now() + CHAT_GAP_MS)
     const msgId = batch.msgId
     try {
-      await opts.edit(batch.chatId, msgId, text)
+      await opts.edit(batch.chatId, msgId, text, form)
     } catch (err) {
-      // Any other answer leaves the record for the next server that polls.
-      if (!/message is not modified/i.test(String((err as ApiError | undefined)?.description ?? err))) return
+      // Any other answer leaves the record for the next server that polls;
+      // a refused rich edit leaves it without its rich frame, so that server
+      // edits the plain one.
+      const e = (err ?? {}) as ApiError
+      const desc = String(e.description ?? err)
+      if (/message is not modified/i.test(desc)) {}
+      else {
+        if (!e.parameters?.retry_after && !/message to edit not found|message can't be edited/i.test(desc)
+          && refusedRich(batch, form, 'edit', err)) keep(batch, msgId, { text: closing.text })
+        return
+      }
     }
     records?.remove(batch.chatId, msgId)
   }
@@ -1085,7 +1247,7 @@ export function createAgentStream(opts: {
     holdUntil(chatId, t) {
       chatNext.set(chatId, Math.max(chatNext.get(chatId) ?? 0, t))
     },
-    edit: (chatId, msgId, text) => opts.edit(chatId, msgId, text),
+    edit: (chatId, msgId, text, form) => opts.edit(chatId, msgId, text, form),
   }
 
   return {
@@ -1118,9 +1280,9 @@ export function createAgentStream(opts: {
         // never puts an older frame back, whether or not the closing edit
         // then goes out.
         for (const b of batches.values()) {
-          const text = panel(b, agents, closedAt, closedAt).text
-          closeTexts.set(b, text)
-          if (b.msgId !== undefined) records?.write(b.chatId, b.msgId, text)
+          const closing = closingOf(b, closedAt)
+          closeTexts.set(b, closing)
+          if (b.msgId !== undefined) keep(b, b.msgId, closing)
         }
         return Promise.all([...batches.values()].map(b => closeBatch(b, closedAt, startBy).catch(() => {})))
       }).then(() => {}, () => {})

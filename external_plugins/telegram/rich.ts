@@ -658,6 +658,44 @@ export type RawApi = {
   editMessageText(params: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>
 }
 
+// The plain text of a RichText as Telegram returns it in a message's
+// rich_message: a string, an array of RichText, or a typed piece holding its
+// text, such as a link, a mention or a bot command Telegram detected on its
+// own. undefined for a value of any other shape.
+export function richTextPlain(text: unknown): string | undefined {
+  if (typeof text === 'string') return text
+  if (Array.isArray(text)) {
+    let out = ''
+    for (const piece of text) {
+      const plain = richTextPlain(piece)
+      if (plain === undefined) return undefined
+      out += plain
+    }
+    return out
+  }
+  if (!text || typeof text !== 'object') return undefined
+  const piece = text as { type?: unknown; text?: unknown; alternative_text?: unknown; expression?: unknown }
+  if ('text' in piece) return richTextPlain(piece.text)
+  if (piece.type === 'custom_emoji' && typeof piece.alternative_text === 'string') return piece.alternative_text
+  if (piece.type === 'mathematical_expression' && typeof piece.expression === 'string') return piece.expression
+  return undefined
+}
+
+// The text of a rich message made of plain paragraphs, as Telegram returns its
+// blocks: each paragraph's text flattened, one line each. undefined when the
+// blocks are missing or hold anything but paragraphs.
+export function paragraphsText(blocks: unknown): string | undefined {
+  if (!Array.isArray(blocks) || blocks.length === 0) return undefined
+  const lines: string[] = []
+  for (const block of blocks) {
+    if (!block || typeof block !== 'object' || (block as { type?: unknown }).type !== 'paragraph') return undefined
+    const plain = richTextPlain((block as { text?: unknown }).text)
+    if (plain === undefined) return undefined
+    lines.push(plain)
+  }
+  return lines.join('\n')
+}
+
 // Whether a failed rich send or edit goes out plain instead: Telegram rejected
 // the content (400, e.g. RICH_MESSAGE_MARKDOWN_INVALID) or the Bot API server
 // has no rich messages (404). An unchanged edit, a rate limit or a network

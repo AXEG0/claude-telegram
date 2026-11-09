@@ -29,7 +29,7 @@ import { createArrivals, type DoneSeed, type StartLine } from './arrivals.ts'
 import { AGENT_TICK_MS, agentEventFile, CHAT_GAP_MS, CLOSING_EDIT_MS, createAgentStream, createEventReader } from './agents.ts'
 import { createPanelStore } from './panels.ts'
 import { logCall, setupLog } from './log.ts'
-import { editRichParsed, formatOf, formatSchema, RICH_INSTRUCTIONS, richEditParse, richEnabled, sendRich, type RawApi } from './rich.ts'
+import { editRichParsed, formatOf, formatSchema, paragraphsText, plainFallback, RICH_INSTRUCTIONS, RICH_PART_BLOCKS, RICH_PART_BYTES, richEditParse, richEnabled, sendRich, type RawApi } from './rich.ts'
 import { metaText, replyMeta, richText } from './reply.ts'
 import { heartbeatTransformer } from './heartbeat.ts'
 import { deadlineTransformer, pollFetch } from './deadline.ts'
@@ -311,19 +311,60 @@ setInterval(() => {
   recovered.clear()
 }, REFRESH_MS).unref()
 
+// Rich messages, when TELEGRAM_RICH_MESSAGES is on. See rich.ts.
+const RICH = richEnabled()
+const richApi = bot.api.raw as unknown as RawApi
+
+// A rich subagents message is one plain-string paragraph for each line of its
+// text, so no Markdown is parsed: a description's *, $, | or <tag> shows as
+// written, and the rows keep their numbers.
+const panelBlocks = (text: string) => text.split('\n').map(line => ({ type: 'paragraph', text: line }))
+const panelLog = (line: string) => process.stderr.write(`telegram channel: ${line}\n`)
+// Telegram cuts rich text past about 35,000 bytes with no error, so what it
+// answers a rich send or edit of the message with is compared with what was
+// sent, each paragraph flattened to its plain text. Each line is written once
+// for each message, and the comparison never fails the call.
+const panelNoted = { stored: new Set<number>(), unreadable: new Set<number>() }
+function comparePanel(answer: unknown, sent: string, messageId: number | undefined): void {
+  try {
+    const id = messageId ?? (answer as { message_id?: unknown } | undefined)?.message_id
+    if (typeof id !== 'number') return
+    const stored = paragraphsText((answer as { rich_message?: { blocks?: unknown } } | undefined)?.rich_message?.blocks)
+    if (stored === undefined) {
+      if (panelNoted.unreadable.has(id)) return
+      panelNoted.unreadable.add(id)
+      panelLog(`subagents message: Telegram's answer holds no rich text to compare (message ${id})`)
+    } else if (stored !== sent && !panelNoted.stored.has(id)) {
+      panelNoted.stored.add(id)
+      panelLog(`subagents message: Telegram stored ${Buffer.byteLength(stored)} of ${Buffer.byteLength(sent)} bytes (message ${id})`)
+    }
+  } catch {}
+}
+
 // Subagents share one live message in the private chat of the last inbound
 // message, or in the owner chat when that chat is another bot's. See agents.ts.
-// Each open message keeps a record of its closing text, and the server that
-// polls the bot closes the messages of servers that are gone. See panels.ts.
+// With rich messages on it is a rich message, every row whole, and a message
+// Telegram refuses as one goes plain. Each open message keeps a record of its
+// closing text, and the server that polls the bot closes the messages of
+// servers that are gone. See panels.ts.
 const panels = createPanelStore({ dir: join(STATE_DIR, 'panels') })
 const agentStream = createAgentStream({
   readEvents: createEventReader(ancestors.map(pid => agentEventFile(STATE_DIR, pid)), false),
   chat: () => notice(lastChat),
-  send: async (chat_id, text) =>
-    (await bot.api.sendMessage(chat_id, text, { disable_notification: true })).message_id,
-  edit: async (chat_id, message_id, text) => {
-    await bot.api.editMessageText(chat_id, message_id, text)
+  send: async (chat_id, text, form) => {
+    if (form !== 'rich') return (await bot.api.sendMessage(chat_id, text, { disable_notification: true })).message_id
+    const sent = await richApi.sendRichMessage({ chat_id, rich_message: { blocks: panelBlocks(text) }, disable_notification: true })
+    comparePanel(sent, text, undefined)
+    return sent.message_id
   },
+  edit: async (chat_id, message_id, text, form) => {
+    if (form !== 'rich') {
+      await bot.api.editMessageText(chat_id, message_id, text)
+      return
+    }
+    comparePanel(await richApi.editMessageText({ chat_id, message_id, rich_message: { blocks: panelBlocks(text) } }), text, message_id)
+  },
+  rich: RICH ? { bytes: RICH_PART_BYTES, blocks: RICH_PART_BLOCKS, refused: plainFallback, log: panelLog } : undefined,
   records: panels,
   sweep: POLLING ? panels.sweep : undefined,
   // A chat Telegram asked to wait gets nothing until the wait ends.
@@ -353,10 +394,6 @@ if (POLLING && OWNER) setInterval(() => {
 
 // Speech to text for voice and audio, when a key is set. See stt.ts.
 const STT = sttConfig()
-
-// Rich messages, when TELEGRAM_RICH_MESSAGES is on. See rich.ts.
-const RICH = richEnabled()
-const richApi = bot.api.raw as unknown as RawApi
 
 type PendingEntry = {
   senderId: string

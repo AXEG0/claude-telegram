@@ -4,7 +4,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { flock, LOCK_EX, LOCK_NB } from './buttons.ts'
 import { createPanelStore } from './panels.ts'
-import { AGENT_TICK_MS, createAgentStream, type SweepSlots } from './agents.ts'
+import { AGENT_TICK_MS, createAgentStream, type PanelForm, type SweepSlots } from './agents.ts'
 
 const dirs: string[] = []
 afterEach(() => {
@@ -135,6 +135,67 @@ describe.skipIf(process.platform !== 'linux')('the panel records', () => {
     store.sweep(s)
     await settle()
     expect(readdirSync(dir)).toEqual([])
+  })
+
+  test('a record with a rich frame is swept as a rich message, and one without as plain text', async () => {
+    const dir = folder()
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, '1-7.json'), JSON.stringify({ chat: '1', message: 7, text: 'plain rows', rich: 'whole rows', writer: writerA }))
+    writeFileSync(join(dir, '1-8.json'), JSON.stringify({ chat: '1', message: 8, text: 'plain only', writer: writerA }))
+    const made: { message: number; text: string; form?: PanelForm }[] = []
+    const s: SweepSlots = { now: Date.now, take: () => true, holdUntil: () => {},
+      edit: async (_c, message, text, form) => { made.push({ message, text, ...(form ? { form } : {}) }) } }
+    createPanelStore({ dir, writer: writerB }).sweep(s)
+    await settle()
+    expect(made.sort((a, b) => a.message - b.message)).toEqual([
+      { message: 7, text: 'whole rows', form: 'rich' },
+      { message: 8, text: 'plain only' },
+    ])
+    expect(readdirSync(dir)).toEqual([])
+  })
+
+  test('a rich edit Telegram refuses rewrites the record without its rich frame under its own writer, and the next sweep edits its plain text; a message gone drops it', async () => {
+    const dir = folder()
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, '1-7.json'), JSON.stringify({ chat: '1', message: 7, text: 'plain rows', rich: 'whole rows', writer: writerA }))
+    writeFileSync(join(dir, '1-9.json'), JSON.stringify({ chat: '1', message: 9, text: 'gone rows', rich: 'gone whole', writer: writerA }))
+    writeFileSync(join(dir, `${writerA}.lock`), '')
+    const answers: Record<string, unknown> = {
+      'whole rows': { error_code: 400, description: 'Bad Request: RICH_MESSAGE_INVALID' },
+      'gone whole': { error_code: 400, description: 'Bad Request: message to edit not found' },
+    }
+    const made: { message: number; text: string; form?: PanelForm }[] = []
+    const s: SweepSlots = { now: Date.now, take: () => true, holdUntil: () => {},
+      edit: async (_c, message, text, form) => {
+        made.push({ message, text, ...(form ? { form } : {}) })
+        if (answers[text]) throw answers[text]
+      } }
+    const store = createPanelStore({ dir, writer: writerB })
+    store.sweep(s)
+    await settle()
+    expect(JSON.parse(readFileSync(join(dir, '1-7.json'), 'utf8'))).toEqual({ chat: '1', message: 7, text: 'plain rows', writer: writerA })
+    expect(existsSync(join(dir, '1-9.json'))).toBe(false)
+    expect(readdirSync(dir).sort()).toEqual(['1-7.json', `${writerA}.lock`])
+    store.sweep(s)
+    await settle()
+    expect(made.slice(-1)).toEqual([{ message: 7, text: 'plain rows' }])
+    expect(readdirSync(dir)).toEqual([])
+  })
+
+  test('the stream\'s slots carry a swept record\'s form to its edit', async () => {
+    const dir = folder()
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, '1-9.json'), JSON.stringify({ chat: '1', message: 9, text: 'plain rows', rich: 'whole rows', writer: writerA }))
+    const made: { message: number; text: string; form?: PanelForm }[] = []
+    const store = createPanelStore({ dir, writer: writerB })
+    const stream = createAgentStream({
+      readEvents: () => [], chat: () => undefined,
+      send: async () => undefined, edit: async (_c, message, text, form) => { made.push({ message, text, ...(form ? { form } : {}) }) },
+      sweep: store.sweep,
+    })
+    stream.tick()
+    await settle()
+    expect(made).toEqual([{ message: 9, text: 'whole rows', form: 'rich' }])
   })
 
   test('a gone writer\'s record in a chat Telegram asked to wait is swept only once the hold ends, through the stream\'s slots', async () => {

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'fs'
+import { builtinModules } from 'module'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
@@ -24,10 +25,12 @@ import {
   THINKING,
   WRITING,
   type AgentEvent,
+  type PanelForm,
   type ShellEvent,
   type StreamEvent,
   type SweepSlots,
 } from './agents.ts'
+import { plainFallback, RICH_PART_BLOCKS, RICH_PART_BYTES } from './rich.ts'
 import shellHooks from './fixtures/shell-hooks.json'
 import workflowHooks from './fixtures/workflow-hooks.json'
 import failureHooks from './fixtures/failure-hooks.json'
@@ -283,6 +286,14 @@ describe('progressFromTranscript', () => {
 })
 
 describe('createAgentStream', () => {
+  // Set while richHarness makes its harness: rich messages on, with the
+  // server's own room and refusal rule, and the stream's log lines kept in
+  // logs.
+  let richOn = false
+  const richHarness = (chat: string) => {
+    richOn = true
+    try { return harness(chat) } finally { richOn = false }
+  }
   function harness(chat: string | null = '42') {
     let t = 1_000_000
     // The hold Telegram set on each chat, as the server's flood watch keeps
@@ -294,31 +305,47 @@ describe('createAgentStream', () => {
     const events: StreamEvent[] = []
     const files = new Map<string, string>()
     const mtimes = new Map<string, number>()
-    const sent: { chat: string; text: string }[] = []
-    const edits: { id: number; text: string }[] = []
+    // A send or edit made as a rich message carries form: 'rich'.
+    const sent: { chat: string; text: string; form?: PanelForm }[] = []
+    const edits: { id: number; text: string; form?: PanelForm }[] = []
     // Every edit the stream tried: the clock when it went out, its text, and the
     // error Telegram answered, if any.
-    const attempts: { at: number; text: string; error?: unknown }[] = []
+    const attempts: { at: number; text: string; error?: unknown; form?: PanelForm }[] = []
+    // Every send the stream tried, as attempts holds each edit.
+    const sendAttempts: { at: number; text: string; error?: unknown; form?: PanelForm }[] = []
     // Every send and edit the stream made, a sweep's included: the clock when
     // it went out, its chat, its message and its text.
-    const calls: { at: number; chat: string; id: number; text: string }[] = []
+    const calls: { at: number; chat: string; id: number; text: string; form?: PanelForm }[] = []
+    const logs: string[] = []
     let failEdit: unknown
+    let failSend: unknown
     let sendWait: Promise<void> | undefined
     let editWait: Promise<void> | undefined
     let current = chat
-    // Each record write and deletion, with the clock when it happened.
-    const records: { at: number; op: 'write' | 'remove'; chat: string; id: number; text?: string }[] = []
+    // Each record write and deletion, with the clock when it happened, and a
+    // record's rich frame when it has one.
+    const records: { at: number; op: 'write' | 'remove'; chat: string; id: number; text?: string; rich?: string }[] = []
+    const formed = (form?: PanelForm) => form === 'rich' ? { form } : {}
     const stream = createAgentStream({
       readEvents: () => events.splice(0),
       chat: () => current ?? undefined,
-      send: async (c, text) => { sent.push({ chat: c, text }); const id = sent.length + 6; calls.push({ at: t, chat: c, id, text }); await sendWait; return id },
-      edit: async (c, id, text) => {
-        attempts.push({ at: t, text, error: failEdit })
-        calls.push({ at: t, chat: c, id, text })
+      send: async (c, text, form) => {
+        sendAttempts.push({ at: t, text, error: failSend, ...formed(form) })
+        if (failSend) throw failSend
+        sent.push({ chat: c, text, ...formed(form) })
+        const id = sent.length + 6
+        calls.push({ at: t, chat: c, id, text, ...formed(form) })
+        await sendWait
+        return id
+      },
+      edit: async (c, id, text, form) => {
+        attempts.push({ at: t, text, error: failEdit, ...formed(form) })
+        calls.push({ at: t, chat: c, id, text, ...formed(form) })
         if (failEdit) throw failEdit
-        edits.push({ id, text })
+        edits.push({ id, text, ...formed(form) })
         await editWait
       },
+      rich: richOn ? { bytes: RICH_PART_BYTES, blocks: RICH_PART_BLOCKS, refused: plainFallback, log: line => logs.push(line) } : undefined,
       readFile: p => files.get(p),
       mtime: p => mtimes.get(p),
       listDir: dir => {
@@ -331,7 +358,7 @@ describe('createAgentStream', () => {
       holdUntil: c => holds.get(c) ?? 0,
       sweep: slots => sweeping?.(slots),
       records: {
-        write: (c, id, text) => { records.push({ at: t, op: 'write', chat: c, id, text }) },
+        write: (c, id, text, rich) => { records.push({ at: t, op: 'write', chat: c, id, text, ...(rich !== undefined ? { rich } : {}) }) },
         remove: (c, id) => { records.push({ at: t, op: 'remove', chat: c, id }) },
       },
     })
@@ -340,7 +367,7 @@ describe('createAgentStream', () => {
     const write = (path: string, text: string) => { files.set(path, text); mtimes.set(path, t) }
     return {
       stream, events, sent, edits, tick, write,
-      attempts, records, calls,
+      attempts, sendAttempts, records, calls, logs,
       advance: (ms: number) => { t += ms },
       now: () => t,
       setChat: (c: string | null) => { current = c },
@@ -348,6 +375,7 @@ describe('createAgentStream', () => {
       afterSleep: (run: () => void) => { afterSleep = run },
       sweepWith: (run: (slots: SweepSlots) => void) => { sweeping = run },
       failEditWith: (e: unknown) => { failEdit = e },
+      failSendWith: (e: unknown) => { failSend = e },
       holdSend: () => { let release!: () => void; sendWait = new Promise<void>(r => { release = r }); return () => { sendWait = undefined; release() } },
       holdEdit: () => { let release!: () => void; editWait = new Promise<void>(r => { release = r }); return () => { editWait = undefined; release() } },
     }
@@ -1551,7 +1579,12 @@ describe('createAgentStream', () => {
   test('once 60 finished rows have left, a running row longer than a sixty-first of the message gets its whole line', async () => {
     const h = harness()
     await h.tick()
-    for (let i = 0; i < 60; i++) { h.events.push(shell(h, `d${i}`, `Step ${i}`)); h.write(`/t/d${i}.output`, '') }
+    // Shells with descriptions of about 70 characters, so the share still
+    // cuts the running row before they leave.
+    for (let i = 0; i < 60; i++) {
+      h.events.push(shell(h, `d${i}`, `Check shard ${i} of the storage layer and write each result to the notes`))
+      h.write(`/t/d${i}.output`, '')
+    }
     const description = 'Compare the cache layer with the old storage notes and list each gap'
     h.events.push(start(h, 'long'))
     h.write('/s/agent-long.meta.json', JSON.stringify({ description }))
@@ -1560,8 +1593,9 @@ describe('createAgentStream', () => {
     for (let i = 0; i < 60; i++) h.write(`/t/d${i}.output`, '\n[exited with code 0]\n')
     await h.tick()
     const ended = h.now()
-    // With the 60 rows in the message, the running row's share cuts it short.
-    expect(h.edits.at(-1)!.text.split('\n').at(-1)).toMatch(/^61\. ⏳ general-purpose · Compare[^\n]*…$/)
+    // With the 60 rows in the message, the running row's share cuts it short:
+    // its type goes, then part of its description, and its clock stays.
+    expect(h.edits.at(-1)!.text.split('\n').at(-1)).toMatch(/^61\. ⏳ Compare[^\n·]*… · Starting… · \d+s$/)
 
     await runTo(h, ended + FIVE_MINUTES)
     h.write('/s/agent-long.jsonl', assistant([{ type: 'tool_use', name: 'Read', input: { description: 'Reading the storage notes one section at a time' } }],
@@ -2163,6 +2197,390 @@ describe('createAgentStream', () => {
       expect(h.records[before]).toEqual({ at: h.now(), op: 'write', chat: '1001', id: 7, text: '🤖 Subagents\n'
         + '1. ⚠️ No activity for 2h 1m · general-purpose · last: Starting…\n'
         + '2. 🔌 No longer followed after 2h 1m · general-purpose · last: Checking gate · 1.5k tokens' })
+    })
+  })
+
+  // The message as one rich message, every row whole, and the share and cut
+  // that keep a row's live end when rows still shorten.
+  describe('whole rows', () => {
+    const DESCRIPTION = 'Apply the two approved rule changes to the prompt files'
+    const CLOCK_MS = 4 * 60_000 + 31_000
+    const TOOL_RESULT = JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', content: 'ok' }] } })
+    const utf8 = (s: string) => Buffer.byteLength(s, 'utf8')
+    const rows = (text: string) => text.split('\n').slice(1)
+    // A text of exactly n characters of the word given, ending in a letter.
+    const sized = (n: number, word: string) => (word + ' ').repeat(Math.ceil(n / (word.length + 1)) + 1).slice(0, n - 1) + word[0]
+    // n running subagents, ids from `from`, at a tool step (its call's
+    // description) or, with none, at 💭 Thinking…, with 85.4k tokens.
+    function begin(h: ReturnType<typeof harness>, n: number, opts: { description?: (i: number) => string; step?: (i: number) => string; type?: string; tokens?: number; from?: number } = {}) {
+      for (let i = opts.from ?? 0; i < (opts.from ?? 0) + n; i++) {
+        const id = `w${i}`
+        h.events.push(start(h, id, opts.type ? { agent_type: opts.type } : {}))
+        h.write(`/s/agent-${id}.meta.json`, JSON.stringify({ description: opts.description?.(i) ?? DESCRIPTION }))
+        const step = opts.step?.(i)
+        const call = assistant([{ type: 'tool_use', name: 'Bash', input: { description: step ?? 'Run tests' } }], { input_tokens: opts.tokens ?? 85_400 })
+        h.write(`/s/agent-${id}.jsonl`, step === undefined ? [call, TOOL_RESULT].join('\n') : call)
+      }
+    }
+    // The first frame of n running subagents, 4m 31s on their clocks.
+    async function frame(h: ReturnType<typeof harness>, n: number, opts: Parameters<typeof begin>[2] = {}) {
+      await h.tick()
+      begin(h, n, opts)
+      h.advance(CLOCK_MS)
+      await h.tick()
+      return h.sent.at(-1)!
+    }
+    const thinkingRow = (n: number) => `${n}. ⏳ general-purpose · ${DESCRIPTION} · 💭 Thinking… · 4m 31s · 85.4k tokens`
+    const closingRow = (n: number, clock: string) => `${n}. 🔌 No longer followed after ${clock} · general-purpose · ${DESCRIPTION} · last: 💭 Thinking… · 85.4k tokens`
+
+    test('rich on, 45 running subagents go out as one rich message, every row whole, and each record keeps the closing rows whole as rich and a plain closing frame within 4,096 units', async () => {
+      const h = richHarness('1001')
+      const sent = await frame(h, 45)
+      expect(thinkingRow(1)).toHaveLength(117)
+      expect(sent.form).toBe('rich')
+      expect(rows(sent.text)).toEqual(Array.from({ length: 45 }, (_, i) => thinkingRow(i + 1)))
+      expect(sent.text.length).toBeGreaterThan(AGENT_MESSAGE_LIMIT)
+      expect(utf8(sent.text)).toBeLessThanOrEqual(RICH_PART_BYTES)
+      expect(sent.text.split('\n').length).toBeLessThanOrEqual(RICH_PART_BLOCKS)
+      // The record written once the send is answered.
+      const first = h.records.at(-1)!
+      expect(first).toMatchObject({ op: 'write', id: 7 })
+      expect(rows(first.rich!)).toEqual(Array.from({ length: 45 }, (_, i) => closingRow(i + 1, '4m 31s')))
+      expect(first.text!.length).toBeLessThanOrEqual(AGENT_MESSAGE_LIMIT)
+      expect(rows(first.text!)).toHaveLength(45)
+      for (const row of rows(first.text!)) expect(row).toMatch(/^\d+\. 🔌 No longer followed after 4m 31s · .* · 85\.4k tokens$/)
+      // The record written before the next edit, which is rich too.
+      h.advance(CHAT_GAP_MS)
+      await h.tick()
+      expect(h.edits.at(-1)!.form).toBe('rich')
+      expect(rows(h.edits.at(-1)!.text)).toEqual(Array.from({ length: 45 }, (_, i) => thinkingRow(i + 1).replace('4m 31s', '4m 43s')))
+      const before = h.records.at(-1)!
+      expect(before.at).toBe(h.attempts.at(-1)!.at)
+      expect(rows(before.rich!)).toEqual(Array.from({ length: 45 }, (_, i) => closingRow(i + 1, '4m 43s')))
+      expect(before.text!.length).toBeLessThanOrEqual(AGENT_MESSAGE_LIMIT)
+    })
+
+    test('rich on, 100 running subagents at the longest English row each show their whole row within 30,000 bytes, and the record keeps them whole', async () => {
+      const h = richHarness('1001')
+      await h.tick()
+      const type = sized(32, 'reviewer')
+      const description = sized(80, 'Compare')
+      const step = sized(80, 'Checking')
+      begin(h, 100, { type, description: () => description, step: () => step, tokens: 999_900 })
+      await h.tick()
+      h.advance(23 * 3600_000 + 59 * 60_000)
+      for (let i = 0; i < 100; i++) h.write(`/s/agent-w${i}.jsonl`, assistant([{ type: 'tool_use', name: 'Bash', input: { description: step } }], { input_tokens: 999_900 }))
+      await h.tick()
+      const edit = h.edits.at(-1)!
+      expect(edit.form).toBe('rich')
+      expect(rows(edit.text)).toEqual(Array.from({ length: 100 }, (_, i) => `${i + 1}. ⏳ ${type} · ${description} · ${step} · 23h 59m · 999.9k tokens`))
+      expect(utf8(edit.text)).toBeLessThanOrEqual(RICH_PART_BYTES)
+      const record = h.records.at(-1)!
+      expect(rows(record.rich!)).toEqual(Array.from({ length: 100 }, (_, i) => `${i + 1}. 🔌 No longer followed after 23h 59m · ${type} · ${description} · last: ${step} · 999.9k tokens`))
+      expect(utf8(record.rich!)).toBeLessThanOrEqual(RICH_PART_BYTES)
+      expect(record.text!.length).toBeLessThanOrEqual(AGENT_MESSAGE_LIMIT)
+    })
+
+    // 18 running, 17 finished and a finished shell: together within 4,096
+    // units, while the running rows pass an equal share.
+    const finishedJob = (i: number) => `Review the retry notes ${i}`
+    async function mixed(h: ReturnType<typeof harness>) {
+      await h.tick()
+      begin(h, 35, { description: i => i < 18 ? DESCRIPTION : finishedJob(i) })
+      h.events.push(shell(h, 's1', 'Wait for CI'))
+      h.write('/t/s1.output', '')
+      await h.tick()
+      h.advance(CLOCK_MS)
+      for (let i = 18; i < 35; i++) h.events.push({ t: h.now(), event: 'stop', agent_id: `w${i}` })
+      h.write('/t/s1.output', '\n[exited with code 0]\n')
+      await h.tick()
+      return h.edits.at(-1)!.text
+    }
+
+    for (const rich of [false, true]) {
+      test(`with rich messages ${rich ? 'on' : 'off'}, 36 mixed rows that fit the message all go whole`, async () => {
+        const h = rich ? richHarness('1001') : harness('1001')
+        const text = await mixed(h)
+        const shown = rows(text)
+        expect(shown).toHaveLength(36)
+        for (let i = 0; i < 18; i++) expect(shown[i]).toBe(thinkingRow(i + 1))
+        for (let i = 18; i < 35; i++) expect(shown[i]).toBe(`${i + 1}. ✅ Done in 4m 31s · general-purpose · ${finishedJob(i)} · 85.4k tokens`)
+        expect(shown[35]).toBe('36. ✅ Done in 4m 31s · shell · Wait for CI')
+        // An equal share would have cut each running row.
+        expect(thinkingRow(1).length).toBeGreaterThan(Math.floor((AGENT_MESSAGE_LIMIT - text.split('\n')[0]!.length - 36) / 36))
+        expect(text.length).toBeLessThanOrEqual(AGENT_MESSAGE_LIMIT)
+      })
+    }
+
+    test('with 45 rows every row an equal share leaves whole is whole, and one row alone is whole', async () => {
+      const h = harness('1001')
+      await h.tick()
+      begin(h, 30)
+      begin(h, 15, { from: 30, description: i => `Short job ${i}`, step: () => 'Read' })
+      h.advance(CLOCK_MS)
+      await h.tick()
+      const text = h.sent.at(-1)!.text
+      const share = Math.floor((AGENT_MESSAGE_LIMIT - text.split('\n')[0]!.length - 45) / 45)
+      const shown = rows(text)
+      for (let i = 30; i < 45; i++) {
+        const whole = `${i + 1}. ⏳ general-purpose · Short job ${i} · Read · 4m 31s · 85.4k tokens`
+        expect(whole.length).toBeLessThanOrEqual(share)
+        expect(shown[i]).toBe(whole)
+      }
+      expect(text.length).toBeLessThanOrEqual(AGENT_MESSAGE_LIMIT)
+      const one = harness('1001')
+      expect(rows((await frame(one, 1)).text)).toEqual([thinkingRow(1)])
+    })
+
+    test('60 rows each longer than an equal share each end within one unit past it, with their clock and token count, and the frame stays within 4,096 units', async () => {
+      const h = harness('1001')
+      const text = (await frame(h, 60, { step: i => `Run the unit tests of package ${i}` })).text
+      const share = Math.floor((AGENT_MESSAGE_LIMIT - text.split('\n')[0]!.length - 60) / 60)
+      expect(text.length).toBeLessThanOrEqual(AGENT_MESSAGE_LIMIT)
+      for (const row of rows(text)) {
+        expect(row.length).toBeLessThanOrEqual(share + 1)
+        expect(row).toEndWith(' · 4m 31s · 85.4k tokens')
+      }
+    })
+
+    test('rich off, 60 running subagents at 💭 Thinking… or a short tool step each keep the start of their description and lose their type, end with their clock and tokens, and fill the message', async () => {
+      for (const step of [undefined, (i: number) => 'Checking-each-retry-rule'.slice(0, 4 + (i % 17))]) {
+        const h = harness('1001')
+        const text = (await frame(h, 60, { step })).text
+        expect(text.length).toBeLessThanOrEqual(AGENT_MESSAGE_LIMIT)
+        expect(text.length).toBeGreaterThanOrEqual(4000)
+        rows(text).forEach((row, i) => {
+          expect(row.startsWith(`${i + 1}. ⏳ ${DESCRIPTION.slice(0, 12)}`)).toBe(true)
+          expect(row).not.toContain('general-purpose')
+          expect(row).toEndWith(' · 4m 31s · 85.4k tokens')
+        })
+      }
+    })
+
+    test('rich off, 50 running subagents with a 67-character step keep the start of their step and end with their clock and tokens; 100 at 💭 Thinking… each end with their tokens', async () => {
+      const step = sized(67, 'Reading')
+      const h = harness('1001')
+      const text = (await frame(h, 50, { step: () => step })).text
+      expect(text.length).toBeLessThanOrEqual(AGENT_MESSAGE_LIMIT)
+      rows(text).forEach((row, i) => {
+        expect(row.startsWith(`${i + 1}. ⏳ ${step.slice(0, 30)}`)).toBe(true)
+        expect(row).toEndWith(' · 4m 31s · 85.4k tokens')
+      })
+      const many = harness('1001')
+      const hundred = (await frame(many, 100)).text
+      expect(hundred.length).toBeLessThanOrEqual(AGENT_MESSAGE_LIMIT)
+      expect(rows(hundred)).toHaveLength(100)
+      for (const row of rows(hundred)) expect(row).toMatch(/^\d+\. ⏳ (.* · )?💭 Th[^·]* · 4m 31s · 85\.4k tokens$/)
+    })
+
+    test('rich on, 100 longest Cyrillic rows shorten within 30,000 bytes and keep their clock and tokens', async () => {
+      const h = richHarness('1001')
+      const description = sized(80, 'Сравнить')
+      const step = sized(80, 'Проверка')
+      const text = (await frame(h, 100, { description: () => description, step: () => step, tokens: 999_900 })).text
+      expect(h.sent.at(-1)!.form).toBe('rich')
+      expect(utf8(text)).toBeLessThanOrEqual(RICH_PART_BYTES)
+      expect(utf8(text)).toBeGreaterThan(RICH_PART_BYTES - 200)
+      for (const row of rows(text)) expect(row).toEndWith(' · 4m 31s · 999.9k tokens')
+    })
+
+    // Each mark, and the parts of it a cut between its UTF-16 units, its code
+    // points or its ZWJ pieces would leave before the …
+    const MARKS = ['⚠️', '👩‍💻', '🇩🇪', '1️⃣']
+    const broken = (text: string) => MARKS.flatMap(mark => {
+      const parts: string[] = []
+      for (let n = 1; n < mark.length; n++) parts.push(mark.slice(0, n))
+      return parts.filter(part => text.includes(part + '…'))
+    })
+
+    test('a cut inside a description falls between graphemes: ⚠️, 👩‍💻, 🇩🇪 and 1️⃣ at the cut come out whole or not at all', async () => {
+      const h = harness('1001')
+      // Each mark sits in seven rows in a row, one unit further on in each,
+      // around where the share cuts the description.
+      const description = (i: number) => `${'a'.repeat(19 + (i % 7))}${MARKS[Math.floor(i / 7) % 4]}${'b'.repeat(30)}`
+      const text = (await frame(h, 60, { description, step: () => 'Run tests' })).text
+      expect(text.length).toBeLessThanOrEqual(AGENT_MESSAGE_LIMIT)
+      expect(broken(text)).toEqual([])
+      // Some rows were cut right after a whole mark, and some right before one.
+      expect(MARKS.every(mark => rows(text).some(row => row.includes(mark + '…')))).toBe(true)
+      expect(rows(text).filter(row => /a… · /.test(row)).length).toBeGreaterThan(0)
+    })
+
+    test('rich on, a description over 80 units with a mark across unit 80 keeps the mark whole or leaves it out', async () => {
+      const h = richHarness('1001')
+      const description = (i: number) => `${'a'.repeat(75 + (i % 5))}${MARKS[Math.floor(i / 5) % 4]}${'b'.repeat(10)}`
+      const text = (await frame(h, 20, { description, step: () => 'Run tests' })).text
+      expect(h.sent.at(-1)!.form).toBe('rich')
+      expect(broken(text)).toEqual([])
+      expect(text).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/)
+    })
+
+    const REFUSED = { error_code: 400, description: 'Bad Request: RICH_MESSAGE_INVALID' }
+    const refusedLine = (call: 'send' | 'edit') => `subagents message: rich ${call} refused, plain from the next slot: ${REFUSED.description}`
+
+    test('a refused rich edit takes its slot: the next slot edits a plain frame within 4,096 units, later frames stay plain, the next record has no rich frame, and the refusal is logged', async () => {
+      const h = richHarness('1001')
+      await frame(h, 45)
+      h.advance(CHAT_GAP_MS)
+      h.failEditWith(REFUSED)
+      await h.tick()
+      const refusedAt = h.now()
+      expect(h.attempts).toEqual([expect.objectContaining({ at: refusedAt, form: 'rich', error: REFUSED })])
+      expect(h.logs).toEqual([refusedLine('edit')])
+      h.failEditWith(undefined)
+      for (let i = 0; i < 3; i++) { h.advance(AGENT_TICK_MS); await h.tick() }
+      expect(h.attempts).toHaveLength(1)
+      h.advance(CHAT_GAP_MS - 3 * AGENT_TICK_MS)
+      await h.tick()
+      const plain = h.attempts.at(-1)!
+      expect(plain.at).toBe(refusedAt + CHAT_GAP_MS)
+      expect(plain.form).toBeUndefined()
+      expect(plain.text.length).toBeLessThanOrEqual(AGENT_MESSAGE_LIMIT)
+      expect(rows(plain.text)).toHaveLength(45)
+      for (const row of rows(plain.text)) expect(row).toEndWith(' · 85.4k tokens')
+      const record = h.records.at(-1)!
+      expect(record).toMatchObject({ at: plain.at, op: 'write' })
+      expect(record.rich).toBeUndefined()
+      expect(record.text!.length).toBeLessThanOrEqual(AGENT_MESSAGE_LIMIT)
+      for (let i = 0; i < 2; i++) { h.advance(CHAT_GAP_MS); await h.tick() }
+      expect(h.attempts.slice(1).map(a => a.form)).toEqual([undefined, undefined, undefined])
+      expect(h.records.filter(r => r.at > refusedAt).every(r => r.rich === undefined)).toBe(true)
+      expect(h.logs).toHaveLength(1)
+    })
+
+    test('a refused first rich send is logged, and the next slot sends the message plain', async () => {
+      const h = richHarness('1001')
+      await h.tick()
+      h.failSendWith(REFUSED)
+      begin(h, 2)
+      await h.tick()
+      const refusedAt = h.now()
+      expect(h.sendAttempts).toEqual([expect.objectContaining({ at: refusedAt, form: 'rich' })])
+      expect(h.logs).toEqual([refusedLine('send')])
+      h.failSendWith(undefined)
+      h.advance(CHAT_GAP_MS - AGENT_TICK_MS); await h.tick()
+      expect(h.sendAttempts).toHaveLength(1)
+      h.advance(AGENT_TICK_MS); await h.tick()
+      expect(h.sent).toEqual([expect.objectContaining({ chat: '1001', text: expect.stringMatching(/^🤖 Subagents\n1\. ⏳/) })])
+      expect(h.sent[0]!.form).toBeUndefined()
+      expect(h.records.at(-1)!.rich).toBeUndefined()
+    })
+
+    test('a rich message deleted is replaced by a rich message, and so is one gone plain', async () => {
+      const gone = richHarness('1001')
+      await frame(gone, 2)
+      gone.failEditWith({ error_code: 400, description: 'Bad Request: message to edit not found' })
+      gone.advance(CHAT_GAP_MS); await gone.tick()
+      expect(gone.attempts.at(-1)!.form).toBe('rich')
+      gone.failEditWith(undefined)
+      gone.advance(CHAT_GAP_MS); await gone.tick()
+      expect(gone.sent.map(s => s.form)).toEqual(['rich', 'rich'])
+      expect(gone.logs).toEqual([])
+      const h = richHarness('1001')
+      await frame(h, 2)
+      h.advance(CHAT_GAP_MS)
+      h.failEditWith(REFUSED)
+      await h.tick()
+      h.failEditWith({ error_code: 400, description: 'Bad Request: message to edit not found' })
+      h.advance(CHAT_GAP_MS); await h.tick()
+      expect(h.attempts.at(-1)!.form).toBeUndefined()
+      h.failEditWith(undefined)
+      h.advance(CHAT_GAP_MS); await h.tick()
+      expect(h.sent).toHaveLength(2)
+      expect(h.sent[1]!.form).toBe('rich')
+      expect(h.records.at(-1)).toMatchObject({ op: 'write', id: 8 })
+      expect(h.records.at(-1)!.rich).toBeDefined()
+      expect(h.logs).toEqual([refusedLine('edit')])
+    })
+
+    test('a 429 and a 502 keep the message rich', async () => {
+      for (const error of [
+        { error_code: 429, description: 'Too Many Requests: retry after 5', parameters: { retry_after: 5 } },
+        { error_code: 502, description: 'Bad Gateway' },
+      ]) {
+        const h = richHarness('1001')
+        await frame(h, 2)
+        h.advance(CHAT_GAP_MS)
+        h.failEditWith(error)
+        await h.tick()
+        h.failEditWith(undefined)
+        for (let i = 0; i < 2; i++) { h.advance(CHAT_GAP_MS); await h.tick() }
+        expect(h.attempts.length).toBeGreaterThanOrEqual(2)
+        expect(h.attempts.every(a => a.form === 'rich')).toBe(true)
+        expect(h.records.every(r => r.op === 'remove' || r.rich !== undefined)).toBe(true)
+        expect(h.logs).toEqual([])
+      }
+    })
+
+    test('a late edit refused as rich goes plain at the next slot, with no further rich call and no failure counted', async () => {
+      const h = richHarness('1001')
+      await h.tick()
+      h.events.push(start(h, 'a1'))
+      h.write('/s/agent-a1.jsonl', line(userText('u-a1', h.now(), 'Job')))
+      await h.tick()
+      h.advance(CHAT_GAP_MS)
+      h.write('/s/agent-a1.jsonl', line(userText('u-a1', h.now() - CHAT_GAP_MS, 'Job')) + line(apiError('e-a1', h.now(), 'overloaded')))
+      await h.tick()
+      // The next tick confirms the failure and ends the group.
+      h.advance(CHAT_GAP_MS); await h.tick()
+      const shown = h.attempts.length
+      h.failEditWith(REFUSED)
+      h.advance(CHAT_GAP_MS)
+      h.events.push({ t: h.now(), event: 'stop', agent_id: 'a1' })
+      await h.tick()
+      const refusedAt = h.now()
+      expect(h.logs).toEqual([refusedLine('edit')])
+      // Four more answers that each count as a failure, then one accepted.
+      h.failEditWith({ error_code: 502, description: 'Bad Gateway' })
+      for (let i = 0; i < 4; i++) { h.advance(CHAT_GAP_MS); await h.tick() }
+      h.failEditWith(undefined)
+      h.advance(CHAT_GAP_MS); await h.tick()
+      const late = h.attempts.slice(shown)
+      expect(late.map(a => a.at - refusedAt)).toEqual([0, 1, 2, 3, 4, 5].map(n => n * CHAT_GAP_MS))
+      expect(late.map(a => a.form)).toEqual(['rich', undefined, undefined, undefined, undefined, undefined])
+      expect(late.at(-1)!.error).toBeUndefined()
+      expect(late.at(-1)!.text).toBe('🤖 Subagents\n1. ✅ Done in 36s · general-purpose')
+    })
+
+    test('the shutdown edit of a rich message is rich, its rows whole, and its record keeps them; a refused one leaves a record without a rich frame and is logged', async () => {
+      for (const refused of [false, true]) {
+        const h = richHarness('1001')
+        await frame(h, 45)
+        h.advance(CHAT_GAP_MS + 2000)
+        if (refused) h.failEditWith(REFUSED)
+        const before = h.records.length
+        await h.stream.close(h.now() + CHAT_GAP_MS)
+        const closing = h.attempts.at(-1)!
+        expect(closing.form).toBe('rich')
+        expect(rows(closing.text)).toEqual(Array.from({ length: 45 }, (_, i) => closingRow(i + 1, '4m 45s')))
+        const written = h.records.slice(before)
+        expect(rows(written[0]!.rich!)).toEqual(rows(closing.text))
+        expect(written[0]!.text!.length).toBeLessThanOrEqual(AGENT_MESSAGE_LIMIT)
+        if (!refused) {
+          expect(written.slice(1).map(r => r.op)).toEqual(['remove'])
+          expect(h.logs).toEqual([])
+        } else {
+          expect(written.slice(1)).toEqual([{ at: h.now(), op: 'write', chat: '1001', id: 7, text: written[0]!.text }])
+          expect(h.logs).toEqual([refusedLine('edit')])
+        }
+      }
+    })
+
+    test('rich off, no send or edit is rich', async () => {
+      const h = harness('1001')
+      await frame(h, 45)
+      for (let i = 0; i < 2; i++) { h.advance(CHAT_GAP_MS); await h.tick() }
+      await h.stream.close(h.now() + CHAT_GAP_MS)
+      expect(h.calls.length).toBeGreaterThan(2)
+      expect(h.calls.every(c => c.form === undefined)).toBe(true)
+      expect(h.records.every(r => r.rich === undefined)).toBe(true)
+    })
+
+    test('agents.ts imports only Node built-ins, so the hook loads it before bun install', () => {
+      const source = readFileSync(join(import.meta.dir, 'agents.ts'), 'utf8')
+      const imported = [...source.matchAll(/^import\b[^'"]*['"]([^'"]+)['"]/gm)].map(m => m[1]!)
+      expect(imported.length).toBeGreaterThan(0)
+      for (const name of imported) expect(builtinModules.includes(name.replace(/^node:/, ''))).toBe(true)
     })
   })
 })
