@@ -584,11 +584,14 @@ its way, so the server takes up to 14 seconds to exit.
 A server can die before that edit goes out: killed, or with the edit refused,
 lost or out of time. So each open message keeps a record under `panels/` in
 the state directory, holding the text it should read once its server is gone,
+and, while the message is a rich message, the same rows whole as rich text,
 rewritten before each edit; and each server holds a lock file there for as long
 as it lives, which the system releases however it dies. The server that polls
 the bot checks those locks on each tick, edits each message of a server that is
-gone to its stored text at the chat's next slot, and deletes its records, then
-its lock file. A message whose server was killed is closed that way once the
+gone to its stored text at the chat's next slot, as a rich message when the
+record holds rich text, and deletes its records, then its lock file. A record
+whose rich edit Telegram refuses keeps only its plain text, which the next slot
+edits in. A message whose server was killed is closed that way once the
 next server polls the bot. After a plugin reload, the new server shows the rows
 still running in a new message once a chat writes to the bot, for subagents
 started in the last 30 minutes.
@@ -620,8 +623,20 @@ Telegram held two installations' chats for hours. A new step or token count
 shows at the next of those slots. The clocks move at least every 12 seconds
 while nothing else changes, and a rate limit on any of the plugin's calls in
 the chat holds it for as long as Telegram asks
-([flood control](#flood-control)). Long rows shorten to
-fit Telegram's message limit; a group too large for shortened rows shows a
+([flood control](#flood-control)). With [rich messages](#rich-messages) on,
+the message goes as one rich message, one plain paragraph holding every line,
+which keeps every row whole up to the cap of 100 rows for rows in English.
+Rows shorten only past its size, about 30,000 bytes, or in the plain message
+used with rich messages off, which holds 4,096 characters. There the room goes
+to the rows that need it: each row gets its whole line or an equal share of the
+room the shorter rows leave, whichever is less. A row that still shortens loses
+its type first, then its description, in part or whole, then its step, in part
+or whole, and never its status, clock or tokens while those fit. A message Telegram
+refuses as a rich message goes plain from the chat's next slot and stays plain,
+and the server log says so; a later message starts rich again. When what
+Telegram answers a rich send or edit with differs from what was sent, as when it
+cuts a long rich text without an error, or carries no rich text to compare, the
+server log says so once for that message. A group of more than 100 rows shows a
 count of the additional agents, prioritizing new rows and unreported endings
 over finished history. An explicit interruption in the subagent's transcript
 also ends its row on the next stream tick, even when no stop
@@ -638,6 +653,9 @@ silence for as long as it runs, and its output file records every ending.
 With `TELEGRAM_RICH_MESSAGES=true`, replies and edits render as Telegram rich
 messages: Claude writes GitHub Markdown and Telegram shows native headings,
 tables, task lists, quotes, code blocks and collapsible `<details>` sections.
+The [subagents message](#subagents-and-shells) goes as a rich message too, of
+one plain paragraph that parses no Markdown, so its rows show as written and
+whole.
 The server parses the Markdown as Telegram reads it, Markdown inside `<details>`
 included, and sends it through `sendRichMessage` and `editMessageText`. A `$` in
 text goes out escaped, so `$HOME/$USER` stays text rather than a formula, while

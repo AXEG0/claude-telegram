@@ -14,7 +14,7 @@ import { toolCall } from './fixtures/transcript.ts'
 beforeEach(driveClock)
 afterEach(cleanup)
 
-type Stored = { file: string; chat: string; message: number; text: string; writer: string }
+type Stored = { file: string; chat: string; message: number; text: string; rich?: string; writer: string }
 const panelsDir = (dir: string) => join(dir, 'panels')
 const records = (dir: string): Stored[] => {
   let names: string[] = []
@@ -29,10 +29,10 @@ const edits = (dir: string, message: number) => calls(dir).filter(c => c.method 
 
 // A record a test writes for a writer of its own.
 const W = (n: number) => `${'ab'.repeat(7)}${String(n).padStart(2, '0')}`
-function plant(dir: string, writer: string, message: number, text: string, opts: { lock?: boolean } = {}): string {
+function plant(dir: string, writer: string, message: number, text: string, opts: { lock?: boolean; rich?: string } = {}): string {
   mkdirSync(panelsDir(dir), { recursive: true })
   const file = join(panelsDir(dir), `1-${message}.json`)
-  writeFileSync(file, JSON.stringify({ chat: '1', message, text, writer }))
+  writeFileSync(file, JSON.stringify({ chat: '1', message, text, ...(opts.rich !== undefined ? { rich: opts.rich } : {}), writer }))
   if (opts.lock) writeFileSync(lockFile(dir, writer), '')
   return file
 }
@@ -296,6 +296,28 @@ describe.skipIf(process.platform !== 'linux')('the polling server\'s sweep', () 
     expect(chat.length).toBeGreaterThan(2)
     const gaps = chat.slice(1).map((c, i) => c.at - chat[i]!.at)
     expect(Math.min(...gaps)).toBeGreaterThanOrEqual(CHAT_GAP_MS - 50)
+  }, 30000)
+
+  test('with rich messages on, a record with a rich frame is swept as a rich message; refused, it is rewritten without it under its own writer, and the next swept edit is its plain text', async () => {
+    const dir = state()
+    const rich = '🤖 Subagents\n1. 🔌 No longer followed after 4m 31s · general-purpose · Review the retry notes · last: Run tests · 85.4k tokens'
+    const text = '🤖 Subagents\n1. 🔌 No longer followed after 4m 31s · Review the retry… · last: Run tests · 85.4k tokens'
+    const file = plant(dir, W(9), 801, text, { lock: true, rich })
+    await nextServer(dir, { TELEGRAM_RICH_MESSAGES: 'true',
+      ...conflicts([{ method: 'editMessageText', has: '"message_id":801', times: 1, error: { error_code: 400, description: 'Bad Request: RICH_MESSAGE_INVALID' } }]) })
+    await until(() => edits(dir, 801).length === 1, WAIT_MS)
+    const first = edits(dir, 801)[0]!
+    expect(first.refused).toBe('Bad Request: RICH_MESSAGE_INVALID')
+    expect(first.payload.text).toBeUndefined()
+    expect(first.payload.rich_message.blocks).toEqual([{ type: 'paragraph', text: rich }])
+    await until(() => existsSync(file) && JSON.parse(readFileSync(file, 'utf8')).rich === undefined, WAIT_MS)
+    expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ chat: '1', message: 801, text, writer: W(9) })
+    await until(() => edits(dir, 801).length === 2, WAIT_MS)
+    const second = edits(dir, 801)[1]!
+    expect(second.payload.text).toBe(text)
+    expect(second.payload.rich_message).toBeUndefined()
+    expect(second.at - first.at).toBeGreaterThanOrEqual(CHAT_GAP_MS - 50)
+    await until(() => !existsSync(file) && !existsSync(lockFile(dir, W(9))), WAIT_MS)
   }, 30000)
 
   test('a waiter blocked on a dead writer\'s lock, granted once the sweep closed the last record, finds the lock file deleted', async () => {
