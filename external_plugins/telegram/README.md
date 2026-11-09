@@ -630,8 +630,8 @@ Rows shorten only past its size, about 30,000 bytes, or in the plain message
 used with rich messages off, which holds 4,096 characters. There the room goes
 to the rows that need it: each row gets its whole line or an equal share of the
 room the shorter rows leave, whichever is less. A row that still shortens loses
-its type first, then its description, in part or whole, then part of its step,
-and never its status, clock or tokens while those fit. A message Telegram
+its type first, then its description, in part or whole, then its step, in part
+or whole, and never its status, clock or tokens while those fit. A message Telegram
 refuses as a rich message goes plain from the chat's next slot and stays plain,
 and the server log says so; a later message starts rich again. When what
 Telegram answers a rich send or edit with differs from what was sent, as when it

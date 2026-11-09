@@ -604,9 +604,9 @@ export function render(a: Agent, now: number, closedAt?: number): string {
 }
 
 // A row within its share: whole if it fits; else it gives up its type, then
-// its description, in part or whole, then part of its step, each … inside the
-// part it shortens. Its status, clock and token count go only when they alone
-// pass the share; then the row's end goes.
+// its description, in part or whole, then its step, in part or whole, each …
+// inside the part it shortens. Its status, clock and token count go only when
+// they alone pass the share; then the row's end goes.
 function fit(lead: string, r: Row, share: number, measure: Measure): string {
   const whole = lead + rowLine(r, true, r.description, r.step)
   if (measure(whole) <= share) return whole
@@ -619,11 +619,15 @@ function fit(lead: string, r: Row, share: number, measure: Measure): string {
     const description = cut(r.description, share - beside('x', r.step), measure)
     if (description !== undefined) return lead + rowLine(r, false, description, r.step)
   }
+  const bare = lead + rowLine(r, false, undefined, r.step)
+  if (measure(bare) <= share) return bare
   if (r.step !== undefined) {
     const step = cut(r.step, share - beside(undefined, 'x'), measure)
     if (step !== undefined) return lead + rowLine(r, false, undefined, step)
   }
-  return cut(lead + rowLine(r, false, undefined, r.step), share, measure) ?? ''
+  const stepless = lead + rowLine(r, false, undefined, undefined)
+  if (measure(stepless) <= share) return stepless
+  return cut(stepless, share, measure) ?? ''
 }
 
 // What the message says apart from its clock.

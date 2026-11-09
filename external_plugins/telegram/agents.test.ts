@@ -2575,6 +2575,45 @@ describe('createAgentStream', () => {
       expect(h.records.every(r => r.rich === undefined)).toBe(true)
     })
 
+    test('rich off, 93 running subagents at 💭 Thinking… keep their whole step with no … added, each row ending with its clock and tokens', async () => {
+      // 93 running at 💭 Thinking…, rich off: each row's share is a unit or two
+      // past its line with no type or description.
+      const h = harness('1001')
+      const text = (await frame(h, 93)).text
+      expect(text.length).toBeLessThanOrEqual(AGENT_MESSAGE_LIMIT)
+      for (const row of rows(text)) {
+        expect(row).not.toContain('……')
+        expect(row).toEndWith(' · 4m 31s · 85.4k tokens')
+      }
+    })
+
+    test('rich off, 80 running subagents quiet for 31 minutes lose their step and keep their status and token count, which fit their share', async () => {
+      // 80 running rows gone quiet, rich off: each row's status and token count
+      // fit its share, while its status, `last: 💭…` and tokens do not.
+      const q = harness('1001')
+      await q.tick()
+      begin(q, 80)
+      await q.tick()
+      q.advance(31 * 60_000)
+      await q.tick()
+      const quiet = q.edits.at(-1)!.text
+      expect(rows(quiet)).toHaveLength(80)
+      for (const row of rows(quiet)) {
+        expect(row).toMatch(/^\d+\. ⚠️ No activity for 31m 0s/)
+        expect(row).toEndWith(' · 85.4k tokens')
+      }
+    })
+
+    test('rich on, the plain closing frame of 70 running subagents keeps the token count of each row', async () => {
+      // The plain closing frame of 70 running rows, rich on: each closing row's
+      // status and tokens fit its share.
+      const c = richHarness('1001')
+      await frame(c, 70)
+      const closing = c.records.at(-1)!.text!
+      expect(rows(closing)).toHaveLength(70)
+      for (const row of rows(closing)) expect(row).toEndWith(' · 85.4k tokens')
+    })
+
     test('agents.ts imports only Node built-ins, so the hook loads it before bun install', () => {
       const source = readFileSync(join(import.meta.dir, 'agents.ts'), 'utf8')
       const imported = [...source.matchAll(/^import\b[^'"]*['"]([^'"]+)['"]/gm)].map(m => m[1]!)
