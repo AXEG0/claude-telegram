@@ -2614,6 +2614,28 @@ describe('createAgentStream', () => {
       for (const row of rows(closing)) expect(row).toEndWith(' · 85.4k tokens')
     })
 
+    test('rich off, 95 running subagents at a tool step keep their whole step where their share is exactly their line without its type and description', async () => {
+      // 95 running at a 12-character tool step, rich off: the share of row 1
+      // and rows 10 to 95 is exactly their line with no type or description,
+      // and the share of rows 2 to 9 one unit more.
+      const h = harness('1001')
+      const text = (await frame(h, 95, { step: () => 'Run the test' })).text
+      expect(rows(text)).toEqual(Array.from({ length: 95 }, (_, i) => `${i + 1}. ⏳ Run the test · 4m 31s · 85.4k tokens`))
+    })
+
+    test('rich off, 90 running subagents quiet for 31 minutes keep their status and token count whole where their share is exactly that length', async () => {
+      // 90 running rows gone quiet, rich off: the share of rows 10 to 56 is
+      // exactly their status and token count, and the share of the rest one
+      // unit more.
+      const q = harness('1001')
+      await q.tick()
+      begin(q, 90)
+      await q.tick()
+      q.advance(31 * 60_000)
+      await q.tick()
+      expect(rows(q.edits.at(-1)!.text)).toEqual(Array.from({ length: 90 }, (_, i) => `${i + 1}. ⚠️ No activity for 31m 0s · 85.4k tokens`))
+    })
+
     test('agents.ts imports only Node built-ins, so the hook loads it before bun install', () => {
       const source = readFileSync(join(import.meta.dir, 'agents.ts'), 'utf8')
       const imported = [...source.matchAll(/^import\b[^'"]*['"]([^'"]+)['"]/gm)].map(m => m[1]!)
