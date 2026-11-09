@@ -209,6 +209,29 @@ describe.skipIf(process.platform !== 'linux')('the subagents message in the runn
     expect(calls(dir).some(c => c.method === 'sendMessage' && c.payload.text?.startsWith('🤖'))).toBe(false)
   }, 20000)
 
+  test('with rich messages on, 45 running subagents whose rows pass 4,096 bytes show every row whole in the one rich paragraph', async () => {
+    const dir = state()
+    ownerWrites(dir, 'rich rows test')
+    const channel = start(dir, fixture.argv, RICH_ON)
+    await channel.ready()
+    const file = agentEventFile(dir, channel.child.pid!)
+    const base = join(dir, 'transcripts')
+    mkdirSync(base)
+    const description = 'Apply the two approved rule changes to the prompt files of each agent'
+    for (let i = 0; i < 45; i++) writeFileSync(join(base, `agent-w${i}.meta.json`), JSON.stringify({ description }))
+    for (let i = 0; i < 45; i++) {
+      appendAgentEvent(file, { t: Date.now(), event: 'start', agent_id: `w${i}`, agent_type: 'general-purpose', agent_base: join(base, `agent-w${i}`) })
+    }
+    const all = (c: Call) => isPanel(c) && textOf(c)!.split('\n').length === 46
+    await until(() => calls(dir).some(all), AGENT_TICK_MS + CHAT_GAP_MS + 4000)
+    const call = calls(dir).find(all)!
+    expect(call.method === 'sendRichMessage' || call.method === 'editMessageText').toBe(true)
+    expect(blocksOf(call)).toHaveLength(1)
+    expect(Buffer.byteLength(textOf(call)!)).toBeGreaterThan(4096)
+    for (const row of textOf(call)!.split('\n').slice(1)) expect(row).toMatch(new RegExp(`^\\d+\\. ⏳ general-purpose · ${description} · Starting… · \\d+s$`))
+    await channel.close()
+  }, 20000)
+
   test('with rich messages off, the message goes only as plain text', async () => {
     const dir = state()
     const { channel, file, panels } = await running(dir, {})

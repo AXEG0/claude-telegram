@@ -2576,6 +2576,29 @@ describe('createAgentStream', () => {
       for (const r of written) expect(r.rich).toBe('🤖 Subagents\n1. ✅ Done in 36s · general-purpose')
     })
 
+    test('a late stop of a rich message whose rows pass 4,096 units edits it as a rich message with every row whole', async () => {
+      const h = richHarness('1001')
+      await h.tick()
+      begin(h, 45)
+      await h.tick()
+      h.advance(CHAT_GAP_MS)
+      const call = assistant([{ type: 'tool_use', name: 'Bash', input: { description: 'Run tests' } }], { input_tokens: 85_400 })
+      for (let i = 0; i < 45; i++) h.write(`/s/agent-w${i}.jsonl`, [call, TOOL_RESULT].join('\n') + '\n' + line(apiError(`e-w${i}`, h.now(), 'overloaded')))
+      await h.tick()
+      // The next tick confirms the failures and ends the group.
+      h.advance(CHAT_GAP_MS); await h.tick()
+      const shown = h.attempts.length
+      h.advance(CHAT_GAP_MS)
+      h.events.push({ t: h.now(), event: 'stop', agent_id: 'w0' })
+      await h.tick()
+      const late = h.attempts.slice(shown)
+      expect(late.map(a => a.form)).toEqual(['rich'])
+      expect(late[0]!.text.length).toBeGreaterThan(AGENT_MESSAGE_LIMIT)
+      expect(rows(late[0]!.text)).toHaveLength(45)
+      expect(rows(late[0]!.text)[0]).toMatch(/^1\. ✅ Done in /)
+      for (const row of rows(late[0]!.text)) expect(row.endsWith(` · general-purpose · ${DESCRIPTION} · 85.4k tokens`)).toBe(true)
+    })
+
     test('a rich message gone after five failed edits leaves a record that keeps its rich frame, whether its rows end after it went or as it goes', async () => {
       // The rows end after the message went: the group's last flush writes the record.
       const after = richHarness('1001')
