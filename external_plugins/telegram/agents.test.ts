@@ -2673,6 +2673,16 @@ describe('createAgentStream', () => {
       expect(rows(sent.text)).toEqual([...Array.from({ length: 100 }, (_, i) => thinkingRow(i + 1)), '… 2 more agents'])
     })
 
+    test('rich off, 102 running subagents show the first 100 rows and a count of 2 more within 4,096 units, each row ending with its clock and tokens', async () => {
+      const h = harness('1001')
+      const sent = await frame(h, 102)
+      expect(sent.form).not.toBe('rich')
+      expect(sent.text.length).toBeLessThanOrEqual(AGENT_MESSAGE_LIMIT)
+      expect(rows(sent.text)).toHaveLength(101)
+      expect(rows(sent.text).at(-1)).toBe('… 2 more agents')
+      for (const row of rows(sent.text).slice(0, 100)) expect(row).toMatch(/ · 4m 31s · 85\.4k tokens$/)
+    })
+
     test('rich off, no send or edit is rich', async () => {
       const h = harness('1001')
       await frame(h, 45)
