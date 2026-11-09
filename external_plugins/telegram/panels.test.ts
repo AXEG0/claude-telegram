@@ -137,6 +137,18 @@ describe.skipIf(process.platform !== 'linux')('the panel records', () => {
     expect(readdirSync(dir)).toEqual([])
   })
 
+  test('a plain record whose edit Telegram refuses with a 400 is dropped, never rewritten', async () => {
+    const dir = folder()
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, '1-7.json'), JSON.stringify({ chat: '1', message: 7, text: 't7', writer: writerA }))
+    writeFileSync(join(dir, `${writerA}.lock`), '')
+    const { s, made } = slots(async () => { throw { error_code: 400, description: 'Bad Request: chat not found' } })
+    const store = createPanelStore({ dir, writer: writerB })
+    for (let i = 0; i < 2; i++) { store.sweep(s); await settle() }
+    expect(made).toEqual([{ chat: '1', message: 7, text: 't7' }])
+    expect(readdirSync(dir)).toEqual([])
+  })
+
   test('a record with a rich frame is swept as a rich message, and one without as plain text', async () => {
     const dir = folder()
     mkdirSync(dir, { recursive: true })

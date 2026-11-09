@@ -2492,6 +2492,18 @@ describe('createAgentStream', () => {
       expect(h.logs).toEqual([refusedLine('edit')])
     })
 
+    test('a message gone plain counts each 400 Telegram answers its plain edits with as a failure, and stops after five, as a plain message does', async () => {
+      const h = richHarness('1001')
+      await frame(h, 2)
+      h.advance(CHAT_GAP_MS)
+      h.failEditWith(REFUSED)
+      await h.tick()
+      h.failEditWith({ error_code: 400, description: 'Bad Request: chat not found' })
+      for (let i = 0; i < 8; i++) { h.advance(CHAT_GAP_MS); await h.tick() }
+      expect(h.attempts.map(a => a.form ?? 'plain')).toEqual(['rich', 'plain', 'plain', 'plain', 'plain', 'plain'])
+      expect(h.logs).toEqual([refusedLine('edit')])
+    })
+
     test('a 429 and a 502 keep the message rich', async () => {
       for (const error of [
         { error_code: 429, description: 'Too Many Requests: retry after 5', parameters: { retry_after: 5 } },
@@ -2563,6 +2575,27 @@ describe('createAgentStream', () => {
           expect(h.logs).toEqual([refusedLine('edit')])
         }
       }
+    })
+
+    test('a shutdown edit of a rich message answered not found is no refusal: it writes no line and leaves the record with its rich frame', async () => {
+      const h = richHarness('1001')
+      await frame(h, 2)
+      h.advance(CHAT_GAP_MS + 2000)
+      h.failEditWith({ error_code: 400, description: 'Bad Request: message to edit not found' })
+      const before = h.records.length
+      await h.stream.close(h.now() + CHAT_GAP_MS)
+      expect(h.attempts.at(-1)!.form).toBe('rich')
+      const written = h.records.slice(before)
+      expect(written.map(r => r.op)).toEqual(['write'])
+      expect(written[0]!.rich).toBeDefined()
+      expect(h.logs).toEqual([])
+    })
+
+    test('rich on, 102 running subagents show the first 100 rows whole and a count of 2 more, as the plain message does', async () => {
+      const h = richHarness('1001')
+      const sent = await frame(h, 102)
+      expect(sent.form).toBe('rich')
+      expect(rows(sent.text)).toEqual([...Array.from({ length: 100 }, (_, i) => thinkingRow(i + 1)), '… 2 more agents'])
     })
 
     test('rich off, no send or edit is rich', async () => {
