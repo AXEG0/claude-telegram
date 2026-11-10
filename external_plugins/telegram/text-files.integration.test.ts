@@ -8,6 +8,9 @@ import { calls, cleanup, driveClock, start, state, until, type Call, type Server
 import { COPIES_MAX } from './log.ts'
 import { TEXT_FILES_MAX } from './textfiles.ts'
 
+// The plugin's version, which every line of a copy carries.
+const VERSION = JSON.parse(readFileSync(join(import.meta.dir, '.claude-plugin', 'plugin.json'), 'utf8')).version
+
 // Folders of text files outside any state folder, removed after each test.
 const folders: string[] = []
 afterEach(async () => {
@@ -175,7 +178,9 @@ describe.skipIf(process.platform !== 'linux')('text_files: a message read from f
       for (const [name, typedArgs, filedArgs] of steps) {
         const t = await tool(typed.srv, name, typedArgs)
         const from = calls(filed.dir).length
+        const asked = Date.now()
         const f = await tool(filed.srv, name, filedArgs)
+        const answered = Date.now()
         expect(made(filed.dir)).toEqual(made(typed.dir))
         expect(f.isError).toBe(t.isError)
         const sent = wire(calls(filed.dir).slice(from))
@@ -189,7 +194,7 @@ describe.skipIf(process.platform !== 'linux')('text_files: a message read from f
         expect(answer).toBe(t.content[0].text)
         expect(worded(copy)).toEqual(sent)
         saved.push(...worded(copy))
-        expect(lines(copy).every(l => l.tool === name && l.chat === (filedArgs as any).chat_id && typeof l.version === 'string')).toBe(true)
+        expect(lines(copy).every(l => l.tool === name && l.chat === (filedArgs as any).chat_id && l.version === VERSION && l.pid === filed.srv.serverPid() && Date.parse(l.at) >= asked && Date.parse(l.at) <= answered)).toBe(true)
         expect(statSync(copy).mode & 0o777).toBe(0o600)
         expect(statSync(join(filed.dir, 'logs')).mode & 0o777).toBe(0o700)
       }

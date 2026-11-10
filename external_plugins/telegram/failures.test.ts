@@ -122,6 +122,16 @@ describe('the turn-end hook\'s records', () => {
     expect(readdirSync(join(dir, 'outcomes'))).toEqual([])
   })
 
+  test('the hook deletes a week-old saved copy of the words sent and keeps a fresh one', () => {
+    const dir = scratch()
+    mkdirSync(join(dir, 'logs'))
+    for (const name of ['text-20261101T000000000Z-7-1.jsonl', 'text-20261110T000000000Z-8-1.jsonl']) writeFileSync(join(dir, 'logs', name), '{}\n')
+    const old = (Date.now() - 8 * 24 * 60 * 60 * 1000) / 1000
+    utimesSync(join(dir, 'logs', 'text-20261101T000000000Z-7-1.jsonl'), old, old)
+    expect(runHook({ session_id: 'sess-1', hook_event_name: 'SessionEnd' }, { TELEGRAM_STATE_DIR: dir, CLAUDE_PID: '4242' }).exitCode).toBe(0)
+    expect(readdirSync(join(dir, 'logs'))).toEqual(['text-20261110T000000000Z-8-1.jsonl'])
+  })
+
   test('the reader returns each record once, in time order across files, skipping a malformed line and a line not yet ended', () => {
     const dir = scratch()
     const [a, b] = failureFiles(dir, [7, 8])
