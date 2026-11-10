@@ -22,13 +22,13 @@ import { randomBytes } from 'crypto'
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync } from 'fs'
 import { homedir } from 'os'
 import { execFileSync } from 'child_process'
-import { basename, join, extname, sep } from 'path'
+import { basename, join, extname } from 'path'
 import { ancestorPids, busyFiles, createTyping, markerFiles, readBusyAt, readTurnEnd, REFRESH_MS, subagentFiles } from './typing.ts'
 import { fetchPhoto, STT_KINDS, sttConfig, transcribeTelegramFile, type FileWork } from './stt.ts'
 import { createArrivals, type DoneSeed, type StartLine } from './arrivals.ts'
 import { AGENT_TICK_MS, agentEventFile, CHAT_GAP_MS, CLOSING_EDIT_MS, createAgentStream, createEventReader } from './agents.ts'
 import { createPanelStore } from './panels.ts'
-import { logCall, setupLog } from './log.ts'
+import { createCopy, logCall, setupLog, type Copy, type CopyLine } from './log.ts'
 import { editRichParsed, formatOf, formatSchema, paragraphsText, plainFallback, RICH_INSTRUCTIONS, RICH_PART_BYTES, richEditParse, richEnabled, sendRich, type RawApi } from './rich.ts'
 import { metaText, replyMeta, richText } from './reply.ts'
 import { heartbeatTransformer } from './heartbeat.ts'
@@ -40,6 +40,7 @@ import { createTextMemory, editEvent } from './edit.ts'
 import { opening, reactionEvent } from './reaction.ts'
 import { channelMode, UPDATE_KINDS } from './polling.ts'
 import { alertConfig, createIdleAlarm, idleText, NO_OWNER, RECOVERED_TEXT, stuckText } from './alerts.ts'
+import { channelState, filesLine, readTextFiles, stateRefusal, textArgument, TEXT_FILES_MAX, type FileText } from './textfiles.ts'
 import { BOT_CAPTION_MAX, botReply, captionLength, CHAT_ID, createBotLookup, createConfirm, createPeers, listed, noticeChat, plainObject, sendStyle, telegramTrim } from './bots.ts'
 import { cleanFiles, createFailureWatch, failureFiles, HOLD_MS } from './failures.ts'
 import { askOwner, NO_ASKS, ownerAnswers } from './asks.ts'
@@ -452,10 +453,8 @@ function assertSendable(f: string): void {
     real = realpathSync(f)
     stateReal = realpathSync(STATE_DIR)
   } catch { return } // statSync will fail properly; or STATE_DIR absent → nothing to leak
-  const inbox = join(stateReal, 'inbox')
-  if (real.startsWith(stateReal + sep) && !real.startsWith(inbox + sep)) {
-    throw new Error(`refusing to send channel state: ${f}`)
-  }
+  // The rule text_files applies too. See textfiles.ts.
+  if (channelState(real, stateReal)) throw new Error(stateRefusal(f))
 }
 
 function readAccessFile(): Access {
@@ -746,6 +745,8 @@ const mcp = new Server(
     instructions: [
       'The sender reads Telegram, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat.',
       '',
+      'A message already written to a Markdown file goes by the text_files argument of reply and edit_message, never typed again.',
+      '',
       'Messages from Telegram arrive as <channel source="plugin:telegram:telegram" chat_id="..." message_id="..." user="..." ts="...">. If the tag has an image_path attribute, Read that file — it is a photo the sender attached; a burst arrives as one message, all photos in image_paths, all ids in message_ids. If the tag has attachment_file_id, call download_attachment with that file_id, then Read the returned path. With edited="true", the sender edited message message_id: the content is its new text or caption, replacing the old. With reaction="…", the sender reacted with that emoji to message message_id: a reaction, not typed text. With button="…", the sender pressed that button under message message_id: a press, not typed text. Reply with the reply tool — pass chat_id back. Pass reply_to (a message_id) only to answer an earlier message; omit it for the latest.',
       '',
       "Telegram's Bot API exposes no history or search — you only see messages as they arrive. If you need earlier context, ask the user to paste it or summarize.",
@@ -762,6 +763,13 @@ const BUTTONS_HELP =
   'Answer buttons under the last message sent, a text part or a file: 1 to 4 rows of 1 to 4 labels, each 1 to 40 characters, distinct, ' +
   'with single spaces between words and none of " < > [ ] ;. A press arrives once, as an event with button="<label>", and the buttons then show the choice. ' +
   'Not in a bot\'s chat, and only in the session that receives Telegram messages.'
+
+// The text_files argument of reply and edit_message. See textfiles.ts.
+const TEXT_FILES_SCHEMA = {
+  type: 'array',
+  items: { type: 'string' },
+  description: `Absolute paths of UTF-8 text files, such as Markdown you wrote, whose text is the message, in place of text: joined in order with a blank line between files, and sent as typed text is, never as a document. Up to ${TEXT_FILES_MAX / 1024} KiB in all. The answer names a saved copy of the words sent.`,
+}
 
 // Stores full permission details for "See more" expansion keyed by request_id.
 const pendingPermissions = new Map<string, { tool_name: string; description: string; input_preview: string }>()
@@ -803,12 +811,13 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'reply',
       description:
-        'Reply on Telegram. Pass chat_id from the inbound message, or the numeric id of an allowlisted chat that has written to this bot, or of a bot the owner added with its username; chat ids are numeric, and only the owner adds another bot, in the terminal, with /telegram:access bot <id> @username. A message to a bot goes to its @username as plain text, whatever the format, and the reply stops at a message Telegram says went to another chat. Optionally pass reply_to (message_id) for threading, files (absolute paths) to attach images or documents, and buttons for fixed answers the user taps. With files, the answer also says what each message holds: text, a file, or a file with a text caption.',
+        'Reply on Telegram. A message already in a file goes by text_files instead of text, never typed again: a copy already in one file is a list of that one file; for copies that differ and are not files yet, write each section once as its own file and list, for each chat, the sections it gets. Pass chat_id from the inbound message, or the numeric id of an allowlisted chat that has written to this bot, or of a bot the owner added with its username; chat ids are numeric, and only the owner adds another bot, in the terminal, with /telegram:access bot <id> @username. A message to a bot goes to its @username as plain text, whatever the format, and the reply stops at a message Telegram says went to another chat. Optionally pass reply_to (message_id) for threading, files (absolute paths) to attach images or documents, and buttons for fixed answers the user taps. With files, the answer also says what each message holds: text, a file, or a file with a text caption.',
       inputSchema: {
         type: 'object',
         properties: {
           chat_id: { type: 'string' },
-          text: { type: 'string' },
+          text: { type: 'string', description: 'The message text. Pass text or text_files, not both.' },
+          text_files: TEXT_FILES_SCHEMA,
           reply_to: {
             type: 'string',
             description: 'Message ID to thread under. Use message_id from the inbound <channel> block.',
@@ -825,7 +834,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
             description: BUTTONS_HELP,
           },
         },
-        required: ['chat_id', 'text'],
+        required: ['chat_id'],
       },
     },
     {
@@ -854,13 +863,14 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'edit_message',
-      description: 'Edit a message the bot previously sent. Useful for interim progress updates. Edits don\'t trigger push notifications — send a new reply when a long task completes so the user\'s device pings. Pass text, buttons, or both: with text and no buttons the message loses its buttons; buttons alone change only the buttons, under a file too, and an empty list removes them. Text on a file whose caption holds a reply\'s text edits that caption, 1 to 1024 characters; text on a file with no text is refused, and nothing is edited.',
+      description: 'Edit a message the bot previously sent. New text already in a file goes by text_files instead of text, never typed again. Useful for interim progress updates. Edits don\'t trigger push notifications — send a new reply when a long task completes so the user\'s device pings. Pass text or text_files, buttons, or both: with text and no buttons the message loses its buttons; buttons alone change only the buttons, under a file too, and an empty list removes them. Text on a file whose caption holds a reply\'s text edits that caption, 1 to 1024 characters; text on a file with no text is refused, and nothing is edited.',
       inputSchema: {
         type: 'object',
         properties: {
           chat_id: { type: 'string' },
           message_id: { type: 'string' },
-          text: { type: 'string' },
+          text: { type: 'string', description: 'The new text. Pass text or text_files, not both.' },
+          text_files: TEXT_FILES_SCHEMA,
           format: formatSchema(RICH),
           buttons: {
             type: 'array',
@@ -1090,19 +1100,90 @@ async function changeKeyboard(
   })
 }
 
+// The saved copy of the words a text_files call sends, and the server log's
+// line for the call: its files, their sizes and sha256s, and the copy's path,
+// never the text. Made once the call has passed every refusal. See log.ts.
+function keepCopy(tool: string, chat_id: string, read: FileText): Copy {
+  const copy = createCopy(tool, chat_id)
+  process.stderr.write(`telegram channel: ${tool} to chat ${chat_id}: text from ${filesLine(read.files)}; its copy: ${copy.path}\n`)
+  return copy
+}
+
+// The words one Telegram call carries, under the payload's own names.
+type Words = Pick<CopyLine, 'text' | 'markdown' | 'caption' | 'parse_mode'>
+const plainWords = (text: string, parse_mode?: string): Words => parse_mode ? { text, parse_mode } : { text }
+const payloadWords = (p: Record<string, unknown>): Words => {
+  const rich = p.rich_message as { markdown?: unknown } | undefined
+  return typeof rich?.markdown === 'string' ? { markdown: rich.markdown } : plainWords(p.text as string, p.parse_mode as string | undefined)
+}
+
+// Runs one Telegram call carrying the words of a text_files call and puts its
+// line in the call's copy, once the call settles: with the message id a send
+// got, or the one an edit names, or marked unknown when its outcome is, a
+// send's line then holding no id. A call Telegram refused carried nothing and
+// leaves no line. With no copy, as for typed text, it only runs the call.
+async function noted<T>(copy: Copy | undefined, method: string, words: Words | (() => Words), call: () => Promise<T>, id: number | ((sent: T) => number)): Promise<T> {
+  if (!copy) return call()
+  const of = () => typeof words === 'function' ? words() : words
+  let sent: T
+  try {
+    sent = await call()
+  } catch (err) {
+    if (outcomeOf(err)?.sent === 'unknown') copy.line({ method, ...(typeof id === 'number' ? { message_id: id } : {}), delivery: 'unknown', ...of() })
+    throw err
+  }
+  copy.line({ method, message_id: typeof id === 'number' ? id : id(sent), ...of() })
+  return sent
+}
+
+// The rich sends of one text_files reply, each noted in its copy: a rich
+// part's Markdown, or the plain messages of a part Telegram refused.
+function notedSends(copy: Copy | undefined): RawApi {
+  if (!copy) return richApi
+  return {
+    sendRichMessage: p => noted(copy, 'sendRichMessage', payloadWords(p), () => richApi.sendRichMessage(p), sent => sent.message_id),
+    sendMessage: p => noted(copy, 'sendMessage', payloadWords(p), () => richApi.sendMessage(p), sent => sent.message_id),
+    editMessageText: (p, signal) => richApi.editMessageText(p, signal),
+  }
+}
+
+// The rich edit of one text_files edit_message: each call goes through the
+// 10-second limit, and its line is put outside that limit, so a call the limit
+// gave up on is noted as unknown before the answer. The words are those of
+// the call the limit ran: the rich Markdown, or its plain fallback.
+function notedEdit(copy: Copy | undefined, message_id: number, limit: <T>(run: (signal?: AbortSignal) => Promise<T>) => Promise<T>) {
+  if (!copy) return { raw: richApi, limit }
+  let words: Words = {}
+  const raw: RawApi = {
+    sendRichMessage: p => richApi.sendRichMessage(p),
+    sendMessage: p => richApi.sendMessage(p),
+    editMessageText: (p, signal) => { words = payloadWords(p); return richApi.editMessageText(p, signal) },
+  }
+  return {
+    raw,
+    limit: <T>(run: (signal?: AbortSignal) => Promise<T>): Promise<T> => noted(copy, 'editMessageText', () => words, () => limit(run), message_id),
+  }
+}
+
 mcp.setRequestHandler(CallToolRequestSchema, async req => {
   // A tool call means Claude is running again, e.g. after a prompt answered in the terminal.
   typing.resume()
   idle?.resume()
   const args = (req.params.arguments ?? {}) as Record<string, unknown>
+  // The saved copy of the words a text_files call sent, which its answer
+  // names, a failure's included.
+  let copy: Copy | undefined
+  const copyNote = () => copy?.note() ?? ''
   try {
     switch (req.params.name) {
       case 'reply': {
         // A format outside the list is refused before anything is looked
         // up, reserved or sent. See rich.ts.
         const format = formatOf(args.format, RICH, 'nothing was sent')
+        // Exactly one of text and text_files, each in its shape, refused as a
+        // format outside the list is. See textfiles.ts.
+        const from = textArgument(args, 'nothing was sent', true)
         const chat_id = args.chat_id as string
-        const text = args.text as string
         const reply_to = args.reply_to != null ? Number(args.reply_to) : undefined
         const files = (args.files as string[] | undefined) ?? []
         const rows = args.buttons !== undefined ? parseButtons(args.buttons, false) : undefined
@@ -1117,12 +1198,17 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
             throw new Error(`file too large: ${f} (${(st.size / 1024 / 1024).toFixed(1)}MB, max 50MB)`)
           }
         }
+        // The text read from files, before anything is looked up, reserved or
+        // sent. See textfiles.ts.
+        const read = from === 'text_files' ? await readTextFiles(args.text_files as string[], STATE_DIR, 'nothing was sent') : undefined
+        const text = read ? read.text : args.text as string
 
         // Another bot gets a message by its @username, as plain text, the
         // format Claude asked for aside. See bots.ts.
         const to = await peers.target(chat_id)
         const toBot = await peers.botChat(chat_id)
         if (rows && toBot) throw new Error(BOT_BUTTONS)
+        if (read) copy = keepCopy('reply', chat_id, read)
         const style = sendStyle(format, toBot)
         const parseMode = style === 'markdownv2' ? 'MarkdownV2' as const : undefined
 
@@ -1194,10 +1280,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           for (const [g, group] of toBotPlan.groups.entries()) {
             const caption = g === 0 ? toBotPlan.caption : undefined
             const captioned = (i: number) => i === 0 && caption !== undefined ? { caption } : {}
+            // Only a call carrying the caption carries words for the copy.
+            const words = caption !== undefined ? copy : undefined
             const at = await target()
             const sent = group.length === 1
-              ? [await send(undefined, () => bot.api.sendDocument(at, new InputFile(group[0]!), { ...replyTo, ...captioned(0) }))]
-              : await send(`an album of ${group.length} documents`, () => bot.api.sendMediaGroup(at, group.map((f, i) => InputMediaBuilder.document(new InputFile(f), captioned(i))), replyTo))
+              ? [await send(undefined, () => noted(words, 'sendDocument', { caption }, () => bot.api.sendDocument(at, new InputFile(group[0]!), { ...replyTo, ...captioned(0) }), m => m.message_id))]
+              : await send(`an album of ${group.length} documents`, () => noted(words, 'sendMediaGroup', { caption }, () => bot.api.sendMediaGroup(at, group.map((f, i) => InputMediaBuilder.document(new InputFile(f), captioned(i))), replyTo), ms => ms[0]!.message_id))
             // One call sent every message of an album, so all of them count
             // as sent before any is checked.
             for (const m of sent) sentIds.push(m.message_id)
@@ -1206,10 +1294,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           for (const [i, piece] of toBotPlan.pieces.entries()) {
             const threaded = reply_to != null && replyMode !== 'off' && (replyMode === 'all' || i === 0)
             const at = await target()
-            const sent = await send(undefined, () => bot.api.sendMessage(at, piece, threaded ? { reply_parameters: { message_id: reply_to } } : {}))
+            const sent = await send(undefined, () => noted(copy, 'sendMessage', { text: piece }, () => bot.api.sendMessage(at, piece, threaded ? { reply_parameters: { message_id: reply_to } } : {}), m => m.message_id))
             sentTo(sent, piece, 'text')
           }
-          return { content: [{ type: 'text', text: sentText() + holdsText() }] }
+          return { content: [{ type: 'text', text: sentText() + holdsText() + copyNote() }] }
         }
 
         // The keyboard goes on the last message sent, a text part or a file,
@@ -1249,7 +1337,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
             if (rich) {
               try {
                 await sendRich({
-                  raw: richApi,
+                  raw: notedSends(copy),
                   chatId: to,
                   text,
                   replyTo: n => reply_to != null && replyMode !== 'off' && (replyMode === 'all' || n === 0) ? reply_to : undefined,
@@ -1275,11 +1363,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
               const at = await dest()
               let sent: { message_id: number; chat: { id: number } }
               try {
-                sent = await bot.api.sendMessage(at, chunks[i], {
+                sent = await noted(copy, 'sendMessage', plainWords(chunks[i]!, parseMode), () => bot.api.sendMessage(at, chunks[i], {
                   ...(shouldReplyTo ? { reply_parameters: { message_id: reply_to } } : {}),
                   ...(parseMode ? { parse_mode: parseMode } : {}),
                   ...(withKeyboard ? { reply_markup: textMarkup as never } : {}),
-                })
+                }), m => m.message_id)
               } catch (err) {
                 throw stop(err, i + 1, !!withKeyboard, () => textFailed(err))
               }
@@ -1332,7 +1420,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           await joinKeyboard(chat_id, keyboard, carrier, sentIds, files.length === 0 && sentIds.length === 1 ? text : undefined)
         }
 
-        const result = sentText() + (carrier !== undefined ? `; buttons on message ${carrier}` : '') + holdsText()
+        const result = sentText() + (carrier !== undefined ? `; buttons on message ${carrier}` : '') + holdsText() + copyNote()
         return { content: [{ type: 'text', text: result }] }
       }
       case 'react': {
@@ -1363,14 +1451,18 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       case 'edit_message': {
         // Refused like reply's, a buttons-only edit's included.
         const format = formatOf(args.format, RICH, 'nothing was edited')
+        // At most one of text and text_files, each in its shape. See textfiles.ts.
+        const from = textArgument(args, 'nothing was edited', false)
         const chat_id = args.chat_id as string
         const message_id = Number(args.message_id)
-        const text = args.text as string | undefined
-        if (text === undefined && args.buttons === undefined) throw new Error('pass text, buttons, or both')
+        if (from === undefined && args.buttons === undefined) throw new Error('pass text or text_files, buttons, or both')
         // An empty list removes the buttons, which is allowed anywhere.
         const rows = args.buttons !== undefined ? parseButtons(args.buttons, true) : undefined
         if (rows?.length) assertPressesReachHere()
         assertAllowedChat(chat_id)
+        // The text read from files, before anything is looked up or edited.
+        const read = from === 'text_files' ? await readTextFiles(args.text_files as string[], STATE_DIR, 'nothing was edited') : undefined
+        const text = read ? read.text : args.text as string | undefined
         // Text goes where the message holds it, as the reply that sent it
         // recorded: a file's caption takes what Telegram keeps of it, 1 to
         // 1024 characters as Telegram counts them on a send and an edit alike,
@@ -1404,11 +1496,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           return { content: [{ type: 'text', text: `edited (id: ${args.message_id})` }] }
         }
         if (caption !== undefined) {
+          if (read) copy = keepCopy('edit_message', chat_id, read)
           // A caption goes plain, as every message to a bot does.
           await edited(() => changeKeyboard(chat_id, message_id, rows, (markup, limit) =>
-            limit(signal => bot.api.editMessageCaption(chat_id, message_id, { caption, ...(markup ? { reply_markup: markup as never } : {}) }, signal)), text))
+            noted(copy, 'editMessageCaption', { caption }, () => limit(signal => bot.api.editMessageCaption(chat_id, message_id, { caption, ...(markup ? { reply_markup: markup as never } : {}) }, signal)), message_id), text))
           sentWords.remember(chat_id, message_id, opening(text))
-          return { content: [{ type: 'text', text: `edited (id: ${args.message_id}); its caption holds the new text` }] }
+          return { content: [{ type: 'text', text: `edited (id: ${args.message_id}); its caption holds the new text${copyNote()}` }] }
         }
         // An edit in a bot's chat goes plain, like a reply. See bots.ts.
         const editFormat = sendStyle(format, toBot)
@@ -1416,17 +1509,18 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const richEdit = RICH && editFormat === 'rich'
         const parsed = richEdit ? await richEditParse(text) : undefined
         const editParseMode = editFormat === 'markdownv2' ? 'MarkdownV2' as const : undefined
+        if (read) copy = keepCopy('edit_message', chat_id, read)
         // A text edit carries the keyboard in the same call, its plain
         // fallback included; without buttons the message loses them.
         await edited(() => changeKeyboard(chat_id, message_id, rows, (markup, limit) => richEdit
-          ? editRichParsed({ raw: richApi, chatId: chat_id, messageId: message_id, text, rich: parsed, markup, limit })
-          : limit(signal => bot.api.editMessageText(chat_id, message_id, text, {
+          ? editRichParsed({ ...notedEdit(copy, message_id, limit), chatId: chat_id, messageId: message_id, text, rich: parsed, markup })
+          : noted(copy, 'editMessageText', plainWords(text, editParseMode), () => limit(signal => bot.api.editMessageText(chat_id, message_id, text, {
               ...(editParseMode ? { parse_mode: editParseMode } : {}),
               ...(markup ? { reply_markup: markup as never } : {}),
-            }, signal)), text))
+            }, signal)), message_id), text))
         // A reaction to the message then quotes its new text.
         sentWords.remember(chat_id, message_id, opening(text))
-        return { content: [{ type: 'text', text: `edited (id: ${args.message_id})` }] }
+        return { content: [{ type: 'text', text: `edited (id: ${args.message_id})${copyNote()}` }] }
       }
       default:
         return {
@@ -1438,9 +1532,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
     const msg = err instanceof Error ? err.message : String(err)
     // A send or edit whose outcome is unknown did not fail as far as anyone
     // knows: its result is a normal one that says so and what to do instead.
-    if (err instanceof SendOutcome && err.outcome.sent === 'unknown') return { content: [{ type: 'text', text: msg }] }
+    if (err instanceof SendOutcome && err.outcome.sent === 'unknown') return { content: [{ type: 'text', text: msg + copyNote() }] }
     return {
-      content: [{ type: 'text', text: `${req.params.name} failed: ${msg}` }],
+      content: [{ type: 'text', text: `${req.params.name} failed: ${msg}${copyNote()}` }],
       isError: true,
     }
   }
