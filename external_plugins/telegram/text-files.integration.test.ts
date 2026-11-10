@@ -170,6 +170,8 @@ describe.skipIf(process.platform !== 'linux')('text_files: a message read from f
       const filed = await sender({ rich })
       // Every copy line the steps saved, to see each kind of message among them.
       const saved: any[] = []
+      // Each copy's number in its server.
+      const ns: number[] = []
       for (const [name, typedArgs, filedArgs] of steps) {
         const t = await tool(typed.srv, name, typedArgs)
         const from = calls(filed.dir).length
@@ -183,6 +185,7 @@ describe.skipIf(process.platform !== 'linux')('text_files: a message read from f
           continue
         }
         const { answer, copy } = split(f.content[0].text)
+        ns.push(Number(/-(\d+)\.jsonl$/.exec(copy)![1]))
         expect(answer).toBe(t.content[0].text)
         expect(worded(copy)).toEqual(sent)
         saved.push(...worded(copy))
@@ -213,6 +216,10 @@ describe.skipIf(process.platform !== 'linux')('text_files: a message read from f
       expect(named.length).toBe(steps.length - 1)
       expect(log).toContain(`${body} (${BODY.length} bytes, sha256 ${new Bun.CryptoHasher('sha256').update(BODY).digest('hex')})`)
       expect(log).not.toContain('Weekly digest')
+      // The size and sha256 are the file's own bytes, its mark and CRLF included.
+      for (const f of [bom, crlf]) expect(log).toContain(`${f} (${readFileSync(f).length} bytes, sha256 ${new Bun.CryptoHasher('sha256').update(readFileSync(f)).digest('hex')})`)
+      // No two calls share a copy.
+      expect(new Set(ns).size).toBe(ns.length)
       expect(log).not.toContain('Last words')
       await typed.srv.close()
       await filed.srv.close()
@@ -609,6 +616,61 @@ describe.skipIf(process.platform !== 'linux')('text_files: a message read from f
     expect(edit.description).toContain('text_files')
     const init = await srv.request('initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'test', version: '1' } })
     expect(init.result.instructions).toContain('goes by the text_files argument of reply and edit_message, never typed again')
+    await srv.close()
+  }, 30000)
+  test('a plain edit and a caption edit the 10-second limit gives up on each name their copy, whose line holds the message id and the words marked unknown, before the answer', async () => {
+    driveClock()
+    const dir = folder()
+    const chart = write(dir, 'chart.png', 'png')
+    const body = write(dir, 'body.md', 'New **text**.')
+    for (const [method, captioned] of [['editMessageText', false], ['editMessageCaption', true]] as [string, boolean][]) {
+      const { dir: stateDir, srv } = await sender({ rules: [{ method, holdMs: 15000 }] })
+      const chat_id = captioned ? String(BOT.id) : '1'
+      const sent = await tool(srv, 'reply', captioned ? { chat_id, text: 'Old caption.', files: [chart] } : { chat_id, text: 'Old text.' })
+      const id = Number(/id: (\d+)/.exec(sent.content[0].text)![1])
+      // An empty list of buttons takes the edit under the lock and its limit.
+      const r = (await srv.request('tools/call', { name: 'edit_message', arguments: { chat_id, message_id: String(id), text_files: [body], buttons: [] } }, 20000)).result
+      expect(r.content[0].text).toContain('edit outcome unknown')
+      const { copy } = split(r.content[0].text)
+      const edits = wire(calls(stateDir).filter(c => c.method === method))
+      expect(edits.length).toBe(1)
+      expect(worded(copy)).toEqual([{ ...edits[0], delivery: 'unknown' }])
+      await srv.close()
+    }
+  }, 60000)
+
+  test('with the state folder named through a link, its files are refused through text_files and files, by the link and by the real path', async () => {
+    const real = state(ACCESS)
+    const link = join(folder(), 'state')
+    symlinkSync(real, link)
+    const srv = start(link, ['claude', '-p', 'hello'], envOf({}))
+    await srv.ready()
+    for (const f of [join(link, 'access.json'), join(real, 'access.json')]) {
+      const viaText = await tool(srv, 'reply', { chat_id: '1', text_files: [f] })
+      expect(viaText.isError).toBe(true)
+      expect(viaText.content[0].text).toContain(`refusing to send channel state: ${f}`)
+      const viaFiles = await tool(srv, 'reply', { chat_id: '1', text: 'x', files: [f] })
+      expect(viaFiles.content[0].text).toBe(`reply failed: refusing to send channel state: ${f}`)
+    }
+    expect(calls(real).filter(c => c.method.startsWith('send'))).toEqual([])
+    await srv.close()
+  }, 30000)
+
+  test.skipIf(process.getuid?.() === 0)('a copy whose later line cannot be written keeps its path in the answer, which says not all the words were saved, and why', async () => {
+    const dir = folder()
+    const paragraphs = ['one '.repeat(10).trim(), 'two '.repeat(10).trim()]
+    const body = write(dir, 'body.md', paragraphs.join('\n\n'))
+    // The second message waits, so the copy turns read-only after its first line.
+    const { dir: stateDir, srv } = await sender({ access: { textChunkLimit: 50, chunkMode: 'newline' }, rules: [{ method: 'sendMessage', skip: 1, times: 1, holdMs: 1500 }] })
+    const call = tool(srv, 'reply', { chat_id: '1', text_files: [body] })
+    const at = () => join(stateDir, 'logs', copies(stateDir)[0]!)
+    await until(() => copies(stateDir).length === 1 && readFileSync(at(), 'utf8').length > 0)
+    const path = at()
+    chmodSync(path, 0o400)
+    const r = await call
+    expect(r.isError).toBeUndefined()
+    expect(r.content[0].text.startsWith(`sent 2 parts (ids: 100, 101); the words sent are saved in ${path}, but not all of them: EACCES`)).toBe(true)
+    expect(worded(path)).toEqual([{ method: 'sendMessage', message_id: 100, text: paragraphs[0] }])
     await srv.close()
   }, 30000)
 })

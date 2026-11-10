@@ -275,8 +275,10 @@ turn-end hook's sweep of `logs/`, and the server keeps all copies at 64 MiB
 together: when a call writes its first line, the server deletes the oldest
 other copies until the rest fit. A copy that cannot be written never stops the
 message: the answer says the words were not saved and why, in place of the
-path, and the server log gets the same line. Typed `text` makes no copy, since
-its words already sit in the transcript, and its answer stays as it was.
+path, and when some of a call's lines could not be written, the answer keeps
+the path and says that not all of the words were saved, and why; the server
+log gets the same line. Typed `text` makes no copy, since its words already
+sit in the transcript, and its answer stays as it was.
 
 ## Messages Claude receives
 
