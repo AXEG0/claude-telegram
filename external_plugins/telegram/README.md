@@ -250,7 +250,7 @@ that call carried it, under the payload's own name: `text`, with `parse_mode`
 when one is set, `markdown` for a rich message, or `caption` for a caption.
 
 ```
-{"at":"2026-11-10T09:15:00.456Z","pid":1234,"version":"0.0.7-axeg0.41","tool":"reply","chat":"<chat>","method":"sendRichMessage","message_id":57,"markdown":"## Weekly digest\n\n..."}
+{"at":"2026-11-10T09:15:00.456Z","pid":1234,"version":"0.0.7-axeg0.42","tool":"reply","chat":"<chat>","method":"sendRichMessage","message_id":57,"markdown":"## Weekly digest\n\n..."}
 ```
 
 A rich part Telegram refuses and the plugin sends plain leaves the lines of
