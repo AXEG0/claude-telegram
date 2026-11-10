@@ -107,13 +107,17 @@ export function setupLog(stateDir: string): void {
 // line carries, the tool, the chat, the message id, the Telegram method, and
 // the text exactly as that call carried it, under the payload's own name:
 // text (with parse_mode when one is set), markdown for a rich message, or
-// caption. A send whose outcome is unknown is marked delivery "unknown", with
-// no message id, since Telegram gave none. Unlike the server log and the call
-// record, a copy holds message text, nothing masked, so it takes the folder's
-// owner-only rule. A call's first line deletes the oldest other copies until
-// all of them fit in COPIES_MAX; the turn-end hook's week-old sweep of logs/
-// takes the rest. A line that cannot be written never stops the call: the
-// answer says the words were not saved, and why.
+// caption. The chat is the one Telegram's answer names, where it names one,
+// else the one the call asked for. A send whose outcome is unknown is marked
+// delivery "unknown", with no message id, since Telegram gave none. Unlike the
+// server log and the call record, a copy holds message text, nothing masked,
+// so it takes the folder's owner-only rule. A call's first line first puts
+// the server log's line for the call, naming its files and the copy's path,
+// never the text, so the log names a copy exactly when a message went or may
+// have, whether or not the copy can be written; once written, it deletes the
+// oldest other copies until all of them fit in COPIES_MAX; the turn-end hook's
+// week-old sweep of logs/ takes the rest. A line that cannot be written never
+// stops the call: the answer says the words were not saved, and why.
 export const COPIES_MAX = 64 * 1024 * 1024
 const COPY_NAME = /^text-\d{8}T\d{9}Z-\d+-\d+\.jsonl$/
 let copiesAt: { dir: string; version: string } | undefined
@@ -121,6 +125,7 @@ let copiesMade = 0
 
 export type CopyLine = {
   method: string
+  chat?: string
   message_id?: number
   delivery?: 'unknown'
   text?: string
@@ -136,16 +141,23 @@ export type Copy = {
   note(): string
 }
 
-export function createCopy(tool: string, chat: string): Copy {
+// A copy for a call to chat that began at began, its text from the files
+// files names (their paths, sizes and sha256s).
+export function createCopy(tool: string, chat: string, began: Date, files: string): Copy {
   const at = copiesAt
-  const name = `text-${new Date().toISOString().replace(/[-:.]/g, '')}-${process.pid}-${++copiesMade}.jsonl`
+  const name = `text-${began.toISOString().replace(/[-:.]/g, '')}-${process.pid}-${++copiesMade}.jsonl`
   const path = at ? join(at.dir, name) : name
   let lines = 0
   let failed: string | undefined
   let ragged = false
+  let logged = false
   return {
     path,
     line(fields) {
+      if (!logged) {
+        logged = true
+        process.stderr.write(`telegram channel: ${tool} to chat ${chat}: text from ${files}; its copy: ${path}\n`)
+      }
       try {
         if (!at) throw new Error('the server log was never set up')
         try { mkdirSync(at.dir, { mode: 0o700 }) } catch {}

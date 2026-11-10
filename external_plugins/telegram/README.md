@@ -226,9 +226,11 @@ and nothing is sent or edited, no buttons are reserved, and no file stays open.
 256 KiB is about five times the largest real report so far, and no more than
 one typed call can carry: a session's response stops at 128K output tokens.
 
-The server log gets one line for each call that sends, naming each file, its
-size and its sha256, and the path of the call's saved copy, never the text, so
-the log shows which files made the text even after one is overwritten.
+The server log gets one line for each call that puts out a message, or may
+have, naming each file, its size and its sha256, and the path of the call's
+saved copy, never the text, so the log shows which files made the text even
+after one is overwritten. A call that puts out nothing, such as one whose
+first message or whose edit Telegram refuses, gets no line.
 
 #### The saved copy of the words sent
 
@@ -238,7 +240,7 @@ keeps the exact text it gave Telegram in a copy of its own, and the answer,
 which lists the message ids as typed text's does, ends with the copy's path:
 
 ```
-sent 2 parts (ids: 57, 58); the words sent are saved in ~/.claude/channels/telegram/logs/text-20261110T091500123Z-1234-3.jsonl
+sent 2 parts (ids: 57, 58); the words sent are saved in /Users/me/.claude/channels/telegram/logs/text-20261110T091500123Z-1234-3.jsonl
 ```
 
 The copy is `logs/text-<time>-<pid>-<n>.jsonl` in the state directory: the
@@ -248,6 +250,9 @@ Telegram accepted, with the time, pid and version every log line carries, the
 tool, the chat, the message id, the Telegram method, and the text exactly as
 that call carried it, under the payload's own name: `text`, with `parse_mode`
 when one is set, `markdown` for a rich message, or `caption` for a caption.
+The chat is the one Telegram's answer names, where it names one, so a message
+that went to another chat than the one asked for is saved under the chat it
+went to.
 
 ```
 {"at":"2026-11-10T09:15:00.456Z","pid":1234,"version":"0.0.7-axeg0.42","tool":"reply","chat":"<chat>","method":"sendRichMessage","message_id":57,"markdown":"## Weekly digest\n\n..."}

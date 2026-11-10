@@ -1100,14 +1100,11 @@ async function changeKeyboard(
   })
 }
 
-// The saved copy of the words a text_files call sends, and the server log's
-// line for the call: its files, their sizes and sha256s, and the copy's path,
-// never the text. Made once the call has passed every refusal. See log.ts.
-function keepCopy(tool: string, chat_id: string, read: FileText): Copy {
-  const copy = createCopy(tool, chat_id)
-  process.stderr.write(`telegram channel: ${tool} to chat ${chat_id}: text from ${filesLine(read.files)}; its copy: ${copy.path}\n`)
-  return copy
-}
+// The saved copy of the words a text_files call sends, named by the time the
+// call began; its first line puts the server log's line for the call. Made
+// once the call has passed every refusal. See log.ts.
+const keepCopy = (tool: string, chat_id: string, began: Date, read: FileText): Copy =>
+  createCopy(tool, chat_id, began, filesLine(read.files))
 
 // The words one Telegram call carries, under the payload's own names.
 type Words = Pick<CopyLine, 'text' | 'markdown' | 'caption' | 'parse_mode'>
@@ -1117,11 +1114,20 @@ const payloadWords = (p: Record<string, unknown>): Words => {
   return typeof rich?.markdown === 'string' ? { markdown: rich.markdown } : plainWords(p.text as string, p.parse_mode as string | undefined)
 }
 
+// The chat Telegram's answer names: a sent or edited message's, or an
+// album's first message's. An answer of true names none.
+function chatOf(sent: unknown): { chat?: string } {
+  const message = Array.isArray(sent) ? sent[0] : sent
+  const id = (message as { chat?: { id?: unknown } } | undefined)?.chat?.id
+  return typeof id === 'number' || typeof id === 'string' ? { chat: String(id) } : {}
+}
+
 // Runs one Telegram call carrying the words of a text_files call and puts its
 // line in the call's copy, once the call settles: with the message id a send
-// got, or the one an edit names, or marked unknown when its outcome is, a
-// send's line then holding no id. A call Telegram refused carried nothing and
-// leaves no line. With no copy, as for typed text, it only runs the call.
+// got, or the one an edit names, and the chat Telegram's answer names, or
+// marked unknown when its outcome is, a send's line then holding no id. A call
+// Telegram refused carried nothing and leaves no line. With no copy, as for
+// typed text, it only runs the call.
 async function noted<T>(copy: Copy | undefined, method: string, words: Words | (() => Words), call: () => Promise<T>, id: number | ((sent: T) => number)): Promise<T> {
   if (!copy) return call()
   const of = () => typeof words === 'function' ? words() : words
@@ -1132,7 +1138,7 @@ async function noted<T>(copy: Copy | undefined, method: string, words: Words | (
     if (outcomeOf(err)?.sent === 'unknown') copy.line({ method, ...(typeof id === 'number' ? { message_id: id } : {}), delivery: 'unknown', ...of() })
     throw err
   }
-  copy.line({ method, message_id: typeof id === 'number' ? id : id(sent), ...of() })
+  copy.line({ method, message_id: typeof id === 'number' ? id : id(sent), ...chatOf(sent), ...of() })
   return sent
 }
 
@@ -1174,6 +1180,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
   // names, a failure's included.
   let copy: Copy | undefined
   const copyNote = () => copy?.note() ?? ''
+  // When the call began, which names its copy.
+  const began = new Date()
   try {
     switch (req.params.name) {
       case 'reply': {
@@ -1208,7 +1216,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const to = await peers.target(chat_id)
         const toBot = await peers.botChat(chat_id)
         if (rows && toBot) throw new Error(BOT_BUTTONS)
-        if (read) copy = keepCopy('reply', chat_id, read)
+        if (read) copy = keepCopy('reply', chat_id, began, read)
         const style = sendStyle(format, toBot)
         const parseMode = style === 'markdownv2' ? 'MarkdownV2' as const : undefined
 
@@ -1496,7 +1504,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           return { content: [{ type: 'text', text: `edited (id: ${args.message_id})` }] }
         }
         if (caption !== undefined) {
-          if (read) copy = keepCopy('edit_message', chat_id, read)
+          if (read) copy = keepCopy('edit_message', chat_id, began, read)
           // A caption goes plain, as every message to a bot does.
           await edited(() => changeKeyboard(chat_id, message_id, rows, (markup, limit) =>
             noted(copy, 'editMessageCaption', { caption }, () => limit(signal => bot.api.editMessageCaption(chat_id, message_id, { caption, ...(markup ? { reply_markup: markup as never } : {}) }, signal)), message_id), text))
@@ -1509,7 +1517,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const richEdit = RICH && editFormat === 'rich'
         const parsed = richEdit ? await richEditParse(text) : undefined
         const editParseMode = editFormat === 'markdownv2' ? 'MarkdownV2' as const : undefined
-        if (read) copy = keepCopy('edit_message', chat_id, read)
+        if (read) copy = keepCopy('edit_message', chat_id, began, read)
         // A text edit carries the keyboard in the same call, its plain
         // fallback included; without buttons the message loses them.
         await edited(() => changeKeyboard(chat_id, message_id, rows, (markup, limit) => richEdit

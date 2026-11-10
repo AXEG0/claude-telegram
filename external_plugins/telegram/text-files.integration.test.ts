@@ -31,11 +31,11 @@ function write(dir: string, name: string, content: string | Buffer): string {
 // The owner and another bot on the allowlist.
 const BOT = { id: 9000001, is_bot: true, first_name: 'Peer', username: 'peer_bot' }
 const ACCESS = { dmPolicy: 'allowlist', allowFrom: ['1', String(BOT.id)] }
-type Setup = { rich?: boolean; access?: object; rules?: object[] }
+type Setup = { rich?: boolean; access?: object; rules?: object[]; chats?: object }
 const envOf = (o: Setup) => ({
   TELEGRAM_RICH_MESSAGES: String(o.rich ?? false),
   TELEGRAM_TEST_USERS: JSON.stringify({ [BOT.id]: BOT }),
-  TELEGRAM_TEST_CHATS: JSON.stringify({ ids: 100 }),
+  TELEGRAM_TEST_CHATS: JSON.stringify(o.chats ?? { ids: 100 }),
   TELEGRAM_TEST_RULES: JSON.stringify(o.rules ?? []),
 })
 // A session's server that does not poll: it calls Telegram only for what a
@@ -93,6 +93,19 @@ function wire(cs: Call[]): object[] {
 }
 // A copy's lines without the envelope.
 const worded = (path: string) => lines(path).map(({ at: _, pid: __, version: ___, tool: ____, chat: _____, ...rest }) => rest)
+// The words of calls Telegram refused too, as a line marked unknown holds them.
+const asSent = (cs: Call[]) => wire(cs.map(({ refused: _, ...c }) => c as Call))
+// The server log's lines for calls through text_files, each naming a copy.
+function named(dir: string, srv: Server): string[] {
+  const log = join(dir, 'logs', `server-${srv.serverPid()}.jsonl`)
+  return existsSync(log) ? readFileSync(log, 'utf8').split('\n').filter(l => l.includes('text from ')) : []
+}
+// The time a copy's name carries, in ms.
+function namedAt(copy: string): number {
+  const m = /text-(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(\d{3})Z-/.exec(copy)!
+  const [y, mo, d, h, mi, s, ms] = m.slice(1).map(Number) as [number, number, number, number, number, number, number]
+  return Date.UTC(y, mo - 1, d, h, mi, s, ms)
+}
 
 // The descriptors the server holds open on a path.
 function openOn(srv: Server, paths: string[]): string[] {
@@ -123,6 +136,7 @@ describe.skipIf(process.platform !== 'linux')('text_files: a message read from f
       const dir = folder()
       const body = write(dir, 'body.md', BODY)
       const chart = write(dir, 'chart.png', 'png')
+      const chart2 = write(dir, 'chart2.png', 'png')
       const a = write(dir, 'a.md', 'First section.')
       const b = write(dir, 'b.md', '- one\n- two')
       const c = write(dir, 'c.md', '## Third\n\nLast words.')
@@ -148,6 +162,9 @@ describe.skipIf(process.platform !== 'linux')('text_files: a message read from f
         ['edit_message', { chat_id: String(BOT.id), message_id: String(100 + formats.length + 1), text: 'Ends in line breaks.' }, { chat_id: String(BOT.id), message_id: String(100 + formats.length + 1), text_files: [lf] }],
         // A body typed text fails the same way: a caption over 1024 characters.
         ['edit_message', { chat_id: String(BOT.id), message_id: String(100 + formats.length + 1), text: 'word '.repeat(300).trim() }, { chat_id: String(BOT.id), message_id: String(100 + formats.length + 1), text_files: [long] }],
+        // An album to a bot, its caption on the first document; last, so the
+        // edits above keep their message ids.
+        ['reply', { chat_id: String(BOT.id), text: 'First section.', files: [chart, chart2] }, { chat_id: String(BOT.id), text_files: [a], files: [chart, chart2] }],
       ]
       const typed = await sender({ rich })
       const filed = await sender({ rich })
@@ -180,6 +197,7 @@ describe.skipIf(process.platform !== 'linux')('text_files: a message read from f
         ...(rich ? ['editMessageText markdown'] : ['editMessageText text']),
         'editMessageCaption caption',
         'sendDocument caption',
+        'sendMediaGroup caption',
         'sendMessage parse_mode text',
         ...(rich ? ['sendRichMessage markdown'] : []),
         'sendMessage text',
@@ -269,7 +287,122 @@ describe.skipIf(process.platform !== 'linux')('text_files: a message read from f
     expect(r3.isError).toBe(true)
     expect(r3.content[0].text).not.toContain('saved')
     expect(copies(refused.dir)).toEqual([])
+    // The server log names a copy for each call that put out a message, or
+    // may have, and none for the call that put out nothing.
+    expect(named(stopped.dir, stopped.srv)).toEqual([expect.stringContaining(`; its copy: ${s1.copy}`)])
+    expect(named(unknown.dir, unknown.srv)).toEqual([expect.stringContaining(`; its copy: ${s2.copy}`)])
+    expect(named(refused.dir, refused.srv)).toEqual([])
     for (const s of [stopped, unknown, refused]) await s.srv.close()
+  }, 30000)
+
+  test('an edit whose outcome is unknown names its copy, whose line holds the message id and the text marked unknown; an edit Telegram refuses names none and logs none', async () => {
+    const dir = folder()
+    const chart = write(dir, 'chart.png', 'png')
+    const body = write(dir, 'body.md', 'New **text**.')
+    const BAD_GATEWAY = { error_code: 502, description: 'Bad Gateway' }
+    // Each case: rich messages on or off, the edit's method, and whether the
+    // message is a bot's captioned file.
+    const cases: [boolean, string, boolean][] = [
+      [false, 'editMessageText', false],
+      [true, 'editMessageText', false],
+      [false, 'editMessageCaption', true],
+    ]
+    for (const [rich, method, captioned] of cases) {
+      const s = await sender({ rich, rules: [{ method, error: BAD_GATEWAY }] })
+      const chat_id = captioned ? String(BOT.id) : '1'
+      const sent = await tool(s.srv, 'reply', captioned ? { chat_id, text: 'Old caption.', files: [chart] } : { chat_id, text: 'Old text.' })
+      const id = Number(/id: (\d+)/.exec(sent.content[0].text)![1])
+      const from = calls(s.dir).length
+      const r = await tool(s.srv, 'edit_message', { chat_id, message_id: String(id), text_files: [body] })
+      expect(r.isError).toBeUndefined()
+      expect(r.content[0].text).toContain('edit outcome unknown')
+      const { copy } = split(r.content[0].text)
+      const edits = asSent(calls(s.dir).slice(from))
+      expect(edits).toEqual([expect.objectContaining({ method, message_id: id })])
+      expect(worded(copy)).toEqual([{ ...edits[0], delivery: 'unknown' }])
+      expect(named(s.dir, s.srv)).toEqual([expect.stringContaining(`; its copy: ${copy}`)])
+      await s.srv.close()
+    }
+    // Refused: nothing changed, so no copy and no log line names one.
+    const NOT_FOUND = { error_code: 400, description: 'Bad Request: message to edit not found' }
+    const refused = await sender({ rules: [{ method: 'editMessageText', error: NOT_FOUND }] })
+    await tool(refused.srv, 'reply', { chat_id: '1', text: 'Old text.' })
+    const r = await tool(refused.srv, 'edit_message', { chat_id: '1', message_id: '100', text_files: [body] })
+    expect(r.isError).toBe(true)
+    expect(r.content[0].text).not.toContain('saved')
+    expect(copies(refused.dir)).toEqual([])
+    expect(named(refused.dir, refused.srv)).toEqual([])
+    await refused.srv.close()
+  }, 30000)
+
+  test('an edit the 10-second limit gives up on names its copy, whose line holds the message id and the rich text marked unknown, before the answer', async () => {
+    driveClock()
+    const dir = folder()
+    const body = write(dir, 'body.md', 'New **text**.')
+    const { dir: stateDir, srv } = await channel({ rich: true, rules: [{ method: 'editMessageText', holdMs: 15000 }] })
+    const sent = await tool(srv, 'reply', { chat_id: '1', text: 'Old text.' })
+    const id = Number(/id: (\d+)/.exec(sent.content[0].text)![1])
+    // The answer comes after the 10-second limit, past request's default wait.
+    const r = (await srv.request('tools/call', { name: 'edit_message', arguments: { chat_id: '1', message_id: String(id), text_files: [body], buttons: [['Yes', 'No']] } }, 20000)).result
+    expect(r.content[0].text).toContain('edit outcome unknown')
+    const { copy } = split(r.content[0].text)
+    const edits = wire(calls(stateDir).filter(c => c.method === 'editMessageText'))
+    expect(edits.length).toBe(1)
+    expect(worded(copy)).toEqual([{ ...edits[0], delivery: 'unknown' }])
+    await srv.close()
+  }, 40000)
+
+  test('a rich edit Telegram refuses goes plain, as typed text does, and the copy holds the plain text that went', async () => {
+    const dir = folder()
+    const body = write(dir, 'body.md', 'New **text**.')
+    const REJECTED = { error_code: 400, description: 'Bad Request: RICH_MESSAGE_MARKDOWN_INVALID' }
+    const setup = { rich: true, rules: [{ method: 'editMessageText', has: 'rich_message', times: 1, error: REJECTED }] }
+    const typed = await sender(setup)
+    const filed = await sender(setup)
+    for (const s of [typed, filed]) await tool(s.srv, 'reply', { chat_id: '1', text: 'Old text.' })
+    const t = await tool(typed.srv, 'edit_message', { chat_id: '1', message_id: '100', text: 'New **text**.' })
+    const from = calls(filed.dir).length
+    const f = await tool(filed.srv, 'edit_message', { chat_id: '1', message_id: '100', text_files: [body] })
+    expect(made(filed.dir)).toEqual(made(typed.dir))
+    // The rich call was refused, and its plain fallback went.
+    expect(calls(filed.dir).slice(from).map(c => [c.method, !!c.refused])).toEqual([['editMessageText', true], ['editMessageText', false]])
+    const { answer, copy } = split(f.content[0].text)
+    expect(answer).toBe(t.content[0].text)
+    const went = worded(copy)
+    expect(went).toEqual(wire(calls(filed.dir).slice(from)))
+    expect(went).toEqual([expect.objectContaining({ method: 'editMessageText', message_id: 100, text: expect.any(String) })])
+    expect(went[0]).not.toHaveProperty('markdown')
+    await typed.srv.close()
+    await filed.srv.close()
+  }, 30000)
+
+  test('the copy is named by the time the call began, before any lookup', async () => {
+    const dir = folder()
+    const body = write(dir, 'body.md', 'To the bot.')
+    // The bot's lookup takes half a second.
+    const { dir: stateDir, srv } = await sender({ rules: [{ method: 'getChatMember', holdMs: 500 }] })
+    const r = await tool(srv, 'reply', { chat_id: String(BOT.id), text_files: [body] })
+    const { copy } = split(r.content[0].text)
+    const lookup = calls(stateDir).find(c => c.method === 'getChatMember')!
+    expect(namedAt(copy)).toBeLessThanOrEqual(lookup.at)
+    await srv.close()
+  }, 30000)
+
+  test('a message Telegram delivered to another chat than the one asked for is saved under the chat it went to', async () => {
+    const dir = folder()
+    const body = write(dir, 'body.md', 'second')
+    // From its second send on, the bot's username answers chat 9998; the
+    // first send waits, so the second reply needs no lookup.
+    const { dir: stateDir, srv } = await sender({ chats: { redirect: { username: BOT.username, to: 9998, from: 2, ids: 600 }, hold: { send: 1, ms: 1500 } } })
+    const first = tool(srv, 'reply', { chat_id: String(BOT.id), text: 'first' })
+    await until(() => calls(stateDir).some(c => c.method === 'sendMessage'))
+    const r = await tool(srv, 'reply', { chat_id: String(BOT.id), text_files: [body] })
+    expect(r.isError).toBe(true)
+    const { answer, copy } = split(r.content[0].text)
+    expect(answer).toBe(`reply failed: reply failed after 1 of 1 message(s) sent (ids: 601): message 601 went to chat 9998, not ${BOT.id}`)
+    expect(lines(copy).map(l => [l.chat, l.method, l.message_id, l.text])).toEqual([['9998', 'sendMessage', 601, 'second']])
+    await first
+    await srv.close()
   }, 30000)
 
   test('reply_to, buttons and files through text_files make the calls and answer typed text makes, the buttons on the last message', async () => {
@@ -342,6 +475,8 @@ describe.skipIf(process.platform !== 'linux')('text_files: a message read from f
       chmodSync(logs, 0o700)
     }
     expect(copies(state)).toEqual([])
+    // The server log still names the copy the call meant to write.
+    expect(named(state, srv)).toEqual([expect.stringMatching(/; its copy: \/\S+\/logs\/text-\d{8}T\d{9}Z-\d+-\d+\.jsonl"/)])
     await srv.close()
   }, 30000)
 
@@ -441,6 +576,24 @@ describe.skipIf(process.platform !== 'linux')('text_files: a message read from f
     const missing = await tool(srv, 'reply', { chat_id: '1', text: 'x', files: [join(dir, 'missing.png')] })
     expect(missing.isError).toBe(true)
     expect(missing.content[0].text).toContain('ENOENT')
+    // The rule compares at a folder's boundary: a state folder whose name
+    // only starts like the inbox's is refused through both arguments, and a
+    // folder beside the state folder whose name starts like it is sent.
+    mkdirSync(join(stateDir, 'inbox-old'))
+    const lookalike = write(join(stateDir, 'inbox-old'), 'note.md', 'Not from the inbox.')
+    const sibling = `${stateDir}-sibling`
+    mkdirSync(sibling)
+    folders.push(sibling)
+    const beside = write(sibling, 'x.md', 'Beside the state folder.')
+    const before = calls(stateDir).length
+    const viaText = await tool(srv, 'reply', { chat_id: '1', text_files: [lookalike] })
+    expect(viaText.isError).toBe(true)
+    expect(viaText.content[0].text).toContain(`refusing to send channel state: ${lookalike}`)
+    const viaFiles = await tool(srv, 'reply', { chat_id: '1', text: 'x', files: [lookalike] })
+    expect(viaFiles.content[0].text).toBe(`reply failed: refusing to send channel state: ${lookalike}`)
+    expect(calls(stateDir).length).toBe(before)
+    expect(split((await tool(srv, 'reply', { chat_id: '1', text_files: [beside] })).content[0].text).answer).toBe('sent (id: 104)')
+    expect((await tool(srv, 'reply', { chat_id: '1', text: 'beside', files: [beside] })).content[0].text).toBe('sent 2 parts (ids: 105, 106); what each holds: 105 text, 106 file')
     await srv.close()
   }, 30000)
 
