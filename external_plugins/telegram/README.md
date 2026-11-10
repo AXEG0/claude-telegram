@@ -1062,4 +1062,6 @@ The "Telegram plugin tests" CI job runs the same command and prints the
 runner's processors and the suite's time on every run. A run that takes 3
 minutes or more fails it, as does any failing test. The suite runs there with
 an empty temp folder of its own, and anything a run leaves in it, on a passing
-run or a failing one, fails the job too, which names each entry left.
+run or a failing one, fails the job too, which names each entry left. After the
+suite, `bun audit` fails the job while the lock holds a package with a known
+advisory.
