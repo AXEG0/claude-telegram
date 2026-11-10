@@ -166,7 +166,7 @@ export function createCopy(tool: string, chat: string, began: Date, files: strin
         ragged = true
         if (failed === undefined) {
           failed = err instanceof Error ? err.message : String(err)
-          process.stderr.write(`telegram channel: the copy of the words sent was not written to ${path}: ${failed}\n`)
+          process.stderr.write(`telegram channel: not all of the words sent were saved in ${path}: ${failed}\n`)
         }
         return
       }
