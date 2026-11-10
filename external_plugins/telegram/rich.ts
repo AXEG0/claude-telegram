@@ -26,7 +26,7 @@ export function richEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return /^(1|true|yes|on)$/i.test(env.TELEGRAM_RICH_MESSAGES?.trim() ?? '')
 }
 
-// One line of the server's instructions, which Claude Code cuts at 2048
+// One line of the server's instructions, which Claude Code cuts at 4096
 // characters; it goes last, so a cut takes it before the access warning.
 export const RICH_INSTRUCTIONS =
   'Rich messages: replies and edits render GitHub Markdown: headings, tables (inline formatting, up to 20 columns), task lists, code, ' +

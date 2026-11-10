@@ -461,7 +461,7 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
   test('edit_message refuses a call with neither text nor buttons, and counts message is not modified as done', async () => {
     const dir = state()
     const srv = await channel(dir, { rules: [{ method: ['editMessageText', 'editMessageReplyMarkup'], has: 'SAME', error: NOT_MODIFIED }] })
-    expect(failed(await tool(srv, 'edit_message', { chat_id: '1', message_id: '100' }))).toBe('edit_message failed: pass text, buttons, or both')
+    expect(failed(await tool(srv, 'edit_message', { chat_id: '1', message_id: '100' }))).toBe('edit_message failed: pass text or text_files, buttons, or both')
     expect(calls(dir).filter(c => EDITS.includes(c.method))).toEqual([])
     const m = await ask(srv, 'SAME question', [['SAME']])
     expect(ok(await tool(srv, 'edit_message', { chat_id: '1', message_id: String(m), text: 'SAME question', buttons: [['SAME']] }))).toBe(`edited (id: ${m})`)
