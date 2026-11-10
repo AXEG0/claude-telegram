@@ -183,10 +183,103 @@ can answer no prompt. The typing indicator still goes to the bot's chat.
 
 | Tool | Purpose |
 | --- | --- |
-| `reply` | Sends to a chat, and to [another bot](#other-bots) by its `@username`, as plain text. Takes a numeric `chat_id` and `text`, with `reply_to` (a message ID) for native threading and `files` (absolute paths) for attachments. Images (`.jpg`/`.jpeg`/`.png`/`.gif`/`.webp`) go as photos with an inline preview, other files as documents, up to 50MB each, after the text. To [another bot](#other-bots), the files go first, every one as a document, with the text as the first file's caption or after the files, whatever `textChunkLimit` and `chunkMode` say. `format` picks `text` or `markdownv2`, and with rich messages on also `rich`, which is then the default. Any other `format`, such as `markdown` or `null`, is refused with an error naming it and the formats, and nothing is sent. Long text goes out in several messages. `buttons` puts [answer buttons](#button-presses) under the last message sent, a text part or a file: 1 to 4 rows of 1 to 4 labels, each 1 to 40 characters and distinct across the keyboard, with single spaces between words and none of `"` `<` `>` `[` `]` `;`, control characters, or the invisible and combining characters Telegram would change. Buttons are refused in another bot's chat, in a server that does not poll the bot, and in one whose poll ended in a conflict (409) with no poll completed since. Returns the sent message IDs, and with buttons also the message that carries them. With files, the answer also says what each message holds: text, a file, or a file with a text caption, as Telegram's answer for each file says. A send Telegram refuses, with a 4xx or a 429 and the wait it asks for, or that never leaves, its connection refused or its host's name not found, says not sent. One Telegram answers with a 5xx, or never answers, says delivery unknown, in a result that is no error: Telegram may still deliver it, even minutes later, so Claude sends it again only if the recipient says it did not arrive, and the plugin never sends it again itself. A reply of several parts that stops names the parts sent with their IDs, the part it stopped at and the parts never tried; when the part whose outcome is unknown carries the buttons, they are kept, and a press on them counts once the message arrives. |
+| `reply` | Sends to a chat, and to [another bot](#other-bots) by its `@username`, as plain text. Takes a numeric `chat_id` and `text`, or in its place `text_files`, absolute paths of UTF-8 text files whose text, joined with a blank line between files, is the message, exactly one of the two, up to 256 KiB in all, each refusal naming the path and the reason, and the answer naming a saved copy of the words sent (see [Messages from files](#messages-from-files)), with `reply_to` (a message ID) for native threading and `files` (absolute paths) for attachments. Images (`.jpg`/`.jpeg`/`.png`/`.gif`/`.webp`) go as photos with an inline preview, other files as documents, up to 50MB each, after the text. To [another bot](#other-bots), the files go first, every one as a document, with the text as the first file's caption or after the files, whatever `textChunkLimit` and `chunkMode` say. `format` picks `text` or `markdownv2`, and with rich messages on also `rich`, which is then the default. Any other `format`, such as `markdown` or `null`, is refused with an error naming it and the formats, and nothing is sent. Long text goes out in several messages. `buttons` puts [answer buttons](#button-presses) under the last message sent, a text part or a file: 1 to 4 rows of 1 to 4 labels, each 1 to 40 characters and distinct across the keyboard, with single spaces between words and none of `"` `<` `>` `[` `]` `;`, control characters, or the invisible and combining characters Telegram would change. Buttons are refused in another bot's chat, in a server that does not poll the bot, and in one whose poll ended in a conflict (409) with no poll completed since. Returns the sent message IDs, and with buttons also the message that carries them. With files, the answer also says what each message holds: text, a file, or a file with a text caption, as Telegram's answer for each file says. A send Telegram refuses, with a 4xx or a 429 and the wait it asks for, or that never leaves, its connection refused or its host's name not found, says not sent. One Telegram answers with a 5xx, or never answers, says delivery unknown, in a result that is no error: Telegram may still deliver it, even minutes later, so Claude sends it again only if the recipient says it did not arrive, and the plugin never sends it again itself. A reply of several parts that stops names the parts sent with their IDs, the part it stopped at and the parts never tried; when the part whose outcome is unknown carries the buttons, they are kept, and a press on them counts once the message arrives. |
 | `react` | Adds an emoji reaction to a message by ID, from Telegram's fixed set of reaction emoji (👍 👎 ❤ 🔥 👀 and others). |
 | `download_attachment` | Downloads an attachment by the `attachment_file_id` on its message to the inbox and returns the local path. Telegram serves bot downloads up to 20MB. |
-| `edit_message` | Edits a message the bot sent, for progress updates such as "working…" turning into the result. Takes `text`, `buttons`, or both, and the same `format` as `reply`: any other is refused and nothing is edited, an edit of the buttons alone included. With `text`, the edit carries `buttons` in the same call, so a text edit without `buttons` leaves the message without buttons, a shown choice included. With `buttons` alone only the buttons change, under a file too, and an empty list removes them, which works from any server. Text on a file whose caption holds a reply's text, as the first file of a reply to another bot can, edits that caption, 1 to 1024 characters once trimmed as Telegram trims it; text on a file with no text is refused, and nothing is edited. The server knows what each message holds from the reply that sent it until the server restarts, or until a thousand newer messages have gone out through `reply`; a message it no longer knows is edited as before. An edit Telegram answers with "message is not modified" counts as done. An edit Telegram refuses says not edited, and one whose outcome is unknown says so and that repeating the same edit is safe, in a result that is no error: an edit that repeats the message's text, or sets no text, with the buttons the message already carries, unpressed, keeps their keyboard, so either copy carries the same buttons. An edit to other text gets a new keyboard, the same labels included, so a press made under the old text gets the closed notice. An edit stays one message, so longer text goes in a new reply, and an edit sends no notification, so a finished task gets a new reply too. |
+| `edit_message` | Edits a message the bot sent, for progress updates such as "working…" turning into the result. Takes `text` or `text_files`, which reads the new text from files as `reply` does, at most one of the two, each refusal naming the path and the reason, and the answer naming a saved copy of the words sent (see [Messages from files](#messages-from-files)), `buttons`, or both, and the same `format` as `reply`: any other is refused and nothing is edited, an edit of the buttons alone included. With `text`, the edit carries `buttons` in the same call, so a text edit without `buttons` leaves the message without buttons, a shown choice included. With `buttons` alone only the buttons change, under a file too, and an empty list removes them, which works from any server. Text on a file whose caption holds a reply's text, as the first file of a reply to another bot can, edits that caption, 1 to 1024 characters once trimmed as Telegram trims it; text on a file with no text is refused, and nothing is edited. The server knows what each message holds from the reply that sent it until the server restarts, or until a thousand newer messages have gone out through `reply`; a message it no longer knows is edited as before. An edit Telegram answers with "message is not modified" counts as done. An edit Telegram refuses says not edited, and one whose outcome is unknown says so and that repeating the same edit is safe, in a result that is no error: an edit that repeats the message's text, or sets no text, with the buttons the message already carries, unpressed, keeps their keyboard, so either copy carries the same buttons. An edit to other text gets a new keyboard, the same labels included, so a press made under the old text gets the closed notice. An edit stays one message, so longer text goes in a new reply, and an edit sends no notification, so a finished task gets a new reply too. |
+
+### Messages from files
+
+`reply` and `edit_message` take `text_files` in place of `text`: a list of
+absolute paths of UTF-8 text files, such as Markdown a session already wrote.
+Their text is the message itself, never an attached document, so a session
+sends a body it has on disk without typing it out again in the call, once for
+every chat it goes to. A copy already in one file is a list of that one file;
+for copies that differ, a session writes each section once as its own file
+and lists, for each chat, the sections that chat gets.
+
+Every CRLF in a file is read as LF, a byte-order mark at the start is dropped,
+line breaks at both ends of each file are dropped, and the files are joined in
+the order given with one blank line between them. One file thus sends exactly
+what the same text typed in `text` without line breaks at its ends sends. The
+joined text is one Markdown text, as typed text is, so a list that ends one
+file and a list of the same kind that starts the next become one list. From
+there it takes the path typed text takes: the format, splitting by
+`textChunkLimit` and `chunkMode`, rich parts and their plain fallback, a reply
+to another bot, buttons, the answer, and for `edit_message` the caption edit
+and the one-message limit.
+
+A call passes exactly one of `text` and `text_files`, an argument counting as
+passed when it is present at all, so an empty `text` beside `text_files` is
+both. `text_files` must be a non-empty list of path strings and `text` a
+string. Each path must be absolute; its real path is resolved, and one that
+does not resolve is refused; the rule `files` applies is applied to that real
+path, so the channel's state directory is refused outside its inbox, a link
+into it included, with "refusing to send channel state"; that very path is
+opened once, read-only, not following a link at its last step and not waiting
+on a pipe; it must be a regular file, so a directory, a pipe or a device is
+refused; all the call's files together hold at most 256 KiB as read, a file
+that reports no size included; the bytes must be UTF-8 with no NUL byte; and a
+file of nothing but spaces, tabs and line breaks, an empty one included, is
+refused. Each refusal names the path and the reason, never the file's content,
+and nothing is sent or edited, no buttons are reserved, and no file stays open.
+256 KiB is about five times the largest real report so far, and no more than
+one typed call can carry: a session's response stops at 128K output tokens.
+
+The server log gets one line for each call that puts out a message, or may
+have, naming each file, its size and its sha256, and the path of the call's
+saved copy, never the text, so the log shows which files made the text even
+after one is overwritten. A call that puts out nothing, such as one whose
+first message or whose edit Telegram refuses, gets no line.
+
+#### The saved copy of the words sent
+
+A session's transcript, and a permission prompt for the call, show only the
+paths. So for each message a call through `text_files` puts out, the server
+keeps the exact text it gave Telegram in a copy of its own, and the answer,
+which lists the message ids as typed text's does, ends with the copy's path:
+
+```
+sent 2 parts (ids: 57, 58); the words sent are saved in /Users/me/.claude/channels/telegram/logs/text-20261110T091500123Z-1234-3.jsonl
+```
+
+The copy is `logs/text-<time>-<pid>-<n>.jsonl` in the state directory: the
+UTC time the call began, the server's pid and the call's number in that
+server, so no two calls share a file. It holds one JSON line for each message
+Telegram accepted, with the time, pid and version every log line carries, the
+tool, the chat, the message id, the Telegram method, and the text exactly as
+that call carried it, under the payload's own name: `text`, with `parse_mode`
+when one is set, `markdown` for a rich message, or `caption` for a caption.
+The chat is the one Telegram's answer names, where it names one, so a message
+that went to another chat than the one asked for is saved under the chat it
+went to.
+
+```
+{"at":"2026-11-10T09:15:00.456Z","pid":1234,"version":"0.0.7-axeg0.42","tool":"reply","chat":"<chat>","method":"sendRichMessage","message_id":57,"markdown":"## Weekly digest\n\n..."}
+```
+
+A rich part Telegram refuses and the plugin sends plain leaves the lines of
+the plain messages that went. A message Telegram refused leaves no line, since
+nothing went. A send or edit whose outcome is unknown leaves its text with
+`"delivery":"unknown"`, a send's line with no message id, since Telegram gave
+none. A file sent through `files` carries no text
+and leaves no line, and a call that puts out no message leaves no file. A
+reply that stops part way, and a result whose delivery is unknown, name the
+copy too.
+
+A copy holds the words as sent, nothing masked, which the server log and the
+call record never hold, so like them it is 0600 in the owner-only `logs/`
+folder. `text_files` and `files` both refuse it, since it lies in the state
+directory outside the inbox. A copy untouched for a week goes with the
+turn-end hook's sweep of `logs/`, and the server keeps all copies at 64 MiB
+together: when a call writes its first line, the server deletes the oldest
+other copies until the rest fit. A copy that cannot be written never stops the
+message: the answer says the words were not saved and why, in place of the
+path, and when some of a call's lines could not be written, the answer keeps
+the path and says that not all of the words were saved, and why; either way
+the server log gets a line saying that not all of the words sent were saved
+in the copy, and why. Typed `text` makes no copy, since its words already
+sit in the transcript, and its answer stays as it was.
 
 ## Messages Claude receives
 
@@ -933,7 +1026,9 @@ error texts, which can quote part of a message, so the folder is owner-only
 
 A file past 1 MiB moves to `server-<pid>.jsonl.1`, replacing the one there, so
 a server keeps about 2 MiB. The turn-end hook deletes log files untouched for a
-week, as it does under `turns/` and `outcomes/`. A line that cannot be written
+week, as it does under `turns/` and `outcomes/`, the [saved copies of the words
+sent](#the-saved-copy-of-the-words-sent) through `text_files` included, which
+also sit in `logs/`, as `text-<time>-<pid>-<n>.jsonl`. A line that cannot be written
 to the file still goes to stderr, and the server carries on as before. Once
 stderr's far end has gone, as when Claude Code exits first, lines still land in
 the file, `shutting down` among them. Before the state directory exists, as when
