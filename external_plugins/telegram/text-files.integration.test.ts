@@ -489,6 +489,9 @@ describe.skipIf(process.platform !== 'linux')('text_files: a message read from f
     expect(copies(state)).toEqual([])
     // The server log still names the copy the call meant to write.
     expect(named(state, srv)).toEqual([expect.stringMatching(/; its copy: \/\S+\/logs\/text-\d{8}T\d{9}Z-\d+-\d+\.jsonl"/)])
+    // And it says that copy was not written, and why.
+    const meant = /; its copy: (\S+\.jsonl)"/.exec(named(state, srv)[0]!)![1]
+    expect(readFileSync(join(state, 'logs', `server-${srv.serverPid()}.jsonl`), 'utf8')).toContain(`the copy of the words sent was not written to ${meant}: EACCES`)
     await srv.close()
   }, 30000)
 
@@ -676,6 +679,8 @@ describe.skipIf(process.platform !== 'linux')('text_files: a message read from f
     expect(r.isError).toBeUndefined()
     expect(r.content[0].text.startsWith(`sent 2 parts (ids: 100, 101); the words sent are saved in ${path}, but not all of them: EACCES`)).toBe(true)
     expect(worded(path)).toEqual([{ method: 'sendMessage', message_id: 100, text: paragraphs[0] }])
+    // The server log says the copy was not all written, and why.
+    expect(readFileSync(join(stateDir, 'logs', `server-${srv.serverPid()}.jsonl`), 'utf8')).toContain(`the copy of the words sent was not written to ${path}: EACCES`)
     await srv.close()
   }, 30000)
 })
