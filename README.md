@@ -8,6 +8,10 @@
 [![Telegram Bot API](https://img.shields.io/badge/Telegram_Bot_API-10.3-26A5E4?logo=telegram&logoColor=white)](https://core.telegram.org/bots/api)
 [![License](https://img.shields.io/badge/license-Apache_2.0-blue)](LICENSE)
 
+<img src="docs/claude-telegram-demo.gif" width="320" alt="Claude writes first in a Telegram chat: it offers to review two pull requests, its live subagents message updates in place while the reviews and a test shell run, then it sums up with buttons">
+
+<sub>Illustration: the task and the messages are made up.</sub>
+
 </div>
 
 AXEG0's fork of Anthropic's official Telegram channel plugin. Your bot forwards
