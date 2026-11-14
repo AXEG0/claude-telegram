@@ -4,6 +4,8 @@
 
 **Talk to your Claude Code session from Telegram, and watch it work.**
 
+Sister plugin for Codex: [Telegram for Codex](https://github.com/AXEG0/codex-telegram)
+
 [![Claude Code](https://img.shields.io/badge/Claude_Code-channel_plugin-D97757)](external_plugins/telegram/README.md)
 [![Telegram Bot API](https://img.shields.io/badge/Telegram_Bot_API-10.3-26A5E4?logo=telegram&logoColor=white)](https://core.telegram.org/bots/api)
 [![License](https://img.shields.io/badge/license-Apache_2.0-blue)](LICENSE)
