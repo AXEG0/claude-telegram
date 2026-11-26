@@ -17,10 +17,38 @@ async function fieldsOf(options?: RequestInit): Promise<Record<string, unknown>>
   if (typeof body === 'string') return JSON.parse(body)
   const chunks: Buffer[] = []
   for await (const chunk of body as unknown as AsyncIterable<Uint8Array>) chunks.push(Buffer.from(chunk))
-  const type = new Headers(options!.headers).get('content-type') ?? ''
-  const form = await new Response(Buffer.concat(chunks), { headers: { 'content-type': type } }).formData()
+  return multipartFields(Buffer.concat(chunks), new Headers(options!.headers).get('content-type') ?? '')
+}
+// The fields of a multipart body as grammY writes it (payloadToMultipartItr in
+// its payload.js): each part opens with `--<boundary>` and a line break, its
+// headers end at an empty line, and `\r\n--<boundary>` ends it, `--` after the
+// last one closing the body; a file's part names the file as `filename=`. A
+// field's text is its UTF-8 bytes as they are, as Telegram reads them, so a
+// U+FEFF at a field's start stays: a live read kept the caption '\ufeffx'
+// whole (the live check's caption-ufeff-start, 2026-11-26), which
+// Response.formData() read as 'x'.
+const FIELD_TEXT = new TextDecoder('utf-8', { ignoreBOM: true })
+function multipartFields(body: Buffer, type: string): Record<string, unknown> {
+  const boundary = /;\s*boundary=("?)([^";]+)\1/.exec(type)?.[2]
+  if (!boundary) throw new Error(`the test fixture finds no boundary in the content type ${JSON.stringify(type)}`)
+  const delimiter = Buffer.from(`\r\n--${boundary}`)
+  // The body's first boundary has no line break before it.
+  const whole = Buffer.concat([Buffer.from('\r\n'), body])
   const out: Record<string, unknown> = {}
-  for (const [key, value] of form) out[key] = typeof value === 'string' ? value : `file:${value.name}`
+  for (let at = whole.indexOf(delimiter); at !== -1;) {
+    const start = at + delimiter.length
+    if (whole.subarray(start, start + 2).toString() === '--') break
+    const next = whole.indexOf(delimiter, start)
+    if (next === -1) throw new Error('the test fixture finds no closing boundary in a multipart body')
+    const part = whole.subarray(start + 2, next)
+    const split = part.indexOf('\r\n\r\n')
+    const head = split === -1 ? '' : part.subarray(0, split).toString()
+    const name = /\bname="([^"]*)"/.exec(head)?.[1]
+    if (name === undefined) throw new Error(`the test fixture finds no field name in a multipart part: ${JSON.stringify(head)}`)
+    const file = /\bfilename=(?:"([^"]*)"|([^;\r\n]*))/.exec(head)
+    out[name] = file ? `file:${file[1] ?? file[2]}` : FIELD_TEXT.decode(part.subarray(split + 4))
+    at = next
+  }
   return out
 }
 // grammY sends each file as a part of its own, named in the field that
@@ -336,12 +364,31 @@ async function holdPoll(payload: Record<string, unknown>, signal: AbortSignal | 
 
 const SENDS = ['sendMessage', 'sendPhoto', 'sendDocument', 'sendRichMessage', 'sendMediaGroup']
 
-// Telegram trims spaces and line breaks from both ends of a text, and refuses
-// a text message, or a text edit, with nothing left.
-const trimmed = (text: string) => text.replace(/^[ \n]+|[ \n]+$/g, '')
+// Telegram keeps a text message as the plugin's own rule keeps a caption,
+// telegramTrim in bots.ts, and refuses a text message, or a text edit, that
+// the rule leaves with nothing: an empty text with "message text is empty",
+// which the Bot API server answers before TDLib sees it (its Client.cpp at
+// e3e9dd8e, :12048-12050, for sendMessage and editMessageText alike), and
+// any other with "text must be non-empty", where TDLib keeps a caption as no
+// caption (MessageEntity.cpp:4513-4519 and :4574-4577). TDLib's blank check
+// has no bound on the length (misc.cpp:256-258), so a blank text of any
+// length is refused, as telegramTrim finds one blank at any length. Read: the
+// live check's text cases (live-check.ts, 2026-11-26): a send kept '\tx\t'
+// as 'x', 'a\x01b' as 'a b', and 'a\rb', 'a\u2028b' and 'a\u0333b' as 'ab',
+// and refused ' \n \n ', ' \t\r ', a no-break space alone and U+200B alone
+// with "text must be non-empty", as an edit refused ' \n ' and ' \t\r '. Code
+// for the rest of the rule's characters in a text, which TDLib cleans and
+// trims as it does a caption (fix_formatted_text). The three differences
+// from Telegram named at the end of telegramTrim's comment hold for a text
+// too.
 const EMPTY_TEXT = { error_code: 400, description: 'Bad Request: message text is empty' }
-const emptyText = (method: string, payload: Record<string, unknown>) =>
-  (method === 'sendMessage' || method === 'editMessageText') && typeof payload.text === 'string' && trimmed(payload.text) === ''
+const BLANK_TEXT = { error_code: 400, description: 'Bad Request: text must be non-empty' }
+const textKept = telegramTrim
+const textRefused = (method: string, payload: Record<string, unknown>) => {
+  if ((method !== 'sendMessage' && method !== 'editMessageText') || typeof payload.text !== 'string') return undefined
+  if (payload.text === '') return EMPTY_TEXT
+  return textKept(payload.text) === '' ? BLANK_TEXT : undefined
+}
 
 // A caption as api.telegram.org keeps and counts it is the plugin's own rule,
 // telegramTrim, telegramClean and captionLength in bots.ts, where each part
@@ -349,18 +396,22 @@ const emptyText = (method: string, payload: Record<string, unknown>) =>
 // The differences from Telegram named at the end of telegramTrim's comment hold
 // for the fake too. A send or a caption edit whose caption is over 1024
 // characters once cleaned and trimmed is refused, before the empty check, as
-// TDLib counts it: a live read of sendDocument answered so for 1025 'x' and
-// for 1025 U+1F600, a live read of an edit refused 1025 U+1F600, and by
-// TDLib's code a blank one over 1024 is refused the same way; no read covered
-// that or an album's caption, and the words Telegram gives an edit's refusal
-// are unread.
+// TDLib counts it: a send with "message caption is too long", and an edit with
+// "MEDIA_CAPTION_TOO_LONG", the words of Telegram's own server, as TDLib makes
+// no length check on an edit (see captionLength). Read: a send refused 1025
+// 'x' and 1025 U+1F600, and an edit 1025 U+1F600; the live check
+// (live-check.ts, 2026-11-26) read the same refusal for a send of 1025
+// no-break spaces, blank and over 1024, and for an album's first caption of
+// 1025 'x', and read the words of the edit's.
 const captionKept = telegramTrim
 const LONG_CAPTION = { error_code: 400, description: 'Bad Request: message caption is too long' }
+const LONG_EDIT_CAPTION = { error_code: 400, description: 'Bad Request: MEDIA_CAPTION_TOO_LONG' }
 const longCaption = (method: string, payload: Record<string, unknown>) => {
   const captions = method === 'sendMediaGroup' ? (payload.media as Record<string, unknown>[]).map(m => m.caption)
     : method === 'sendDocument' || method === 'sendPhoto' || method === 'editMessageCaption' ? [payload.caption]
     : []
-  return captions.some(c => typeof c === 'string' && captionLength(telegramClean(c)) > BOT_CAPTION_MAX)
+  if (!captions.some(c => typeof c === 'string' && captionLength(telegramClean(c)) > BOT_CAPTION_MAX)) return undefined
+  return method === 'editMessageCaption' ? LONG_EDIT_CAPTION : LONG_CAPTION
 }
 
 // The rich_message Telegram answers a send or edit of paragraph blocks with,
@@ -403,7 +454,7 @@ function entityOf(piece: string): string | Record<string, string> {
 // file and the caption Telegram kept, none when it is empty as a caption. A
 // rich message's answer carries its rich_message (richAnswer).
 function contentOf(method: string, sent: Record<string, unknown>, uncaptioned: boolean, rule?: Rule): Record<string, unknown> {
-  if (method === 'sendMessage') return { text: trimmed(String(sent.text)) }
+  if (method === 'sendMessage') return { text: textKept(String(sent.text)) }
   if (method === 'sendRichMessage') return richAnswer(sent, rule)
   const type = method === 'sendMediaGroup' ? sent.type : method === 'sendPhoto' ? 'photo' : 'document'
   const name = String(method === 'sendMediaGroup' ? sent.media : sent[String(type)]).replace(/^file:/, '')
@@ -438,9 +489,10 @@ const ME = { id: 123, is_bot: true, first_name: 'Test', username: 'test_bot' }
 // sends to @username, as Telegram hands it to the receiving bot: each send the
 // fake takes to that username is written to dir, at the moment it is logged,
 // as one update per message, from ME in ME's private chat. A text or caption
-// arrives trimmed as Telegram trims it, a file as a document or a photo named
-// file-of-<its name>, an album's messages under one media_group_id, and a
-// reply target as reply_to_message. The bridge numbers the messages from 1.
+// arrives as Telegram keeps it (textKept and captionKept), a file as a
+// document or a photo named file-of-<its name>, an album's messages under one
+// media_group_id, and a reply target as reply_to_message. The bridge numbers
+// the messages from 1.
 // TELEGRAM_TEST_BRIDGE = { dir } without a username delivers those updates in
 // order to this server's getUpdates, each once.
 const bridge = process.env.TELEGRAM_TEST_BRIDGE ? JSON.parse(process.env.TELEGRAM_TEST_BRIDGE) as { dir: string; username?: string } : undefined
@@ -463,7 +515,7 @@ function bridgeSend(method: string, payload: Record<string, unknown>): void {
   }
   const group = `album-of-${bridged + 1}`
   const items: ((n: number) => object)[] =
-    method === 'sendMessage' ? [() => ({ text: trimmed(String(payload.text)) })]
+    method === 'sendMessage' ? [() => ({ text: textKept(String(payload.text)) })]
     : method === 'sendDocument' ? [n => file('document', payload.document, payload.caption, n)]
     : method === 'sendPhoto' ? [n => file('photo', payload.photo, payload.caption, n)]
     : method === 'sendMediaGroup' ? (payload.media as Record<string, unknown>[]).map(m => (n: number) => ({ ...file(m.type, m.media, m.caption, n), media_group_id: group }))
@@ -504,7 +556,7 @@ const answerCall = (async (url: string | URL | Request, options: RequestInit | u
     appendFileSync(process.env.TELEGRAM_TEST_API_LOG!, JSON.stringify({ pid: process.pid, method, payload, at: Date.now(), failed: rule.network }) + '\n')
     throw Object.assign(new TypeError(`${rule.network}: Unable to connect. Is the computer able to access the url?`), { code: rule.network })
   }
-  const refusal = emptyText(method, payload) ? EMPTY_TEXT : longCaption(method, payload) ? LONG_CAPTION : editRefused(method, payload) ?? (rule?.lands ? undefined : rule?.error)
+  const refusal = textRefused(method, payload) ?? longCaption(method, payload) ?? editRefused(method, payload) ?? (rule?.lands ? undefined : rule?.error)
   if (rule?.preMs) await Bun.sleep(rule.preMs)
   const to = n && !refusal ? recipient(payload.chat_id) : undefined
   if (to && nextId !== undefined && !redirectNumbers(payload.chat_id)) to.message_id = nextId++

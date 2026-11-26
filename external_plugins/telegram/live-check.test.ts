@@ -93,8 +93,8 @@ test('each case where Telegram answers otherwise is named with both answers, wit
   expect(r.code).toBe(1)
   const differ = r.lines.filter(l => l.startsWith('DIFFERS'))
   expect(differ).toEqual([
-    'DIFFERS  text-cr: Telegram refused: Bad Request: message text is empty; the stand-in text "a\\rb"; the update it bridged text "a\\rb"',
-    'DIFFERS  text-control: Telegram refused: Bad Request: <token>, <token> and <token>; the stand-in text "a\\u0001b"; the update it bridged text "a\\u0001b"',
+    'DIFFERS  text-cr: Telegram refused: Bad Request: message text is empty; the stand-in text "ab"; the update it bridged text "ab"',
+    'DIFFERS  text-control: Telegram refused: Bad Request: <token>, <token> and <token>; the stand-in text "a b"; the update it bridged text "a b"',
     expect.stringMatching(/^DIFFERS {2}caption-tab-ends: Telegram no caption; the stand-in caption "(x|\\tx\\t)"; the update it bridged caption "(x|\\tx\\t)"$/),
   ])
   expect(r.lines.filter(l => l.startsWith('same')).length).toBe(CASES.length - 3)

@@ -2,9 +2,10 @@
 // The live check: every rule for plain texts and captions that the tests'
 // stand-in for Telegram (fixtures/telegram-preload.ts) keeps, run against
 // Telegram itself and against the stand-in, naming each case where the two
-// differ. The stand-in keeps a caption by the plugin's own rule in bots.ts, so
-// a caption case that differs is a place where the plugin's rule and Telegram
-// part. Rich messages, whose answers the stand-in also shapes, are not covered.
+// differ. The stand-in keeps a text and a caption by the plugin's own rule in
+// bots.ts, so a case that differs in what is kept is a place where the
+// plugin's rule and Telegram part. Rich messages, whose answers the stand-in
+// also shapes, are not covered.
 //
 //   TELEGRAM_LIVE_CHECK_TOKEN=<bot token> bun live-check.ts --chat <chat id> [--pace <ms>]
 //
@@ -60,16 +61,18 @@ const ALONE: [string, string][] = [
   ['u0085-u009f', '\x85\x9f'], ['u200b-tab-u200b', '\u200b\t\u200b'],
 ]
 
-// The stand-in's rules for a text: it trims spaces and line breaks from both
-// ends of a text message, keeps the rest as sent, and refuses a text message,
-// or a text edit, with nothing left; it refuses a text edit of a file and a
-// caption edit of a text. Its rules for a caption are the plugin's own
-// (telegramTrim, telegramClean and captionLength in bots.ts): what it keeps
-// of a caption, sent with a file, with an album's first file or as an edit,
-// none when nothing is left, and its refusal of a caption over 1024 code
-// points once cleaned, sent or as an edit. Each case reads one of them at an
-// edge Telegram may draw elsewhere; the differences from Telegram that the
-// rule itself names in bots.ts are left out.
+// The stand-in's rules for a text are the plugin's rule for a caption
+// (telegramTrim in bots.ts): what it keeps of a text message, and its refusal
+// of a text message, or a text edit, with nothing left, "message text is
+// empty" for an empty text and "text must be non-empty" for any other; it
+// refuses a text edit of a file and a caption edit of a text. Its rules for a
+// caption are the plugin's own (telegramTrim, telegramClean and captionLength
+// in bots.ts): what it keeps of a caption, sent with a file, with an album's
+// first file or as an edit, none when nothing is left, and its refusal of a
+// caption over 1024 code points once cleaned, sent or as an edit, each in
+// Telegram's words. Each case reads one of them at an edge Telegram may draw
+// elsewhere; the differences from Telegram that the rule itself names in
+// bots.ts are left out.
 export const CASES: Case[] = [
   text('text-ends', '  \n kept \n  '),
   text('text-inside', 'a \n b'),
@@ -116,8 +119,8 @@ export const CASES: Case[] = [
   caption('caption-u033f', 'a\u033fb'),
   caption('caption-u200b', 'a\u200bb'),
   caption('caption-nbsp-ends', '\u00a0x\u00a0'),
-  // The stand-in reads a sent caption through Response.formData(), which drops
-  // a U+FEFF at a field's start, so it keeps this as 'x'; the rule keeps it whole.
+  // Response.formData() drops a U+FEFF at a field's start, so the stand-in reads
+  // an upload's fields as their bytes are, keeping this whole as Telegram does.
   caption('caption-ufeff-start', '\ufeffx'),
   caption('caption-tabs-cr-only', ' \t\r '),
   ...ALONE.map(([name, value]) => caption(`caption-only-${name}`, value)),
