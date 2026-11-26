@@ -1077,11 +1077,11 @@ advisory.
 ### Live check
 
 The tests answer the plugin's Bot API calls with a stand-in for Telegram,
-`fixtures/telegram-preload.ts`, which keeps plain texts by rules of its own and
-captions by the plugin's own caption rule in `bots.ts`. `live-check.ts` runs
-every one of those rules against Telegram itself and against the stand-in, and
-names each case where the two differ, so a caption case that differs is a place
-where the plugin's rule and Telegram part. It covers plain texts and captions;
+`fixtures/telegram-preload.ts`, which keeps plain texts and captions by the
+plugin's own caption rule in `bots.ts`. `live-check.ts` runs every rule the
+stand-in keeps for them against Telegram itself and against the stand-in, and
+names each case where the two differ, so a case that differs in what is kept is
+a place where the plugin's rule and Telegram part. It covers plain texts and captions;
 rich messages, whose answers the stand-in also shapes, are not covered:
 
     TELEGRAM_LIVE_CHECK_TOKEN=<bot token> bun live-check.ts --chat <chat id>
@@ -1096,4 +1096,7 @@ It prints no part of the token, and
 exits 0 when every case agrees, 1 when any differs, and 2 when it could not
 run every case or delete every message. `bun test` never runs it and CI has
 no token for it; `live-check.test.ts` runs it with the stand-in in both
-places.
+places, and once more with Telegram replayed offline from Telegram's own
+answers in the last live run, kept in `fixtures/live-check-telegram.json`, so
+the suite fails once the stand-in stops answering a case as Telegram did. A
+case added to the check needs its answer from a live run in that file.

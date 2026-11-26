@@ -1,12 +1,14 @@
 // The live check (live-check.ts) run on the stand-in in both places: its
 // Telegram is the stand-in too, loaded the way every test loads it, so each
 // call it makes to Telegram lands in the stand-in's call log, and a rule
-// (TELEGRAM_TEST_RULES) makes that Telegram answer a case otherwise.
+// (TELEGRAM_TEST_RULES) makes that Telegram answer a case otherwise. The last
+// test runs it with Telegram replayed offline from Telegram's own answers in
+// the last live run.
 import { afterEach, expect, test } from 'bun:test'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { CASES } from './live-check.ts'
+import { CASES, show, type Seen } from './live-check.ts'
 
 // A token that reads plainly fake, with a colon as a real one has, so the
 // check's masking of each of its parts shows.
@@ -21,7 +23,7 @@ type Call = { method: string; payload: Record<string, any>; message_id?: number;
 const dirs: string[] = []
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }) })
 
-async function check(o: { token?: string; args?: string[]; rules?: object[] } = {}) {
+async function check(o: { token?: string; args?: string[]; rules?: object[]; preload?: string; env?: Record<string, string> } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'live-check-test-'))
   dirs.push(dir)
   const log = join(dir, 'api.jsonl')
@@ -29,7 +31,8 @@ async function check(o: { token?: string; args?: string[]; rules?: object[] } = 
   if (process.env.HOME) env.HOME = process.env.HOME
   if (o.token !== undefined) env.TELEGRAM_LIVE_CHECK_TOKEN = o.token
   if (o.rules) env.TELEGRAM_TEST_RULES = JSON.stringify(o.rules)
-  const p = Bun.spawn([process.execPath, '--preload', join(import.meta.dir, 'fixtures', 'telegram-preload.ts'),
+  Object.assign(env, o.env)
+  const p = Bun.spawn([process.execPath, '--preload', join(import.meta.dir, 'fixtures', o.preload ?? 'telegram-preload.ts'),
     join(import.meta.dir, 'live-check.ts'), ...(o.args ?? ['--chat', '5', '--pace', '0'])], { env, stdout: 'pipe', stderr: 'pipe' })
   const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()])
   const code = await p.exited
@@ -170,4 +173,24 @@ test('a 429 waits out its retry_after and sends the call again', async () => {
   expect(second!.payload).toEqual(first!.payload)
   expect(second!.refused).toBeUndefined()
   expect(r.lines.at(-1)).toBe(`${CASES.length} of ${CASES.length} cases agree`)
+}, BOUND)
+
+// Telegram's answer to each case in the live check's last run against Telegram
+// itself (2026-11-26, on main at a7d9b970), as the check read it, by case name.
+// Replayed offline as the check's Telegram (fixtures/live-check-replay.ts),
+// it holds the stand-in to those answers in every run of the suite, where the
+// check itself needs a token: a stand-in that keeps or refuses any case
+// otherwise fails here, a change to the plugin's caption rule it shares
+// included. A case added to the check needs its answer from a live run first.
+test('the stand-in answers every case as Telegram answered it in the last live run, replayed offline', async () => {
+  const answers = JSON.parse(readFileSync(join(import.meta.dir, 'fixtures', 'live-check-telegram.json'), 'utf8')) as Record<string, Seen>
+  expect(Object.keys(answers)).toEqual(CASES.map(c => c.name))
+  const r = await check({ token: TOKEN, preload: 'live-check-replay.ts',
+    env: { LIVE_CHECK_REPLAY_CASES: JSON.stringify(CASES.map(({ name, method, on }) => ({ name, method, on }))) } })
+  expect(r.err).toBe('')
+  // Each case the stand-in answers otherwise shows here with both answers.
+  expect(r.lines.filter(l => !l.startsWith('same     '))).toEqual([`${CASES.length} of ${CASES.length} cases agree`])
+  expect(r.lines).toEqual([...CASES.map(c => `same     ${c.name}: ${show(answers[c.name]!)}`), `${CASES.length} of ${CASES.length} cases agree`])
+  expect(r.code).toBe(0)
+  for (const part of PARTS) expect(r.out + r.err).not.toContain(part)
 }, BOUND)
