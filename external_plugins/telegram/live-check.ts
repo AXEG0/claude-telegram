@@ -1,9 +1,10 @@
 #!/usr/bin/env bun
-// The live check: every text and caption rule the tests' stand-in for
-// Telegram (fixtures/telegram-preload.ts) keeps, run against Telegram itself
-// and against the stand-in, naming each case where the two differ. The
-// stand-in keeps a caption by the plugin's own rule in bots.ts, so a caption
-// case that differs is a place where the plugin's rule and Telegram part.
+// The live check: every rule for plain texts and captions that the tests'
+// stand-in for Telegram (fixtures/telegram-preload.ts) keeps, run against
+// Telegram itself and against the stand-in, naming each case where the two
+// differ. The stand-in keeps a caption by the plugin's own rule in bots.ts, so
+// a caption case that differs is a place where the plugin's rule and Telegram
+// part. Rich messages, whose answers the stand-in also shapes, are not covered.
 //
 //   TELEGRAM_LIVE_CHECK_TOKEN=<bot token> bun live-check.ts --chat <chat id> [--pace <ms>]
 //

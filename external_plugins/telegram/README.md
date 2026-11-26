@@ -1077,11 +1077,12 @@ advisory.
 ### Live check
 
 The tests answer the plugin's Bot API calls with a stand-in for Telegram,
-`fixtures/telegram-preload.ts`, which keeps texts by rules of its own and
+`fixtures/telegram-preload.ts`, which keeps plain texts by rules of its own and
 captions by the plugin's own caption rule in `bots.ts`. `live-check.ts` runs
 every one of those rules against Telegram itself and against the stand-in, and
 names each case where the two differ, so a caption case that differs is a place
-where the plugin's rule and Telegram part:
+where the plugin's rule and Telegram part. It covers plain texts and captions;
+rich messages, whose answers the stand-in also shapes, are not covered:
 
     TELEGRAM_LIVE_CHECK_TOKEN=<bot token> bun live-check.ts --chat <chat id>
 
