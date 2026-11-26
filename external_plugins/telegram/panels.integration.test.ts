@@ -122,8 +122,14 @@ describe.skipIf(process.platform !== 'linux')('the records of open subagents mes
     process.kill(pid, 'SIGKILL')
     await until(() => s.channel.exited())
     await nextServer(s.dir)
-    await swept(s.dir, byMessage.get(7)!, pid)
-    await swept(s.dir, byMessage.get(8)!, pid)
+    // The sweep closes one message at each of the chat's slots, in the order it
+    // reads the records folder, which the filesystem sets: either message can
+    // go first, and the other goes one chat gap after it. Each wait keeps the
+    // bound the two waits in a fixed order had.
+    const both = [byMessage.get(7)!, byMessage.get(8)!]
+    const closed = (rec: Stored) => edits(s.dir, rec.message).some(c => c.payload.text === rec.text && c.pid !== pid)
+    await until(() => both.some(closed), 4 * AGENT_TICK_MS + 2000)
+    await until(() => both.every(closed), 4 * AGENT_TICK_MS + 2000)
     await until(() => records(s.dir).length === 0)
   }, 60000)
 
