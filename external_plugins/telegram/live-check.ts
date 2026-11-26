@@ -115,6 +115,9 @@ export const CASES: Case[] = [
   caption('caption-u033f', 'a\u033fb'),
   caption('caption-u200b', 'a\u200bb'),
   caption('caption-nbsp-ends', '\u00a0x\u00a0'),
+  // The stand-in reads a sent caption through Response.formData(), which drops
+  // a U+FEFF at a field's start, so it keeps this as 'x'; the rule keeps it whole.
+  caption('caption-ufeff-start', '\ufeffx'),
   caption('caption-tabs-cr-only', ' \t\r '),
   ...ALONE.map(([name, value]) => caption(`caption-only-${name}`, value)),
   caption('caption-1024-in-tabs', '\t' + x(1024) + '\t'),
