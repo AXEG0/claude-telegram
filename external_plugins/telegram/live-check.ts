@@ -1,7 +1,9 @@
 #!/usr/bin/env bun
 // The live check: every text and caption rule the tests' stand-in for
 // Telegram (fixtures/telegram-preload.ts) keeps, run against Telegram itself
-// and against the stand-in, naming each case where the two differ.
+// and against the stand-in, naming each case where the two differ. The
+// stand-in keeps a caption by the plugin's own rule in bots.ts, so a caption
+// case that differs is a place where the plugin's rule and Telegram part.
 //
 //   TELEGRAM_LIVE_CHECK_TOKEN=<bot token> bun live-check.ts --chat <chat id> [--pace <ms>]
 //
@@ -41,6 +43,8 @@ const textEdit = (name: string, value: string, on?: 'file'): Case => ({ name, me
 const captionEdit = (name: string, value: string, on?: 'text'): Case => ({ name, method: 'editMessageCaption', value, ...(on ? { on } : {}) })
 const x = (n: number) => 'x'.repeat(n)
 const lines = Array.from({ length: 25 }, () => 'l'.repeat(40)).join('\r\n')
+// 1025 code points in 513 grapheme clusters: 512 pairs of 'x' and U+0301, then 'x'.
+const combining = 'x\u0301'.repeat(512) + 'x'
 // Each character a caption of nothing but it is checked with, by its name.
 const ALONE: [string, string][] = [
   ['nbsp', '\u00a0'], ['u200b', '\u200b'], ['u0333', '\u0333'], ['u2000', '\u2000'], ['u2009', '\u2009'], ['u200a', '\u200a'],
@@ -49,15 +53,21 @@ const ALONE: [string, string][] = [
   ['u2001', '\u2001'], ['u2002', '\u2002'], ['u2003', '\u2003'], ['u2004', '\u2004'], ['u2005', '\u2005'], ['u2006', '\u2006'],
   ['u2007', '\u2007'], ['u2008', '\u2008'], ['u205f', '\u205f'], ['ufffc', '\ufffc'], ['ue0000', '\u{e0000}'], ['ue0001', '\u{e0001}'],
   ['ue0020', '\u{e0020}'], ['ue0041', '\u{e0041}'], ['ue007f', '\u{e007f}'], ['ue0080', '\u{e0080}'],
+  ['u0085-u009f', '\x85\x9f'], ['u200b-tab-u200b', '\u200b\t\u200b'],
 ]
 
 // The stand-in's rules for a text: it trims spaces and line breaks from both
 // ends of a text message, keeps the rest as sent, and refuses a text message,
 // or a text edit, with nothing left; it refuses a text edit of a file and a
-// caption edit of a text. Its rules for a caption: what it keeps of a
-// caption, sent with a file, with an album's first file or as an edit, none
-// when nothing is left, and its refusal of a caption over 1024 characters.
-// Each case reads one of them at an edge Telegram may draw elsewhere.
+// caption edit of a text. Its rules for a caption are the plugin's own
+// (telegramTrim, telegramClean and captionLength in bots.ts): what it keeps
+// of a caption, sent with a file, with an album's first file or as an edit,
+// none when nothing is left, and its refusal of a sent caption over 1024 code
+// points once cleaned. It refuses no caption edit for its length, where a live
+// read of Telegram refused an edit of 1025 characters, so the edit of 1025
+// U+1F600 here is expected to differ on Telegram. Each case reads one of them
+// at an edge Telegram may draw elsewhere; the differences from Telegram that
+// the rule itself names in bots.ts are left out.
 export const CASES: Case[] = [
   text('text-ends', '  \n kept \n  '),
   text('text-inside', 'a \n b'),
@@ -81,6 +91,7 @@ export const CASES: Case[] = [
   caption('caption-inside', 'a \n b'),
   caption('caption-spaces-only', ' \n '),
   caption('caption-tab-ends', '\tx\t'),
+  caption('caption-tab-inside', 'a\tb'),
   caption('caption-control-ends', '\x01x\x01'),
   caption('caption-x00', 'a\x00b'),
   caption('caption-x01', 'a\x01b'),
@@ -88,6 +99,7 @@ export const CASES: Case[] = [
   caption('caption-x0c', 'a\x0cb'),
   caption('caption-x1f', 'a\x1fb'),
   caption('caption-x7f', 'a\x7fb'),
+  caption('caption-c1', 'a\x85b\x9fc'),
   caption('caption-lf', 'a\nb'),
   caption('caption-cr', 'a\rb'),
   caption('caption-u2027', 'a\u2027b'),
@@ -111,13 +123,20 @@ export const CASES: Case[] = [
   caption('caption-1025-emoji', '\u{1f600}'.repeat(1025)),
   caption('caption-1025', x(1025)),
   caption('caption-nbsp-and-1024', '\u00a0' + x(1024)),
+  caption('caption-1025-combining', combining),
+  caption('caption-1025-nbsp', '\u00a0'.repeat(1025)),
+  caption('caption-1500-tabs', '\t'.repeat(1500)),
   album('album-tab-ends', '\tx\t'),
   album('album-1025', x(1025)),
   captionEdit('caption-edit-ends', ' \n edited \n '),
   captionEdit('caption-edit-tab-ends', '\tedited\t'),
+  captionEdit('caption-edit-tab-inside', 'a\tb'),
+  captionEdit('caption-edit-c1', 'a\x85b\x9fc'),
+  captionEdit('caption-edit-1024-emoji', '\u{1f600}'.repeat(1024)),
+  captionEdit('caption-edit-1025-emoji', '\u{1f600}'.repeat(1025)),
   captionEdit('caption-edit-mixed', 'a\x00b\x0cc\u202ad\u202be\u030af\u0333g\u033fh\u2027i\u202fj\r'),
   captionEdit('caption-edit-tabs-cr-only', ' \t\r '),
-  ...['nbsp', 'u200b', 'u0333', 'u2009', 'u200c', 'u202f', 'ufeff'].map(name =>
+  ...['nbsp', 'u200b', 'u0333', 'u2009', 'u200c', 'u202f', 'ufeff', 'u2060', 'ue0080', 'u0085-u009f', 'u200b-tab-u200b'].map(name =>
     captionEdit(`caption-edit-only-${name}`, ALONE.find(([n]) => n === name)![1])),
 ]
 
