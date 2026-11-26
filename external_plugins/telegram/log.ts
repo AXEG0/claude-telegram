@@ -2,8 +2,10 @@
 // logs/server-<pid>.jsonl in the state folder, since Claude Code keeps a
 // server's stderr only until it connects. Beside it, logs/calls-<pid>.jsonl
 // holds the record of every Bot API call but a poll (see flood.ts), written by
-// logCall and never to stderr. Nothing happens at import.
-import { appendFileSync, mkdirSync, readFileSync, renameSync, statSync } from 'fs'
+// logCall and never to stderr, and logs/text-<time>-<pid>-<n>.jsonl the saved
+// copy of the words a call sent from text_files (see createCopy). Nothing
+// happens at import.
+import { appendFileSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from 'fs'
 import { join } from 'path'
 import { format } from 'util'
 
@@ -61,6 +63,7 @@ export function logCall(line: object): void {
 export function setupLog(stateDir: string): void {
   let version = 'unknown'
   try { version = String(JSON.parse(readFileSync(join(import.meta.dir, '.claude-plugin', 'plugin.json'), 'utf8')).version ?? 'unknown') } catch {}
+  copiesAt = { dir: join(stateDir, 'logs'), version }
   const exact = [process.env.TELEGRAM_BOT_TOKEN, process.env.TELEGRAM_STT_OPENAI_KEY].map(s => s?.trim()).filter((s): s is string => !!s && s.length >= 8)
   const mask = (t: string) => exact.reduce((acc, s) => acc.split(s).join('<masked>'), t).replace(SHAPE, '<masked>')
   const append = appender(join(stateDir, 'logs'), `server-${process.pid}.jsonl`, SERVER_BOUND, version)
@@ -94,4 +97,108 @@ export function setupLog(stateDir: string): void {
     const head = `(node:${process.pid}) ${code ? `[${code}] ` : ''}${errorText(w)}`
     process.stderr.write(`${head}${typeof detail === 'string' ? `\n${detail}` : ''}\n`)
   })
+}
+
+// The saved copies of the words sent. A reply or edit_message whose text comes
+// from text_files writes logs/text-<time>-<pid>-<n>.jsonl: <time> when the call
+// began, in UTC, as 20261110T091500123Z, the server's pid, and the call's
+// number in this process, so no two calls share a file. It holds one line for
+// each message Telegram accepted, or may have, with the envelope every log
+// line carries, the tool, the chat, the message id, the Telegram method, and
+// the text exactly as that call carried it, under the payload's own name:
+// text (with parse_mode when one is set), markdown for a rich message, or
+// caption. The chat is the one Telegram's answer names, where it names one,
+// else the one the call asked for. A send whose outcome is unknown is marked
+// delivery "unknown", with no message id, since Telegram gave none. Unlike the
+// server log and the call record, a copy holds message text, nothing masked,
+// so it takes the folder's owner-only rule. A call's first line first puts
+// the server log's line for the call, naming its files and the copy's path,
+// never the text, so the log names a copy exactly when a message went or may
+// have, whether or not the copy can be written; once written, it deletes the
+// oldest other copies until all of them fit in COPIES_MAX; the turn-end hook's
+// week-old sweep of logs/ takes the rest. A line that cannot be written never
+// stops the call: the answer says the words were not saved, and why.
+export const COPIES_MAX = 64 * 1024 * 1024
+const COPY_NAME = /^text-\d{8}T\d{9}Z-\d+-\d+\.jsonl$/
+let copiesAt: { dir: string; version: string } | undefined
+let copiesMade = 0
+
+export type CopyLine = {
+  method: string
+  chat?: string
+  message_id?: number
+  delivery?: 'unknown'
+  text?: string
+  markdown?: string
+  caption?: string
+  parse_mode?: string
+}
+export type Copy = {
+  path: string
+  line(fields: CopyLine): void
+  // What the call's answer says of its copy: its path; that the words, or
+  // some of them, were not saved, and why; or nothing, when no message went.
+  note(): string
+}
+
+// A copy for a call to chat that began at began, its text from the files
+// files names (their paths, sizes and sha256s).
+export function createCopy(tool: string, chat: string, began: Date, files: string): Copy {
+  const at = copiesAt
+  const name = `text-${began.toISOString().replace(/[-:.]/g, '')}-${process.pid}-${++copiesMade}.jsonl`
+  const path = at ? join(at.dir, name) : name
+  let lines = 0
+  let failed: string | undefined
+  let ragged = false
+  let logged = false
+  return {
+    path,
+    line(fields) {
+      if (!logged) {
+        logged = true
+        process.stderr.write(`telegram channel: ${tool} to chat ${chat}: text from ${files}; its copy: ${path}\n`)
+      }
+      try {
+        if (!at) throw new Error('the server log was never set up')
+        try { mkdirSync(at.dir, { mode: 0o700 }) } catch {}
+        appendFileSync(path, `${ragged ? '\n' : ''}${JSON.stringify({ at: new Date().toISOString(), pid: process.pid, version: at.version, tool, chat, ...fields })}\n`, { mode: 0o600 })
+      } catch (err) {
+        ragged = true
+        if (failed === undefined) {
+          failed = err instanceof Error ? err.message : String(err)
+          process.stderr.write(`telegram channel: not all of the words sent were saved in ${path}: ${failed}\n`)
+        }
+        return
+      }
+      ragged = false
+      if (lines++ === 0) pruneCopies(at!.dir, name)
+    },
+    note() {
+      if (failed === undefined) return lines ? `; the words sent are saved in ${path}` : ''
+      return lines
+        ? `; the words sent are saved in ${path}, but not all of them: ${failed}`
+        : `; the words sent were not saved: ${failed}`
+    },
+  }
+}
+
+// Deletes the oldest copies but the one named keep until all of them fit in
+// COPIES_MAX. Several servers share the folder, so a copy gone meanwhile is
+// skipped.
+function pruneCopies(dir: string, keep: string): void {
+  let names: string[]
+  try { names = readdirSync(dir).filter(n => COPY_NAME.test(n)) } catch { return }
+  const copies = names.flatMap(n => {
+    try {
+      const st = statSync(join(dir, n))
+      return [{ n, size: st.size, mtime: st.mtimeMs }]
+    } catch { return [] }
+  })
+  let total = copies.reduce((sum, c) => sum + c.size, 0)
+  const oldest = copies.filter(c => c.n !== keep).sort((a, b) => a.mtime - b.mtime || (a.n < b.n ? -1 : 1))
+  for (const c of oldest) {
+    if (total <= COPIES_MAX) break
+    try { rmSync(join(dir, c.n), { force: true }) } catch {}
+    total -= c.size
+  }
 }

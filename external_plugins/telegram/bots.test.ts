@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { BOT_TEXT_MAX, botReply, botTextPieces, BOT_USERNAME, CHAT_ID, createBotLookup, createConfirm, createPeers, listed, noticeChat, PeerError, plainObject, sendStyle, telegramTrim, type Peer } from './bots.ts'
+import { BOT_TEXT_MAX, botReply, botTextPieces, BOT_USERNAME, CHAT_ID, createBotLookup, createConfirm, createPeers, listed, noticeChat, PeerError, plainObject, sendStyle, telegramClean, telegramTrim, captionLength, type Peer } from './bots.ts'
 import { FRAGMENT_CHARS } from './batch.ts'
 
 // Another bot, made up for these tests.
@@ -691,14 +691,126 @@ describe('a reply with files to a bot', () => {
     expect(botReply('t', files(21)).groups.map(g => g.length)).toEqual([10, 10, 1])
   })
 
-  test('carries a text of up to 1024 characters as the first file\'s caption, a longer one after the files, and none that is empty once trimmed', () => {
+  test('carries a text of up to 1024 characters as the first file\'s caption, kept and counted as Telegram keeps and counts a caption, a longer one after the files, and none that is empty as a caption', () => {
+    const one = (caption: string) => ({ groups: [files(1)], caption, pieces: [] })
     expect(botReply('  the files\n', files(2))).toEqual({ groups: [files(2)], caption: 'the files', pieces: [] })
-    expect(botReply('x'.repeat(1024), files(1))).toEqual({ groups: [files(1)], caption: 'x'.repeat(1024), pieces: [] })
+    expect(botReply('x'.repeat(1024), files(1))).toEqual(one('x'.repeat(1024)))
     expect(botReply('x'.repeat(1025), files(1))).toEqual({ groups: [files(1)], pieces: ['x'.repeat(1025)] })
     expect(botReply('', files(1))).toEqual({ groups: [files(1)], pieces: [] })
     expect(botReply(' \n \n', files(1))).toEqual({ groups: [files(1)], pieces: [] })
-    // Telegram trims only spaces and line breaks.
-    expect(telegramTrim('\t a b \n')).toBe('\t a b')
+    // Telegram turns every control character below a space but the line
+    // break into a space, a tab included, and drops every carriage return,
+    // every character from U+2028 to U+202E and the combining marks U+030A,
+    // U+0333 and U+033F, then trims spaces and line breaks from both ends.
+    // Each row of this table is a live read of api.telegram.org. The lines
+    // after it also hold what rests on TDLib's code alone (see telegramTrim):
+    // 0x0E, U+202D and the mixes.
+    for (const [sent, kept] of [
+      ['\tx\t', 'x'], ['\x01x\x01', 'x'],
+      ['a\x00b', 'a b'], ['a\x01b', 'a b'], ['a\x0bb', 'a b'], ['a\x0cb', 'a b'], ['a\x1fb', 'a b'],
+      ['a\rb', 'ab'], ['a\u2028b', 'ab'], ['a\u2029b', 'ab'], ['a\u202ab', 'ab'], ['a\u202bb', 'ab'], ['a\u202eb', 'ab'],
+      ['a\u030ab', 'ab'], ['a\u0333b', 'ab'], ['a\u033fb', 'ab'],
+      // It left DEL, U+2027, U+202F, U+200B, a no-break space at each end and
+      // a line break as sent.
+      ['a\x7fb', 'a\x7fb'], ['a\u2027b', 'a\u2027b'], ['a\u202fb', 'a\u202fb'], ['a\u200bb', 'a\u200bb'],
+      ['\u00a0x\u00a0', '\u00a0x\u00a0'], ['a\nb', 'a\nb'],
+      // live8, 2026-11-06: a send of 'a' TAB 'b' kept 'a b', of LF 'x' LF kept
+      // 'x', and of 'a' U+0085 'b' U+009F 'c' and of U+0085 U+009F alone kept
+      // each as sent, the C1 controls neither spaced nor dropped.
+      ['a\tb', 'a b'], ['\nx\n', 'x'], ['a\x85b\x9fc', 'a\x85b\x9fc'], ['\x85\x9f', '\x85\x9f'],
+      // It answered a send or a caption edit of U+0333 or of one of these
+      // invisible characters alone with no caption, so a caption of nothing
+      // but those is none, while U+2060 alone, and U+E0080 just past the tags,
+      // were kept.
+      ['\u0333', ''], ['\u00a0', ''], ['\u200b', ''], ['\u202f', ''], ['\u200c', ''], ['\u200d', ''],
+      ['\u200e', ''], ['\u200f', ''], ['\ufeff', ''], ['\u2000', ''], ['\u2009', ''], ['\u200a', ''],
+      ['\u3000', ''], ['\u2800', ''], ['\u00a0\u200b', ''], ['\u2060', '\u2060'],
+      ['\u1680', ''], ['\u2001', ''], ['\u2002', ''], ['\u2003', ''], ['\u2004', ''], ['\u2005', ''],
+      ['\u2006', ''], ['\u2007', ''], ['\u2008', ''], ['\u205f', ''], ['\u180e', ''], ['\ufffc', ''],
+      ['\u{e0000}', ''], ['\u{e0001}', ''], ['\u{e0020}', ''], ['\u{e0041}', ''], ['\u{e007f}', ''],
+      ['\u{e0080}', '\u{e0080}'],
+    ]) expect(telegramTrim(sent!)).toBe(kept!)
+    // The mixes below, beyond U+00A0 then U+200B, and these characters beside
+    // text, beyond a no-break space at each end and U+202F and U+200B inside,
+    // rest on TDLib's code rather than a read (see telegramTrim).
+    expect(telegramTrim('\u1680\u{e0041}\n\ufffc\u205f\u2005\u180e\u{e007f}')).toBe('')
+    expect(telegramTrim('\u{e0041}x\u1680')).toBe('\u{e0041}x\u1680')
+    expect(telegramTrim(' \u200b\u00a0\n\u00a0 ')).toBe('')
+    expect(telegramTrim('\u3000\u2800\ufeff\n\u200e\u202f\u2000\u200a')).toBe('')
+    expect(telegramTrim('\u202fx\u3000')).toBe('\u202fx\u3000')
+    expect(telegramTrim('\u00a0\u200bx\u200b')).toBe('\u00a0\u200bx\u200b')
+    expect(telegramTrim('\r\n\ta\tb\r\n \r')).toBe('a b')
+    expect(telegramTrim('\u2028\n\x00a\x0e\u202db\x1f\u2029')).toBe('a b')
+    expect(botReply('a\rb', files(1))).toEqual(one('ab'))
+    // A tab between characters becomes a space (live8, 2026-11-06: 'a' TAB 'b'
+    // kept as 'a b' on a send and an edit).
+    expect(botReply('\tthe\tnote\t', files(1))).toEqual(one('the note'))
+    // A text of tabs and carriage returns is empty as a caption: Telegram
+    // answered a caption edit to ' \t\r ' with no caption.
+    expect(botReply(' \t\r ', files(1))).toEqual({ groups: [files(1)], pieces: [] })
+    expect(botReply('\x01\u2028\x0b\u202e\x1f', files(1))).toEqual({ groups: [files(1)], pieces: [] })
+    expect(botReply(' \t\u00a0\u0333\r\u200b\n', files(1))).toEqual({ groups: [files(1)], pieces: [] })
+    expect(botReply('\u202f\u200c\ufeff\u2009\u2800', files(1))).toEqual({ groups: [files(1)], pieces: [] })
+    // A space between blank characters, here the one a tab becomes, is blank
+    // too (code: misc.cpp:231, through is_empty_string; no read).
+    expect(botReply('\u200b\t\u200b', files(1))).toEqual({ groups: [files(1)], pieces: [] })
+    // A text over 1024 characters as written that telegramTrim finds empty
+    // sends the file alone, where it once went after the files as text
+    // messages, which TDLib refuses with nothing in them (code:
+    // InputMessageText.cpp:61-62, then MessageEntity.cpp:4513-4520 for the
+    // tabs, once they are spaces, and :4574-4577 for the no-break spaces; no
+    // read). As a caption, by TDLib's code alone, 1,500 tabs are no caption,
+    // since they are spaces once cleaned and are cleared before the count
+    // (MessageEntity.cpp:4513-4517), while 1,500 no-break spaces are kept and
+    // refused as too long (MessageEntity.cpp:4578-4581 with :4665,
+    // MessageContent.cpp:5293). So for the second the file alone is the
+    // plugin's own choice, the one outcome that does not fail, and
+    // telegramClean gives the text Telegram counts.
+    expect(botReply('\t'.repeat(1500), files(1))).toEqual({ groups: [files(1)], pieces: [] })
+    expect(botReply('\u00a0'.repeat(1500), files(1))).toEqual({ groups: [files(1)], pieces: [] })
+    expect(telegramClean('\t'.repeat(1500))).toBe('')
+    expect(captionLength(telegramClean('\u00a0'.repeat(1500)))).toBe(1500)
+    expect(botReply('\u2060', files(1))).toEqual(one('\u2060'))
+    expect(botReply('\u1680\u180e\u2003\u205f\ufffc\u{e0020}', files(1))).toEqual({ groups: [files(1)], pieces: [] })
+    expect(botReply('\u{e0080}', files(1))).toEqual(one('\u{e0080}'))
+    // live8, 2026-11-06: U+0085 U+009F alone stayed a caption, as sent.
+    expect(botReply('\x85\x9f', files(1))).toEqual(one('\x85\x9f'))
+    // A no-break space beside anything else stays, and it counts: Telegram
+    // kept one at each end, where JavaScript's own trim would remove it.
+    expect(botReply(' \t\u00a0x\r\n', files(1))).toEqual(one('\u00a0x'))
+    expect(botReply('\u00a0' + 'x'.repeat(1024), files(1))).toEqual({ groups: [files(1)], pieces: ['\u00a0' + 'x'.repeat(1024)] })
+    // The 1024 counts what Telegram keeps, in characters (code points): it
+    // took 1024 characters between two tabs, and 1024 followed by a carriage
+    // return, and 1024 characters outside the Basic Multilingual Plane, 2,048
+    // UTF-16 units, and refused 1025 of those.
+    expect(botReply('\t' + 'x'.repeat(1024) + '\t', files(1))).toEqual(one('x'.repeat(1024)))
+    expect(botReply('x'.repeat(1024) + '\r', files(1))).toEqual(one('x'.repeat(1024)))
+    expect(botReply('\x01' + 'x'.repeat(512) + '\u2028' + 'x'.repeat(512) + '\u202e', files(1))).toEqual(one('x'.repeat(1024)))
+    expect(botReply('\u0333' + 'x'.repeat(512) + '\u030a' + 'x'.repeat(512) + '\u033f', files(1))).toEqual(one('x'.repeat(1024)))
+    // 1,048 UTF-16 units, and 1,024 characters once its carriage returns go.
+    const lines = Array.from({ length: 25 }, () => 'l'.repeat(40))
+    expect(botReply(lines.join('\r\n'), files(1))).toEqual(one(lines.join('\n')))
+    expect(botReply('\u{1F600}'.repeat(1024), files(1))).toEqual(one('\u{1F600}'.repeat(1024)))
+    expect(botReply('\u{1F600}'.repeat(1025), files(1))).toEqual({ groups: [files(1)], pieces: ['\u{1F600}'.repeat(1025)] })
+    // live8, 2026-11-06: Telegram refused 512 pairs of 'x' and U+0301, then
+    // one 'x', 1025 code points in 513 grapheme clusters, as too long, so the
+    // count is in code points, not clusters.
+    const marked = 'x\u0301'.repeat(512) + 'x'
+    expect(botReply(marked, files(1))).toEqual({ groups: [files(1)], pieces: [marked] })
+    // A text over 32,768 bytes as written goes as the caption the rule keeps,
+    // where the Bot API server would refuse the raw text as too long (code:
+    // Client.cpp:11957-11959 at e3e9dd8e; no read). The plugin adds no
+    // refusal of its own (see the end of telegramTrim's comment).
+    expect(botReply('x' + '\t'.repeat(33000), files(1))).toEqual(one('x'))
+    // 33,000 tabs, a blank text over 32,768 bytes as written, send the file
+    // alone, where the Bot API server would refuse the raw text as too long
+    // (code: Client.cpp:11957-11959 at e3e9dd8e; no read).
+    expect(botReply('\t'.repeat(33000), files(1))).toEqual({ groups: [files(1)], pieces: [] })
+    // A longer text goes as text messages, as before: only spaces and line
+    // breaks are trimmed from its ends, and its tabs and carriage returns go
+    // as written.
+    const long = '\t' + 'x'.repeat(600) + '\r\n\t' + 'y'.repeat(600) + '\r'
+    expect(botReply(` \n${long}\n `, files(1))).toEqual({ groups: [files(1)], pieces: [long] })
   })
 })
 
@@ -718,12 +830,12 @@ describe('a long text to a bot', () => {
     const pieces = botTextPieces(text)
     expect(glued(pieces)).toBe(text)
     expect(pieces[0]!.length).toBe(4094)
-    for (const p of pieces) expect(telegramTrim(p)).toBe(p)
+    for (const p of pieces) expect(p).not.toMatch(/^[ \n]|[ \n]$/)
     // Prose: every cut between two letters of a word.
     const prose = 'the quick brown fox jumps over the lazy dog\n'.repeat(400).trim()
     const cut = botTextPieces(prose)
     expect(glued(cut)).toBe(prose)
-    for (const p of cut) expect(telegramTrim(p)).toBe(p)
+    for (const p of cut) expect(p).not.toMatch(/^[ \n]|[ \n]$/)
     for (const p of cut.slice(0, -1)) {
       expect(p.length).toBeLessThanOrEqual(BOT_TEXT_MAX)
       expect(p.length).toBeGreaterThanOrEqual(FRAGMENT_CHARS)

@@ -63,3 +63,10 @@ jobs:
           fi
           echo "The suite took ${took} s on $(nproc) cores, within its $((bound_ms / 1000)) s bound."
           exit "$status"
+      # Fails while the lock holds a package with a known advisory (npm's
+      # advisory database). Runs after the suite, which keeps its own result.
+      # The lock moves by hand, each release at least 7 days old, never by
+      # `bun audit fix`, which can take a younger one.
+      - name: bun audit
+        if: ${{ !cancelled() }}
+        run: bun audit

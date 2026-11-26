@@ -1281,7 +1281,7 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     await t.sender.close()
   }, 15000)
 
-  test('edit_message with text on a file whose caption holds the reply\'s text edits that caption, trimmed as Telegram trims it, up to 1024 characters, and makes no call for one empty once trimmed or longer', async () => {
+  test('edit_message with text on a file whose caption holds the reply\'s text edits that caption, kept and counted as Telegram keeps and counts a caption, up to 1024 characters, and makes no call for one empty as a caption or longer', async () => {
     const t = await toPeerBot()
     await t.reply({ text: 'the report', files: [t.file('report.pdf')] })
     const id = sends(t.dir)[0]!.message_id!
@@ -1296,27 +1296,96 @@ describe.skipIf(process.platform !== 'linux')('polling ownership in the running 
     from = calls(t.dir).length
     expect((await edit(`  \n${most}\n  `)).content[0].text).toBe(edited)
     expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', most]])
-    // Telegram trims only spaces and line breaks, so a tab at each kept end stays.
+    // The edit takes the send's rule (see telegramTrim) and sends what it
+    // keeps. Read (live8, 2026-11-06): an edit of 'a' TAB 'b' kept 'a b'. The
+    // other characters in these edits were read on a send, and an edit parses
+    // its caption as a send does in TDLib's code
+    // (MessagesManager.cpp:23805-23806).
     from = calls(t.dir).length
-    expect((await edit(' \n\tcorrected note\t\n ')).content[0].text).toBe(edited)
-    expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', '\tcorrected note\t']])
-    // The count is of what Telegram would keep.
+    expect((await edit('a\tb')).content[0].text).toBe(edited)
+    expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', 'a b']])
     from = calls(t.dir).length
-    expect(failure(await edit(`  \n${'z'.repeat(1025)}\n  `))).toBe(
-      'edit_message failed: this text has 1025 characters, over the 1024 a caption holds; nothing was edited; send it as a new reply')
-    for (const text of ['  \n ', '']) {
+    expect((await edit(' \n\tcorrected\r\nnote\tagain\t\r\n ')).content[0].text).toBe(edited)
+    expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', 'corrected\nnote again']])
+    from = calls(t.dir).length
+    expect((await edit('\x0bthe\x0cfinal\u2028\u202e note\x1f\u2029')).content[0].text).toBe(edited)
+    expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', 'the final note']])
+    from = calls(t.dir).length
+    expect((await edit('\u030aone\u0333 two\x00three\u033f\u202b')).content[0].text).toBe(edited)
+    expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', 'one two three']])
+    // These stay as sent: Telegram kept each on an edit (live8, 2026-11-06),
+    // U+2060 alone, U+E0080 alone, 'a' U+0085 'b' U+009F 'c' and U+0085 U+009F
+    // alone, the C1 controls neither spaced nor dropped.
+    for (const kept of ['\u2060', '\u{e0080}', 'a\x85b\x9fc', '\x85\x9f']) {
+      from = calls(t.dir).length
+      expect((await edit(kept)).content[0].text).toBe(edited)
+      expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', kept]])
+    }
+    // An edit of a text over 32,768 bytes as written is made with the caption
+    // the rule keeps, where the Bot API server would refuse the raw text as
+    // too long (code: Client.cpp:11957-11959 at e3e9dd8e; no read). The plugin
+    // adds no refusal of its own (see the end of telegramTrim's comment).
+    from = calls(t.dir).length
+    expect((await edit('x' + '\t'.repeat(33000))).content[0].text).toBe(edited)
+    expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', 'x']])
+    // A no-break space or U+200B beside anything else stays: Telegram kept a
+    // no-break space at each end on a send, where JavaScript's own trim would
+    // remove it.
+    from = calls(t.dir).length
+    expect((await edit(' \u00a0x\u200b\t\r')).content[0].text).toBe(edited)
+    expect(calls(t.dir).slice(from).map(c => [c.method, c.payload])).toEqual([
+      ['editMessageCaption', { chat_id: '7080', message_id: id, caption: '\u00a0x\u200b' }],
+    ])
+    // The edit applies the send's limit and count, 1024 characters (code
+    // points) of what the rule keeps (see captionLength). Read (live8,
+    // 2026-11-06): an edit took 1024 U+1F600, 2,048 UTF-16 units. The lines
+    // are 1,048 UTF-16 units, and 1,024 characters once their carriage returns
+    // go.
+    const lines = Array.from({ length: 25 }, () => 'l'.repeat(40))
+    for (const [text, kept] of [
+      [` \t${'c'.repeat(1024)}\r\n`, 'c'.repeat(1024)],
+      [`\x01${'d'.repeat(512)}\u2028${'d'.repeat(512)}\u202e`, 'd'.repeat(1024)],
+      [`\u0333${'e'.repeat(512)}\u030a${'e'.repeat(512)}\u033f`, 'e'.repeat(1024)],
+      [lines.join('\r\n'), lines.join('\n')],
+      ['\u{1F600}'.repeat(1024), '\u{1F600}'.repeat(1024)],
+    ]) {
+      from = calls(t.dir).length
+      expect((await edit(text!)).content[0].text).toBe(edited)
+      expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', kept]])
+    }
+    // Over it nothing goes, and the answer counts as Telegram counts. Read
+    // (live8, 2026-11-06): an edit of 1025 U+1F600 was refused as too long, and
+    // so was one of 512 pairs of 'x' and U+0301, then one 'x', 1025 code points
+    // in 513 grapheme clusters.
+    from = calls(t.dir).length
+    for (const text of [`  \n${'z'.repeat(1025)}\n  `, '\u{1F600}'.repeat(1025), '\u00a0' + 'z'.repeat(1024), 'x\u0301'.repeat(512) + 'x']) {
+      expect(failure(await edit(text))).toBe(
+        'edit_message failed: this text has 1025 characters, over the 1024 a caption holds; nothing was edited; send it as a new reply')
+    }
+    // A text that is empty as a caption makes no call: Telegram answered a
+    // caption edit to ' \t\r ', to U+0333, U+00A0, U+200B, U+202F, U+200C,
+    // U+FEFF and U+2009, each alone, with a message that has no caption, so
+    // the edit would delete the text. The other characters below were read
+    // alone on a send, and the mixes rest on TDLib's code. Blank texts over
+    // 1024 characters are refused the same way, each for its own reason.
+    // 1,500 tabs are spaces once cleaned and are cleared by TDLib's code
+    // (MessageEntity.cpp:4513-4517, reached through
+    // MessagesManager.cpp:23805-23806), so that edit would delete the text.
+    // 1,500 no-break spaces are refused as empty by the plugin's own choice
+    // (see telegramTrim), since TDLib passes them to Telegram's server and no
+    // read covered its answer. U+200B, a tab and U+200B is blank by TDLib's
+    // code too, since its tab becomes a space between them and a space counts
+    // as empty there (misc.cpp:231, through is_empty_string). 33,000 tabs, a
+    // blank text over 32,768 bytes as written, are refused the same way, where
+    // the Bot API server would refuse the raw text as too long (code:
+    // Client.cpp:11957-11959 at e3e9dd8e; no read).
+    for (const text of ['  \n ', '', ' \t\r ', '\r\n\t', '\x01\u2028\x0b\u202e\x1f', '\u0333', '\u00a0', '\u200b', ' \u00a0\u200b\n\u0333 ',
+      '\u202f', '\u200c', '\ufeff', '\u2009', '\u3000\u2800\u200d\u200e\u200f\u2000\u200a',
+      '\u1680', '\u180e', '\u{e0000}', '\u{e007f}', '\ufffc\u205f\u2005\u{e0041}',
+      '\u00a0'.repeat(1500), '\t'.repeat(1500), '\u200b\t\u200b', '\t'.repeat(33000)]) {
       expect(failure(await edit(text))).toBe('edit_message failed: a caption needs text once its ends are trimmed; nothing was edited')
     }
     expect(calls(t.dir).slice(from)).toEqual([])
-    // The count is of UTF-16 units, as the send counts a caption, so a
-    // character outside the Basic Multilingual Plane counts twice.
-    from = calls(t.dir).length
-    expect(failure(await edit('\u{1F600}'.repeat(513)))).toBe(
-      'edit_message failed: this text has 1026 characters, over the 1024 a caption holds; nothing was edited; send it as a new reply')
-    expect(calls(t.dir).slice(from)).toEqual([])
-    from = calls(t.dir).length
-    expect((await edit('\u{1F600}'.repeat(512))).content[0].text).toBe(edited)
-    expect(calls(t.dir).slice(from).map(c => [c.method, c.payload.caption])).toEqual([['editMessageCaption', '\u{1F600}'.repeat(512)]])
     await t.sender.close()
   }, 15000)
 

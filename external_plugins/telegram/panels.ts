@@ -5,7 +5,9 @@
 // exit's time limit. See agents.ts for when the stream writes and deletes one.
 //
 // - <chat>-<message id>.json holds { chat, message, text, writer }: the text
-//   the message should read once its writer is gone. It is written to
+//   the message should read once its writer is gone, and, while the message
+//   is a rich message, rich: the same rows whole, which the sweep edits in as
+//   a rich message. It is written to
 //   <record>.<writer id>.tmp first and renamed over the record, so a reader
 //   sees the old record or the new one, never half of one.
 // - <writer id>.lock is the writer's lock, taken right before its first
@@ -18,12 +20,15 @@
 // named by a record, a temporary file or a lock file, it tries that writer's
 // lock once. A writer that is gone gets each of its messages edited to the
 // stored text at the chat's next slot, then its records deleted, then its lock
-// file, before the sweep lets go of the lock.
+// file, before the sweep lets go of the lock. A record whose rich edit
+// Telegram refuses loses its rich text, and its plain text goes at the next
+// slot.
 
 import { closeSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'fs'
 import { randomBytes } from 'crypto'
 import { join } from 'path'
 import { flock as libcFlock, LOCK_EX, LOCK_NB } from './buttons.ts'
+import { plainFallback } from './rich.ts'
 import type { PanelRecords, SweepSlots } from './agents.ts'
 
 export type Flock = (fd: number, op: number) => number
@@ -34,7 +39,7 @@ export type PanelStore = PanelRecords & {
   sweep(slots: SweepSlots): void
 }
 
-type Stored = { file: string; chat: string; message: number; text: string; writer: string }
+type Stored = { file: string; chat: string; message: number; text: string; rich?: string; writer: string }
 
 const WRITER = /^[0-9a-f]{16}$/
 
@@ -81,12 +86,15 @@ export function createPanelStore(opts: {
     return false
   }
 
-  function write(chat: string, message: number, text: string): void {
+  function write(chat: string, message: number, text: string, rich?: string): void {
     if (!/^-?\d+$/.test(chat) || !Number.isInteger(message) || !ensureLock()) return
-    const file = recordPath(chat, message)
+    store(recordPath(chat, message), { chat, message, text, ...(rich !== undefined ? { rich } : {}), writer })
+  }
+
+  function store(file: string, record: Omit<Stored, 'file'>): void {
     const tmp = `${file}.${writer}.tmp`
     try {
-      writeFileSync(tmp, JSON.stringify({ chat, message, text, writer }), { mode: 0o600 })
+      writeFileSync(tmp, JSON.stringify(record), { mode: 0o600 })
       renameSync(tmp, file)
     } catch {
       // A failed write, a full disk say, leaves the earlier record.
@@ -143,19 +151,26 @@ export function createPanelStore(opts: {
     pending.get(r.writer)?.delete(r.file)
   }
 
-  // One swept message: a record survives only an answer worth retrying, a 429
+  // One swept message, edited to its rich text when its record has one, else
+  // to its plain text: a record survives only an answer worth retrying, a 429
   // (the chat then waits its retry_after), a 5xx or a network failure. "Not
-  // modified" counts as done, and any other answer, the message gone or no
-  // longer editable among them, deletes the record.
+  // modified" counts as done, and the message gone or no longer editable
+  // deletes the record. A rich edit Telegram refuses rewrites the record
+  // without its rich text, under its own writer, whose lock the sweep holds,
+  // so the next slot edits the plain text. Any other answer deletes it.
   function close(r: Stored, slots: SweepSlots): void {
     if (editing.has(r.file) || !slots.take(r.chat)) return
     editing.add(r.file)
-    void Promise.resolve().then(() => slots.edit(r.chat, r.message, r.text)).then(() => drop(r), (err: unknown) => {
+    const rich = r.rich !== undefined
+    void Promise.resolve().then(() => rich ? slots.edit(r.chat, r.message, r.rich!, 'rich') : slots.edit(r.chat, r.message, r.text)).then(() => drop(r), (err: unknown) => {
       const e = (err ?? {}) as { description?: unknown; error_code?: unknown; name?: unknown; parameters?: { retry_after?: unknown } }
-      if (/message is not modified/i.test(String(e.description ?? err))) return drop(r)
+      const desc = String(e.description ?? err)
+      if (/message is not modified/i.test(desc)) return drop(r)
       const retry = e.parameters?.retry_after
       if (typeof retry === 'number') return slots.holdUntil(r.chat, slots.now() + retry * 1000)
       if ((typeof e.error_code === 'number' && e.error_code >= 500) || e.name === 'HttpError') return
+      if (/message to edit not found|message can't be edited/i.test(desc)) return drop(r)
+      if (rich && plainFallback(err)) return store(r.file, { chat: r.chat, message: r.message, text: r.text, writer: r.writer })
       drop(r)
     }).finally(() => {
       editing.delete(r.file)
@@ -188,7 +203,8 @@ export function createPanelStore(opts: {
         // The rename rules out a half-written record, so one that does not
         // parse is damaged and goes.
         if (!r || typeof r.chat !== 'string' || !/^-?\d+$/.test(r.chat) || !Number.isInteger(r.message)
-          || typeof r.text !== 'string' || typeof r.writer !== 'string' || !WRITER.test(r.writer)) {
+          || typeof r.text !== 'string' || (r.rich !== undefined && typeof r.rich !== 'string')
+          || typeof r.writer !== 'string' || !WRITER.test(r.writer)) {
           try { rmSync(file, { force: true }) } catch {}
           continue
         }

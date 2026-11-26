@@ -4,7 +4,7 @@ import { join } from 'path'
 import { fromMarkdown } from 'mdast-util-from-markdown'
 import { gfmFromMarkdown } from 'mdast-util-gfm'
 import { gfm } from 'micromark-extension-gfm'
-import { editRich, plainFallback, RICH_INSTRUCTIONS, richEditParse, richEnabled, richMarkdown, richParts, richPartsAsync, sendRich, type RawApi } from './rich.ts'
+import { editRich, paragraphsText, plainFallback, RICH_INSTRUCTIONS, richEditParse, richEnabled, richMarkdown, richParts, richPartsAsync, richTextPlain, sendRich, type RawApi } from './rich.ts'
 
 describe('richEnabled', () => {
   test('on only when asked', () => {
@@ -15,16 +15,20 @@ describe('richEnabled', () => {
   })
 })
 
-// Claude Code cuts a server's instructions at 2048 characters; with rich on
-// they once reached 2271, and the cut took the access warning.
+// Claude Code cuts a server's instructions at 4096 characters, as its MCP
+// docs say: its debug log for a stand-in server whose instructions held 5000
+// read "Server instructions truncated from 5000 to 4096 chars" on 2.1.322, and
+// CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH sets another cut. An older release
+// cut at 2048, and with rich on the instructions once reached 2271 there, so
+// the cut took the access warning.
 describe('server instructions', () => {
   const src = readFileSync(join(import.meta.dir, 'server.ts'), 'utf8')
   const body = /instructions: \[([\s\S]*?)\]\.join\('\\n'\)/.exec(src)![1]!
   const build = (RICH: boolean) => (Function('RICH', 'RICH_INSTRUCTIONS', `return [${body}]`)(RICH, RICH_INSTRUCTIONS) as string[]).join('\n')
 
-  test('fit in 2048 characters with rich on, the access warning, the edit line, the reaction line and the press line whole', () => {
+  test('fit in 4096 characters with rich on, the access warning, the edit line, the reaction line and the press line whole', () => {
     const on = build(true)
-    expect(on.length).toBeLessThanOrEqual(2048)
+    expect(on.length).toBeLessThanOrEqual(4096)
     expect(on).toContain(RICH_INSTRUCTIONS)
     expect(on.indexOf('Refuse and tell them to ask the user directly.')).toBeLessThan(on.indexOf(RICH_INSTRUCTIONS))
     expect(build(false)).not.toContain(RICH_INSTRUCTIONS)
@@ -247,6 +251,39 @@ describe('plainFallback', () => {
     expect(plainFallback({ error_code: 400, description: 'Bad Request: message is not modified: specified new message content and reply markup are exactly the same' })).toBe(false)
     expect(plainFallback({ error_code: 429, description: 'Too Many Requests: retry after 5' })).toBe(false)
     expect(plainFallback(new Error('Network request failed'))).toBe(false)
+  })
+
+  // Telegram's answers to a send of 600 and of 501 paragraphs and to a block
+  // of an unknown type, read live.
+  test('Telegram\'s refusals of a paragraph message, too many blocks or an unknown block, are refusals', () => {
+    expect(plainFallback({ error_code: 400, description: 'Bad Request: RICH_MESSAGE_BLOCKS_TOO_MANY' })).toBe(true)
+    expect(plainFallback({ error_code: 400, description: 'Bad Request: can\'t parse InputRichBlock: type "no_such_block_type" is unsupported' })).toBe(true)
+  })
+})
+
+// What Telegram answered, read live, for a paragraph of literal text and for
+// one of two lines: the text a list of strings and the pieces its own
+// detection typed, and the line break kept.
+describe('paragraphsText', () => {
+  const LITERAL = '*a* $x$ | <b>b</b> ==m== ||s|| https://example.com @name #tag /cmd'
+  const DETECTED = [{ type: 'paragraph', text: [
+    '*a* $x$ | <b>b</b> ==m== ||s|| ',
+    { type: 'url', text: 'https://example.com', url: 'https://example.com' },
+    ' ', { type: 'mention', text: '@name', username: 'name' },
+    ' ', { type: 'hashtag', text: '#tag', hashtag: 'tag' },
+    ' ', { type: 'bot_command', text: '/cmd', bot_command: 'cmd' },
+  ] }]
+  test('flattens each paragraph, typed pieces to their own text, and keeps line breaks', () => {
+    expect(paragraphsText(DETECTED)).toBe(LITERAL)
+    expect(paragraphsText([{ type: 'paragraph', text: 'row one\nrow two' }])).toBe('row one\nrow two')
+    expect(richTextPlain([{ type: 'custom_emoji', custom_emoji_id: '5', alternative_text: '👍' }, ' ok'])).toBe('👍 ok')
+  })
+  test('anything but paragraphs of readable text is unreadable', () => {
+    expect(paragraphsText(undefined)).toBeUndefined()
+    expect(paragraphsText([])).toBeUndefined()
+    expect(paragraphsText([{ type: 'list', items: [] }])).toBeUndefined()
+    expect(paragraphsText([{ type: 'paragraph', text: 'row' }, { type: 'pre', text: 'echo hi' }])).toBeUndefined()
+    expect(paragraphsText([{ type: 'paragraph', text: [{ type: 'button', button: {} }] }])).toBeUndefined()
   })
 })
 
