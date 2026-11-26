@@ -1073,3 +1073,27 @@ an empty temp folder of its own, and anything a run leaves in it, on a passing
 run or a failing one, fails the job too, which names each entry left. After the
 suite, `bun audit` fails the job while the lock holds a package with a known
 advisory.
+
+### Live check
+
+The tests answer the plugin's Bot API calls with a stand-in for Telegram,
+`fixtures/telegram-preload.ts`, which keeps plain texts by rules of its own and
+captions by the plugin's own caption rule in `bots.ts`. `live-check.ts` runs
+every one of those rules against Telegram itself and against the stand-in, and
+names each case where the two differ, so a caption case that differs is a place
+where the plugin's rule and Telegram part. It covers plain texts and captions;
+rich messages, whose answers the stand-in also shapes, are not covered:
+
+    TELEGRAM_LIVE_CHECK_TOKEN=<bot token> bun live-check.ts --chat <chat id>
+
+It takes the token from that variable alone and the chat from `--chat`, and
+refuses before any call without either. Each message goes to the chat
+silently and is deleted once its case is read, and the calls go a second
+apart (`--pace <ms>` sets another gap). A call Telegram answers with a 5xx,
+or whose connection fails, stops the run, and when that call was a send, the
+check warns that one silent message may be left in the chat to delete by hand.
+It prints no part of the token, and
+exits 0 when every case agrees, 1 when any differs, and 2 when it could not
+run every case or delete every message. `bun test` never runs it and CI has
+no token for it; `live-check.test.ts` runs it with the stand-in in both
+places.

@@ -347,16 +347,18 @@ const emptyText = (method: string, payload: Record<string, unknown>) =>
 // telegramTrim, telegramClean and captionLength in bots.ts, where each part
 // names its evidence, so the fake cannot keep a rule the plugin has dropped.
 // The differences from Telegram named at the end of telegramTrim's comment hold
-// for the fake too. A send whose caption is over 1024 characters once cleaned
-// and trimmed is refused, before the empty check, as TDLib counts it: a live
-// read of sendDocument answered so for 1025 'x' and for 1025 U+1F600, and by
+// for the fake too. A send or a caption edit whose caption is over 1024
+// characters once cleaned and trimmed is refused, before the empty check, as
+// TDLib counts it: a live read of sendDocument answered so for 1025 'x' and
+// for 1025 U+1F600, a live read of an edit refused 1025 U+1F600, and by
 // TDLib's code a blank one over 1024 is refused the same way; no read covered
-// that or an album's caption.
+// that or an album's caption, and the words Telegram gives an edit's refusal
+// are unread.
 const captionKept = telegramTrim
 const LONG_CAPTION = { error_code: 400, description: 'Bad Request: message caption is too long' }
 const longCaption = (method: string, payload: Record<string, unknown>) => {
   const captions = method === 'sendMediaGroup' ? (payload.media as Record<string, unknown>[]).map(m => m.caption)
-    : method === 'sendDocument' || method === 'sendPhoto' ? [payload.caption]
+    : method === 'sendDocument' || method === 'sendPhoto' || method === 'editMessageCaption' ? [payload.caption]
     : []
   return captions.some(c => typeof c === 'string' && captionLength(telegramClean(c)) > BOT_CAPTION_MAX)
 }
