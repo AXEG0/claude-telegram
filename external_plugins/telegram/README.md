@@ -1088,7 +1088,10 @@ where the plugin's rule and Telegram part:
 It takes the token from that variable alone and the chat from `--chat`, and
 refuses before any call without either. Each message goes to the chat
 silently and is deleted once its case is read, and the calls go a second
-apart (`--pace <ms>` sets another gap). It prints no part of the token, and
+apart (`--pace <ms>` sets another gap). A call Telegram answers with a 5xx,
+or whose connection fails, stops the run, and when that call was a send, the
+check warns that one silent message may be left in the chat to delete by hand.
+It prints no part of the token, and
 exits 0 when every case agrees, 1 when any differs, and 2 when it could not
 run every case or delete every message. `bun test` never runs it and CI has
 no token for it; `live-check.test.ts` runs it with the stand-in in both

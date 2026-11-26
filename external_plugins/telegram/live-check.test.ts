@@ -121,6 +121,29 @@ test('a run that stops partway deletes every message it took, and exits 2 naming
   expect(r.calls.slice(failed + 1).map(c => [c.method, c.payload.message_id])).toEqual([['deleteMessage', base.message_id]])
 }, BOUND)
 
+// A send Telegram took whose answer is a 5xx, or whose connection drops before
+// the answer, leaves one message the check cannot read or delete.
+for (const [name, rule] of [
+  ['a 5xx', { lands: true, error: { error_code: 502, description: 'Bad Gateway' } }],
+  ['a dropped connection', { drop: true }],
+] as const) {
+  test(`a send Telegram took but answered with ${name} stops the run with exit 2, names no difference, and warns of the message it may have left`, async () => {
+    const r = await check({ token: TOKEN, rules: [{ method: 'sendDocument', has: '"caption":" \\n x \\n "', times: 1, ...rule }] })
+    const at = CASES.findIndex(c => c.name === 'caption-ends')
+    expect(r.code).toBe(2)
+    expect(r.lines.filter(l => l.startsWith('DIFFERS'))).toEqual([])
+    expect(r.lines.slice(0, -1).map(l => l.split(':')[0])).toEqual(CASES.slice(0, at).map(c => `same     ${c.name}`))
+    expect(r.err).toContain(`live-check: the run stopped after ${at} of ${CASES.length} cases: `)
+    expect(r.err).toContain('live-check: the sendDocument it stopped on got no clean answer, so Telegram may have taken it: one silent message it cannot name may be left in the chat; delete it by hand')
+    const landed = r.calls.filter(c => c.method === 'sendDocument').at(-1)!
+    expect(landed.payload.caption).toBe(' \n x \n ')
+    expect(typeof landed.message_id).toBe('number')
+    const { taken, deleted } = deletes(r.calls)
+    expect(deleted).toEqual(taken.filter(id => id !== landed.message_id).sort((a, b) => a - b))
+    for (const part of PARTS) expect(r.out + r.err).not.toContain(part)
+  }, BOUND)
+}
+
 test('calls to Telegram go a second apart, or --pace milliseconds apart', async () => {
   // Each run stops at its second text, which fails to reach Telegram.
   const rules = [{ method: 'sendMessage', skip: 1, times: 1, network: 'ECONNRESET' }]

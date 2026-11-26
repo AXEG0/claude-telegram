@@ -16,7 +16,10 @@
 // stops partway deletes what it took before it stops. Calls to Telegram go
 // --pace milliseconds apart, 1000 unless set, as Telegram asks a bot to send
 // a chat at most about one message a second, and a 429 waits out its
-// retry_after and sends the call again. It prints one line for each case, the
+// retry_after and sends the call again. A call answered with a 5xx, or whose
+// connection fails, stops the run, since Telegram may still have taken it;
+// when that call was a send, it warns that one silent message it cannot name
+// may be left in the chat. It prints one line for each case, the
 // stand-in's answer beside Telegram's where they differ, and never any part
 // of the token. It exits 0 when every case agrees, 1 when any differs, and 2
 // when it refused, could not run every case, or could not delete a message.
@@ -159,24 +162,35 @@ export type Run = {
   // Called once each case is read, before its messages are deleted.
   read?: (c: Case, seen: Seen) => void
 }
-export type Outcome = { cases: { name: string; seen: Seen }[]; stopped?: string; undeleted: number[] }
+// maybeLeft names the send a run stopped on when that send got no clean
+// answer, a 5xx or a failed connection, so Telegram may have taken it and left
+// one message the run could neither read nor delete.
+export type Outcome = { cases: { name: string; seen: Seen }[]; stopped?: string; maybeLeft?: string; undeleted: number[] }
 
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
 // Runs each case in turn, and deletes each message Telegram took once its
-// case is read. A run that stops partway, on a call that failed to reach
-// Telegram or a message an edit case could not send, deletes every message
+// case is read. A run that stops partway, on a call that got no clean answer
+// or a message an edit case could not send, deletes every message
 // still undeleted before it returns. The outcome names each message it could
 // not delete.
 export async function runCases(run: Run): Promise<Outcome> {
+  // The method of the call whose failure stopped the run, if one did.
+  let thrownBy: string | undefined
   const ask = async (method: string, payload: Record<string, unknown>): Promise<{ ok: true; result: any } | { ok: false; description: string }> => {
+    thrownBy = undefined
     for (;;) {
       await pause(run.pace)
       try {
         return { ok: true, result: await run.raw(method, payload) }
       } catch (err) {
         const e = err as { error_code?: number; description?: string; parameters?: { retry_after?: number } }
-        if (typeof e?.error_code !== 'number' || typeof e.description !== 'string') throw err
+        // A failed connection or a 5xx is no answer about the case: Telegram may
+        // have taken the call, so the run stops on it.
+        if (typeof e?.error_code !== 'number' || typeof e.description !== 'string' || e.error_code >= 500) {
+          thrownBy = method
+          throw err
+        }
         const wait = e.parameters?.retry_after
         if (e.error_code === 429 && typeof wait === 'number') {
           run.note?.(`Telegram asks to wait ${wait} s before ${method}; waiting`)
@@ -235,7 +249,8 @@ export async function runCases(run: Run): Promise<Outcome> {
     }
     return { cases, undeleted }
   } catch (err) {
-    return { cases, stopped: err instanceof Error ? err.message : String(err), undeleted }
+    const maybeLeft = thrownBy?.startsWith('send') ? thrownBy : undefined
+    return { cases, stopped: err instanceof Error ? err.message : String(err), ...(maybeLeft ? { maybeLeft } : {}), undeleted }
   } finally {
     await remove()
   }
@@ -328,6 +343,7 @@ async function main(): Promise<number> {
   }
   say(`${live.cases.length - differ.length} of ${CASES.length} cases agree` + (differ.length ? `; ${differ.length} differ: ${differ.join(', ')}` : ''))
   if (live.stopped !== undefined) warn(`live-check: the run stopped after ${live.cases.length} of ${CASES.length} cases: ${live.stopped}`)
+  if (live.maybeLeft !== undefined) warn(`live-check: the ${live.maybeLeft} it stopped on got no clean answer, so Telegram may have taken it: one silent message it cannot name may be left in the chat; delete it by hand`)
   if (live.undeleted.length) warn(`live-check: ${live.undeleted.length} messages it sent could not be deleted: ${live.undeleted.join(', ')}`)
   if (live.stopped !== undefined || live.undeleted.length) return 2
   return differ.length ? 1 : 0
