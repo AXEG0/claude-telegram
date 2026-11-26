@@ -65,12 +65,10 @@ const ALONE: [string, string][] = [
 // caption edit of a text. Its rules for a caption are the plugin's own
 // (telegramTrim, telegramClean and captionLength in bots.ts): what it keeps
 // of a caption, sent with a file, with an album's first file or as an edit,
-// none when nothing is left, and its refusal of a sent caption over 1024 code
-// points once cleaned. It refuses no caption edit for its length, where a live
-// read of Telegram refused an edit of 1025 characters, so the edit of 1025
-// U+1F600 here is expected to differ on Telegram. Each case reads one of them
-// at an edge Telegram may draw elsewhere; the differences from Telegram that
-// the rule itself names in bots.ts are left out.
+// none when nothing is left, and its refusal of a caption over 1024 code
+// points once cleaned, sent or as an edit. Each case reads one of them at an
+// edge Telegram may draw elsewhere; the differences from Telegram that the
+// rule itself names in bots.ts are left out.
 export const CASES: Case[] = [
   text('text-ends', '  \n kept \n  '),
   text('text-inside', 'a \n b'),
