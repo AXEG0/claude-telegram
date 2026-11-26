@@ -22,10 +22,12 @@ async function fieldsOf(options?: RequestInit): Promise<Record<string, unknown>>
 // The fields of a multipart body as grammY writes it (payloadToMultipartItr in
 // its payload.js): each part opens with `--<boundary>` and a line break, its
 // headers end at an empty line, and `\r\n--<boundary>` ends it, `--` after the
-// last one closing the body; a file's part names the file as `filename=`. A
-// field's text is its UTF-8 bytes as they are, as Telegram reads them, so a
-// U+FEFF at a field's start stays: a live read kept the caption '\ufeffx'
-// whole (the live check's caption-ufeff-start, 2026-11-26), which
+// last one closing the body. A file's part names the file after `;filename=`,
+// unquoted, to the end of its line (filePart there, which refuses only a line
+// break in the name), so a name holding a `;` or opening with a quote is read
+// whole. A field's text is its UTF-8 bytes as they are, as Telegram reads
+// them, so a U+FEFF at a field's start stays: a live read kept the caption
+// '\ufeffx' whole (the live check's caption-ufeff-start, 2026-11-26), which
 // Response.formData() read as 'x'.
 const FIELD_TEXT = new TextDecoder('utf-8', { ignoreBOM: true })
 function multipartFields(body: Buffer, type: string): Record<string, unknown> {
@@ -45,8 +47,8 @@ function multipartFields(body: Buffer, type: string): Record<string, unknown> {
     const head = split === -1 ? '' : part.subarray(0, split).toString()
     const name = /\bname="([^"]*)"/.exec(head)?.[1]
     if (name === undefined) throw new Error(`the test fixture finds no field name in a multipart part: ${JSON.stringify(head)}`)
-    const file = /\bfilename=(?:"([^"]*)"|([^;\r\n]*))/.exec(head)
-    out[name] = file ? `file:${file[1] ?? file[2]}` : FIELD_TEXT.decode(part.subarray(split + 4))
+    const file = /;filename=([^\r\n]*)/.exec(head)
+    out[name] = file ? `file:${file[1]}` : FIELD_TEXT.decode(part.subarray(split + 4))
     at = next
   }
   return out
