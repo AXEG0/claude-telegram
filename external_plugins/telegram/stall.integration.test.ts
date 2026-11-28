@@ -4,7 +4,7 @@
 // log's lines, the probe, the subagents message's wait, buttons, and a server
 // that does not poll the bot. Only Telegram's HTTP is fake.
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import fixture from './fixtures/channel-argv.json'
@@ -63,6 +63,14 @@ function stallLines(dir: string, srv: Server, kind: 'opened' | 'closed'): any[] 
 }
 const lineOf = (content: string, head: string) => content.split('\n').find(l => l.startsWith(head))
 const heads = (content: string) => content.split('\n').slice(1).map(l => l.split(':')[0])
+// What the fake answered for each call but a poll, once it answered or
+// failed it, with the time it did.
+function answers(dir: string): any[] {
+  const file = join(dir, 'answers.jsonl')
+  if (!existsSync(file)) return []
+  const body = readFileSync(file, 'utf8')
+  return body.slice(0, body.lastIndexOf('\n') + 1).split('\n').filter(Boolean).map(line => JSON.parse(line))
+}
 
 describe.skipIf(process.platform !== 'linux')('after Telegram leaves the session\'s sends unanswered', () => {
   test('a reply answered 502 opens the record and its result says so; a read or a send that never left keeps it open, a later answered write closes it with one event, and the server log has both bounds', async () => {
@@ -258,14 +266,18 @@ describe.skipIf(process.platform !== 'linux')('after Telegram leaves the session
     await srv.close()
   }, 30000)
 
-  test('the subagents message\'s first send answered 502 is not tried again until a write begun after it is answered, the probe\'s when the session writes nothing, and no event names it', async () => {
+  test('the subagents message\'s first send answered 502 is not tried again on the answer to a typing call begun before it, only once a write begun after it is answered, the probe\'s when the session writes nothing, and no event names it', async () => {
     const dir = state()
     const srv = await server(dir, { rules: [
       { method: 'sendMessage', has: '🤖 Subagents', times: 1, error: BAD_GATEWAY },
+      // The turn's first typing call begins before the message's first send
+      // and is answered after that send failed, which starts no next try.
+      { method: 'sendChatAction', times: 1, holdMs: 15_000 },
       { method: 'sendChatAction', error: BAD_GATEWAY },
     ] })
     deliver(dir, [{ message: { message_id: 600, date: now(), from: OWNER, chat: DM, text: 'hello' } }])
     await until(() => srv.inbound().length === 1)
+    await until(() => calls(dir).some(c => c.method === 'sendChatAction'))
     const base = join(dir, 'transcripts')
     mkdirSync(base)
     writeFileSync(join(base, 'agent-a1.meta.json'), JSON.stringify({ description: 'Long job' }))
@@ -282,6 +294,14 @@ describe.skipIf(process.platform !== 'linux')('after Telegram leaves the session
     expect(sent[1]!).toBeGreaterThan(probe)
     expect(all[probe]!.at - all[sent[0]!]!.at).toBeGreaterThanOrEqual(PROBE_MS)
     expect(all[sent[1]!]!.refused).toBeUndefined()
+    // The held typing call began before the failed send and was answered
+    // after it, before the probe.
+    expect(all.find(c => c.method === 'sendChatAction')!.at).toBeLessThan(all[sent[0]!]!.at)
+    const failed = answers(dir).find(a => a.method === 'sendMessage' && String(a.payload.text).startsWith('🤖 Subagents'))!
+    expect(failed).toMatchObject({ ok: false, error_code: 502 })
+    const typed = answers(dir).find(a => a.method === 'sendChatAction' && a.ok === true)!
+    expect(typed.at).toBeGreaterThan(failed.at)
+    expect(typed.at).toBeLessThan(all[probe]!.at)
     await wait(1000)
     expect(events(srv)).toEqual([])
     await srv.close()
@@ -309,6 +329,94 @@ describe.skipIf(process.platform !== 'linux')('after Telegram leaves the session
     await wait(PROBE_MS + 5000)
     expect(panel()).toHaveLength(5)
     expect(calls(dir).filter(c => c.method === 'setMyCommands')).toHaveLength(1)
+    await srv.close()
+  }, 30000)
+
+  test('a reply of several parts that stops before its last part is named with the part it stopped at and the parts never tried, in the event and the close line', async () => {
+    const dir = state({ dmPolicy: 'allowlist', allowFrom: ['1'], textChunkLimit: 3 })
+    const srv = await server(dir, { rules: [{ method: 'sendMessage', has: 'bbb', error: BAD_GATEWAY }] })
+    const stopped = text(await tool(srv, 'reply', { chat_id: '1', text: 'aaabbbccc' }))
+    const since = sinceOf(stopped)
+    expect(stopped).toBe(`part 2 of 3: ${STALLED(since)} ${ANSWERED_502}; sent so far: 1 message(s) (ids: 100); never tried: part 3`)
+    expect(calls(dir).filter(c => c.method === 'sendMessage').map(c => c.payload.text)).toEqual(['aaa', 'bbb'])
+    ok(await tool(srv, 'reply', { chat_id: '1', text: 'ok' }))
+    await until(() => events(srv).length === 1)
+    expect(lineOf(events(srv)[0].content, 'To people')).toStartWith(`To people, delivery unknown: chat 1, began ${since}, "aaabbbccc", part 2 of 3, parts never tried: 3. `)
+    await until(() => stallLines(dir, srv, 'closed').length === 1)
+    const [close] = stallLines(dir, srv, 'closed')
+    expect(close.entries).toHaveLength(1)
+    expect(close.entries[0]).toMatchObject({ began: since, part: 2, total: 3, never: '3' })
+    await srv.close()
+  }, 20000)
+
+  test('a reply that began before the send that opened the record and then joins it moves since to its own start, in its result, the event and the close line', async () => {
+    const dir = state()
+    const srv = await server(dir, { rules: [
+      { method: 'sendMessage', has: 'slow', holdMs: 20_000, error: BAD_GATEWAY },
+      { method: 'sendMessage', has: 'fast', error: BAD_GATEWAY },
+    ] })
+    const slow = tool(srv, 'reply', { chat_id: '1', text: 'the slow one' }, 30_000)
+    await until(() => calls(dir).some(c => c.payload?.text === 'the slow one'))
+    // The fast reply begins after the slow one and opens the record.
+    const fast = text(await tool(srv, 'reply', { chat_id: '1', text: 'the fast one' }))
+    const opened = sinceOf(fast)
+    expect(fast).toBe(`${STALLED(opened)} ${ANSWERED_502}`)
+    expect(events(srv)).toEqual([])
+    // The slow reply ends unknown, joins the record, and since moves to its
+    // start.
+    const joined = text(await slow)
+    const since = sinceOf(joined)
+    expect(joined).toBe(`${STALLED(since)} ${ANSWERED_502}`)
+    expect(Date.parse(since)).toBeLessThan(Date.parse(opened))
+    expect(events(srv)).toEqual([])
+    ok(await tool(srv, 'reply', { chat_id: '1', text: 'closes it' }))
+    await until(() => events(srv).length === 1)
+    const [event] = events(srv)
+    expect(event.meta.since).toBe(since)
+    expect(event.content.split('\n')[0]).toStartWith(`Telegram left these sends of this bot unanswered from ${since} and answered a write begun after them at ${event.meta.until}. `)
+    // Named in the order each joined: the opener first.
+    expect(lineOf(event.content, 'To people')).toStartWith(`To people, delivery unknown: chat 1, began ${opened}, "the fast one"; chat 1, began ${since}, "the slow one". Send again`)
+    await until(() => stallLines(dir, srv, 'closed').length === 1)
+    expect(stallLines(dir, srv, 'opened')[0].since).toBe(opened)
+    const [close] = stallLines(dir, srv, 'closed')
+    expect(close).toMatchObject({ since, until: event.meta.until, closed_by: 'sendMessage' })
+    expect(close.entries.map((e: any) => e.began)).toEqual([opened, since])
+    await srv.close()
+  }, 40000)
+
+  test('a write that began while an unknown send still waited and was answered after that send ended closes nothing, since an entry ends when its handler names the outcome unknown', async () => {
+    const dir = state()
+    const srv = await server(dir, { rules: [
+      { method: 'sendMessage', has: 'held', holdMs: 5_000, error: BAD_GATEWAY },
+      { method: 'setMessageReaction', times: 1, holdMs: 8_000 },
+    ] })
+    const reply = tool(srv, 'reply', { chat_id: '1', text: 'the held reply' }, 15_000)
+    await until(() => calls(dir).some(c => c.payload?.text === 'the held reply'))
+    const held = calls(dir).find(c => c.payload?.text === 'the held reply')!
+    const reaction = tool(srv, 'react', { chat_id: '1', message_id: '5', emoji: '👍' }, 15_000)
+    await until(() => calls(dir).some(c => c.method === 'setMessageReaction'))
+    // The reaction began while the reply still waited for its answer.
+    expect(calls(dir).find(c => c.method === 'setMessageReaction')!.at).toBeLessThan(held.at + 5_000)
+    const opened = text(await reply)
+    const since = sinceOf(opened)
+    expect(opened).toBe(`${STALLED(since)} ${ANSWERED_502}`)
+    // Answered after the reply ended, but begun before: the record stays open.
+    expect(ok(await reaction)).toBe('reacted')
+    const reacted = answers(dir).find(a => a.method === 'setMessageReaction')!
+    expect(reacted.ok).toBe(true)
+    expect(reacted.at).toBeGreaterThanOrEqual(held.at + 8_000)
+    await wait(1000)
+    expect(events(srv)).toEqual([])
+    ok(await tool(srv, 'reply', { chat_id: '1', text: 'closes it' }))
+    await until(() => events(srv).length === 1)
+    const [event] = events(srv)
+    const answered = answers(dir).find(a => a.method === 'sendMessage' && a.payload.text === 'closes it')!
+    expect(Date.parse(event.meta.until)).toBeGreaterThanOrEqual(answered.at)
+    await until(() => stallLines(dir, srv, 'closed').length === 1)
+    const [close] = stallLines(dir, srv, 'closed')
+    expect(close).toMatchObject({ since, until: event.meta.until, closed_by: 'sendMessage', probe: false })
+    expect(close.entries).toHaveLength(1)
+    expect(Date.parse(close.entries[0].ended)).toBeGreaterThanOrEqual(held.at + 5_000)
     await srv.close()
   }, 30000)
 

@@ -490,8 +490,8 @@ At the close, one event reaches Claude, its tag carrying `event`, `since` and
 `until`:
 
 ```
-<channel source="plugin:telegram:telegram" event="telegram_stall" since="2026-11-16T15:20:41.900Z" until="2026-11-16T15:29:40.120Z">
-Telegram left these sends of this bot unanswered from 2026-11-16T15:20:41.900Z and answered a write begun after them at 2026-11-16T15:29:40.120Z. Telegram says it keeps a bot's updates up to 24 hours and gives no sign when a message it held will come, so messages sent to this bot in the 24 hours before this note may still arrive, each with its own send time; 2026-11-16T15:29:40.120Z is when Telegram answered this bot's writes again, not when messages to it stopped waiting.
+<channel source="plugin:telegram:telegram" event="telegram_stall" since="2026-11-16T15:23:27.000Z" until="2026-11-16T15:29:40.120Z">
+Telegram left these sends of this bot unanswered from 2026-11-16T15:23:27.000Z and answered a write begun after them at 2026-11-16T15:29:40.120Z. Telegram says it keeps a bot's updates up to 24 hours and gives no sign when a message it held will come, so messages sent to this bot in the 24 hours before this note may still arrive, each with its own send time; 2026-11-16T15:29:40.120Z is when Telegram answered this bot's writes again, not when messages to it stopped waiting.
 To people, delivery unknown: chat 1, began 2026-11-16T15:23:27.000Z, "The bot stopped receiving messages at 15:15". Send again what still matters, its first line saying it may repeat an earlier message; for what went stale, send a short note that it replaces any earlier copy.
 </channel>
 ```

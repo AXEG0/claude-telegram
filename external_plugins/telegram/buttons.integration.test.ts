@@ -21,7 +21,7 @@ const now = () => Math.floor(Date.now() / 1000)
 // which the tests read as <since> (stall.ts).
 const STALLED_EDIT = "edit outcome unknown: Telegram has left this bot's sends unanswered since <since>; do not send it again yet: once Telegram answers a write again, one event names this send and says what to do"
 const sinceless = (t: string) => t.replace(/since \d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z;/, 'since <since>;')
-const TOO_MANY ={ error_code: 429, description: 'Too Many Requests: retry after 5', parameters: { retry_after: 5 } }
+const TOO_MANY = { error_code: 429, description: 'Too Many Requests: retry after 5', parameters: { retry_after: 5 } }
 const REJECTED = { error_code: 400, description: 'Bad Request: RICH_MESSAGE_MARKDOWN_INVALID' }
 const NOT_MODIFIED = { error_code: 400, description: 'Bad Request: message is not modified: specified new message content and reply markup are exactly the same as a current content and reply markup of the message' }
 
