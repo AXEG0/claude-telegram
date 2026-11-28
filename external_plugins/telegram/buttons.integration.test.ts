@@ -16,7 +16,12 @@ const DM = { id: 1, type: 'private' }
 const SENDS = ['sendMessage', 'sendPhoto', 'sendDocument', 'sendRichMessage', 'sendMediaGroup']
 const EDITS = ['editMessageText', 'editMessageCaption', 'editMessageReplyMarkup']
 const now = () => Math.floor(Date.now() / 1000)
-const TOO_MANY = { error_code: 429, description: 'Too Many Requests: retry after 5', parameters: { retry_after: 5 } }
+// On a server that polls the bot, an edit whose outcome is unknown joins the
+// record of sends Telegram left unanswered, and its result names since when,
+// which the tests read as <since> (stall.ts).
+const STALLED_EDIT = "edit outcome unknown: Telegram has left this bot's sends unanswered since <since>; do not send it again yet: once Telegram answers a write again, one event names this send and says what to do"
+const sinceless = (t: string) => t.replace(/since \d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z;/, 'since <since>;')
+const TOO_MANY ={ error_code: 429, description: 'Too Many Requests: retry after 5', parameters: { retry_after: 5 } }
 const REJECTED = { error_code: 400, description: 'Bad Request: RICH_MESSAGE_MARKDOWN_INVALID' }
 const NOT_MODIFIED = { error_code: 400, description: 'Bad Request: message is not modified: specified new message content and reply markup are exactly the same as a current content and reply markup of the message' }
 
@@ -1223,7 +1228,7 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     const dir = state()
     const srv = await channel(dir, { rules: [{ method: 'editMessageReplyMarkup', holdMs: 11_000 }] })
     const m = Number(/^sent \(id: (\d+)\)$/.exec(ok(await tool(srv, 'reply', { chat_id: '1', text: 'working' })))![1])
-    expect(ok(await tool(srv, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [] }, 15_000))).toBe('edit outcome unknown; repeating the same edit is safe (Telegram did not answer within 10 s)')
+    expect(sinceless(ok(await tool(srv, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [] }, 15_000)))).toBe(`${STALLED_EDIT} (Telegram did not answer within 10 s)`)
     await srv.close()
   }, 25000)
 
@@ -1234,8 +1239,8 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     const old = shown(dir, m)
     const k1 = entryOf(dir, m).keyboard
     const started = Date.now()
-    expect(ok(await tool(srv, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [['Ship']] }, 15_000))).toBe(
-      'edit outcome unknown; repeating the same edit is safe (Telegram did not answer within 10 s)')
+    expect(sinceless(ok(await tool(srv, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [['Ship']] }, 15_000)))).toBe(
+      `${STALLED_EDIT} (Telegram did not answer within 10 s)`)
     expect(Date.now() - started).toBeGreaterThanOrEqual(9_900)
     expect(entryOf(dir, m).keyboard).toBe(k1 + 1)
     const stale = press(dir, m, 'Yes', { markup: old })

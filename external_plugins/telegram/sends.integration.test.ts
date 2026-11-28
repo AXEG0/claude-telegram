@@ -20,7 +20,12 @@ const now = () => Math.floor(Date.now() / 1000)
 const SENDS = ['sendMessage', 'sendPhoto', 'sendDocument', 'sendRichMessage', 'sendMediaGroup']
 const EDITS = ['editMessageText', 'editMessageCaption', 'editMessageReplyMarkup']
 const UNKNOWN = 'delivery unknown: Telegram may still deliver it, even minutes later; do not resend unless the recipient says it did not arrive'
-const UNKNOWN_EDIT = 'edit outcome unknown; repeating the same edit is safe'
+// On a server that polls the bot, a send or edit whose outcome is unknown
+// joins the record of sends Telegram left unanswered, and its result names
+// since when, which the tests read as <since> (stall.ts).
+const STALLED = "delivery unknown: Telegram has left this bot's sends unanswered since <since>; do not send it again yet: once Telegram answers a write again, one event names this send and says what to do"
+const STALLED_EDIT = STALLED.replace('delivery unknown', 'edit outcome unknown')
+const sinceless = (t: string) => t.replace(/since \d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z;/, 'since <since>;')
 const GATEWAY = { error_code: 504, description: 'Gateway Timeout' }
 const ANSWERED_504 = '(Telegram answered 504: Gateway Timeout)'
 
@@ -88,19 +93,19 @@ describe.skipIf(process.platform !== 'linux')('what a refused or unanswered send
   }, 15000)
 
   test.each([
-    ['a text', 'sendMessage', {}, { text: 'hello', format: 'text' }, `${UNKNOWN} ${ANSWERED_504}`],
-    ['a rich text', 'sendRichMessage', { TELEGRAM_RICH_MESSAGES: 'true' }, { text: '**hello**' }, `${UNKNOWN} ${ANSWERED_504}`],
+    ['a text', 'sendMessage', {}, { text: 'hello', format: 'text' }, `${STALLED} ${ANSWERED_504}`],
+    ['a rich text', 'sendRichMessage', { TELEGRAM_RICH_MESSAGES: 'true' }, { text: '**hello**' }, `${STALLED} ${ANSWERED_504}`],
     ['a file after its text', 'sendDocument', {}, { text: 'the notes', files: ['notes.txt'] },
-      `part 2 of 2: ${UNKNOWN} ${ANSWERED_504}; sent so far: 1 message(s) (ids: 100); never tried: none`],
+      `part 2 of 2: ${STALLED} ${ANSWERED_504}; sent so far: 1 message(s) (ids: 100); never tried: none`],
     ['a photo', 'sendPhoto', {}, { text: 'the chart', files: ['chart.png'] },
-      `part 2 of 2: ${UNKNOWN} ${ANSWERED_504}; sent so far: 1 message(s) (ids: 100); never tried: none`],
+      `part 2 of 2: ${STALLED} ${ANSWERED_504}; sent so far: 1 message(s) (ids: 100); never tried: none`],
   ])('%s whose send Telegram answers with a 5xx says delivery unknown, and nothing is sent again', async (_name, method, env, args, expected) => {
     const dir = state()
     mkdirSync(join(dir, 'inbox'))
     for (const f of ['notes.txt', 'chart.png']) writeFileSync(join(dir, 'inbox', f), f)
     const srv = await server(dir, { env, rules: [{ method, error: GATEWAY }] })
     const files = (args as { files?: string[] }).files?.map(f => join(dir, 'inbox', f))
-    expect(ok(await tool(srv, 'reply', { chat_id: '1', ...args, ...(files ? { files } : {}) }))).toBe(expected)
+    expect(sinceless(ok(await tool(srv, 'reply', { chat_id: '1', ...args, ...(files ? { files } : {}) })))).toBe(expected)
     await wait(1000)
     expect(sends(dir).filter(c => c.method === method)).toHaveLength(1)
     // The rich part is not sent plain instead.
@@ -131,7 +136,7 @@ describe.skipIf(process.platform !== 'linux')('what a refused or unanswered send
   test('a send whose connection drops before Telegram answers says delivery unknown', async () => {
     const dir = state()
     const srv = await server(dir, { rules: [{ method: 'sendMessage', drop: true }] })
-    expect(ok(await tool(srv, 'reply', { chat_id: '1', text: 'hello' }))).toBe(`${UNKNOWN} (fetch failed: the connection was reset)`)
+    expect(sinceless(ok(await tool(srv, 'reply', { chat_id: '1', text: 'hello' })))).toBe(`${STALLED} (fetch failed: the connection was reset)`)
     expect(sends(dir)).toHaveLength(1)
     await srv.close()
   }, 15000)
@@ -139,8 +144,8 @@ describe.skipIf(process.platform !== 'linux')('what a refused or unanswered send
   test('a reply of several parts names the parts sent with their ids, the part whose outcome is unknown and the parts never tried, and drops buttons that part did not carry', async () => {
     const dir = state({ dmPolicy: 'allowlist', allowFrom: ['1'], textChunkLimit: 3 })
     const srv = await server(dir, { rules: [{ method: 'sendMessage', has: 'bbb', error: GATEWAY }] })
-    expect(ok(await tool(srv, 'reply', { chat_id: '1', text: 'aaabbbccc', buttons: [['Yes']] }))).toBe(
-      `part 2 of 3: ${UNKNOWN} ${ANSWERED_504}; sent so far: 1 message(s) (ids: 100); never tried: part 3`)
+    expect(sinceless(ok(await tool(srv, 'reply', { chat_id: '1', text: 'aaabbbccc', buttons: [['Yes']] })))).toBe(
+      `part 2 of 3: ${STALLED} ${ANSWERED_504}; sent so far: 1 message(s) (ids: 100); never tried: part 3`)
     await wait(1000)
     expect(sends(dir).map(c => c.payload.text)).toEqual(['aaa', 'bbb'])
     expect(record(dir).entries).toEqual([])
@@ -150,8 +155,8 @@ describe.skipIf(process.platform !== 'linux')('what a refused or unanswered send
   test('when the part whose outcome is unknown carries the buttons, they are kept, the result says so, and a press on that message once it lands counts', async () => {
     const dir = state()
     const srv = await server(dir, { rules: [{ method: 'sendMessage', markup: true, times: 1, error: GATEWAY, lands: true }] })
-    expect(ok(await tool(srv, 'reply', { chat_id: '1', text: 'Merge now?', buttons: [['Yes', 'No']] }))).toBe(
-      `${UNKNOWN} ${ANSWERED_504}; its buttons are kept, so a press on them counts if it arrives`)
+    expect(sinceless(ok(await tool(srv, 'reply', { chat_id: '1', text: 'Merge now?', buttons: [['Yes', 'No']] })))).toBe(
+      `${STALLED} ${ANSWERED_504}; its buttons are kept, so a press on them counts if it arrives`)
     const landed = sends(dir)[0]!
     expect(landed.message_id).toBe(100)
     expect(record(dir).entries).toEqual([expect.objectContaining({ chat: '1', rows: [['Yes', 'No']] })])
@@ -174,7 +179,7 @@ describe.skipIf(process.platform !== 'linux')('what a refused or unanswered edit
       { method: 'editMessageText', has: 'later', error: { error_code: 429, description: 'Too Many Requests: retry after 5', parameters: { retry_after: 5 } } },
     ] })
     const m = Number(/^sent \(id: (\d+)\)$/.exec(ok(await tool(srv, 'reply', { chat_id: '1', text: 'working' })))![1])
-    expect(ok(await tool(srv, 'edit_message', { chat_id: '1', message_id: String(m), text: 'done' }))).toBe(`${UNKNOWN_EDIT} ${ANSWERED_504}`)
+    expect(sinceless(ok(await tool(srv, 'edit_message', { chat_id: '1', message_id: String(m), text: 'done' })))).toBe(`${STALLED_EDIT} ${ANSWERED_504}`)
     expect(ok(await tool(srv, 'edit_message', { chat_id: '1', message_id: String(m), text: 'done' }))).toBe(`edited (id: ${m})`)
     expect(failed(await tool(srv, 'edit_message', { chat_id: '1', message_id: String(m), text: 'later' }))).toBe(
       'edit_message failed: not edited; Telegram asks to wait 5 s (Telegram answered 429: Too Many Requests: retry after 5)')
@@ -185,7 +190,7 @@ describe.skipIf(process.platform !== 'linux')('what a refused or unanswered edit
     const dir = state()
     const srv = await server(dir, { rules: [{ method: 'editMessageReplyMarkup', has: 'Ship', times: 1, error: GATEWAY, lands: true }] })
     const m = Number(/; buttons on message (\d+)$/.exec(ok(await tool(srv, 'reply', { chat_id: '1', text: 'Merge now?', buttons: [['Yes', 'No']] })))![1])
-    expect(ok(await tool(srv, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [['Ship', 'Hold']] }))).toBe(`${UNKNOWN_EDIT} ${ANSWERED_504}`)
+    expect(sinceless(ok(await tool(srv, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [['Ship', 'Hold']] })))).toBe(`${STALLED_EDIT} ${ANSWERED_504}`)
     expect(shown(dir, m).inline_keyboard[0].map((b: any) => b.text)).toEqual(['Ship', 'Hold'])
     const p = press(m, 'Ship', shown(dir, m))
     deliver(dir, [p.update])
@@ -201,8 +206,8 @@ describe.skipIf(process.platform !== 'linux')('what a refused or unanswered edit
     const dir = state()
     const srv = await server(dir, { rules: [LATE] })
     const m = Number(/; buttons on message (\d+)$/.exec(ok(await tool(srv, 'reply', { chat_id: '1', text: 'Merge now?', buttons: [['Yes', 'No']] })))![1])
-    expect(ok(await tool(srv, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [['Ship', 'Hold']] }, 15_000))).toBe(
-      `${UNKNOWN_EDIT} (Telegram did not answer within 10 s)`)
+    expect(sinceless(ok(await tool(srv, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [['Ship', 'Hold']] }, 15_000)))).toBe(
+      `${STALLED_EDIT} (Telegram did not answer within 10 s)`)
     expect(ok(await tool(srv, 'edit_message', { chat_id: '1', message_id: String(m), buttons: repeat }))).toBe(`edited (id: ${m})`)
     const edits = () => calls(dir).filter(c => c.method === 'editMessageReplyMarkup' && c.payload.message_id === m)
     await until(() => edits().length === 2, 6000)

@@ -524,6 +524,10 @@ type Batch = {
   plain?: boolean
   gone?: boolean
   failures: number
+  // After a first send whose outcome is unknown: settles once Telegram answers
+  // a write begun after that send, and until then the message is not tried
+  // again, so a send Telegram took but never answered leaves no second copy.
+  waiting?: Promise<unknown>
   sending?: boolean
   // The send or edit on its way, settled once Telegram answers.
   inflight?: Promise<void>
@@ -1045,6 +1049,7 @@ export function createAgentStream(opts: {
       return
     }
     const chatId = batch.chatId
+    if (batch.waiting) return
     if (t < nextSlot(chatId)) return
     chatNext.set(chatId, t + CHAT_GAP_MS)
     batch.sending = true
@@ -1081,6 +1086,17 @@ export function createAgentStream(opts: {
       } else if (refusedRich(batch, form, batch.msgId === undefined ? 'send' : 'edit', err)) {
         // The refusal took this slot; the frame goes plain at the next.
       } else if (++batch.failures >= 5) batch.gone = true
+      // A first send whose outcome is unknown carries, from the server, a
+      // promise that settles once Telegram answers a write begun after it
+      // (stall.ts): the next try waits for it. Any other failure, an edit's
+      // included, is tried again at the chat's next slot.
+      else if (batch.msgId === undefined) {
+        const answered = (err as { answered?: unknown } | null | undefined)?.answered
+        if (answered instanceof Promise) {
+          batch.waiting = answered
+          void answered.then(() => { if (batch.waiting === answered) batch.waiting = undefined }, () => {})
+        }
+      }
     }
     const done = () => {
       batch.sending = false

@@ -1,14 +1,17 @@
-// Deadlines on the Telegram calls that hold polling. grammY's client waits up
-// to 500 seconds for any call, and its poll loop waits on each getUpdates, so
-// a poll Telegram never answers holds every inbound message that long. Here
-// each getUpdates gets its poll time plus POLL_MARGIN_MS, and the start-up
-// getMe and deleteWebhook get START_CALL_MS. At the deadline the call is
-// aborted, which closes its connection, and it fails at once with grammY's own
-// HttpError, whether or not the abort is heard. grammY then asks again: a poll
-// 3 seconds later from the same offset, on a fresh connection (see pollFetch);
-// a start-up call with its own growing wait. An answer that comes after the
-// deadline is never read, so nothing is lost or handled twice. Every other
-// call keeps grammY's limit.
+// Deadlines on the Telegram calls that hold polling, and on setMyCommands.
+// grammY's client waits up to 500 seconds for any call, and its poll loop
+// waits on each getUpdates, so a poll Telegram never answers holds every
+// inbound message that long. Here each getUpdates gets its poll time plus
+// POLL_MARGIN_MS, and the start-up getMe and deleteWebhook get START_CALL_MS.
+// At the deadline the call is aborted, which closes its connection, and it
+// fails at once with grammY's own HttpError, whether or not the abort is
+// heard. grammY then asks again: a poll 3 seconds later from the same offset,
+// on a fresh connection (see pollFetch); a start-up call with its own growing
+// wait. An answer that comes after the deadline is never read, so nothing is
+// lost or handled twice. setMyCommands gets START_CALL_MS too, and grammY does
+// not ask it again: at polling start it fails silently, and as the probe after
+// Telegram left the bot's sends unanswered (stall.ts) it goes again only on
+// its own minute. Every other call keeps grammY's limit.
 //
 // Every failed poll writes one line to the log, with its error and how long it
 // took, so a stall shows whether Telegram hung or refused. A conflict (409) or
@@ -31,7 +34,7 @@ export function deadlineOf(method: string, payload: unknown, limits: Limits = {}
     const timeout = Number((payload as { timeout?: unknown } | undefined)?.timeout)
     return (Number.isFinite(timeout) && timeout > 0 ? timeout * 1000 : 0) + (limits.pollMarginMs ?? POLL_MARGIN_MS)
   }
-  if (method === 'getMe' || method === 'deleteWebhook') return limits.startMs ?? START_CALL_MS
+  if (method === 'getMe' || method === 'deleteWebhook' || method === 'setMyCommands') return limits.startMs ?? START_CALL_MS
   return undefined
 }
 
