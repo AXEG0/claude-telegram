@@ -465,7 +465,8 @@ arrives, one held during an outage included. In a server that polls the bot,
 the [event after the outage](#after-telegram-leaves-sends-unanswered) names it
 under Cards: if no press has come, Claude sends its text again without buttons,
 marked as a possible repeat, and asks for the answer in words or on the earlier
-copy's buttons, so no second live keyboard is made; if its reader says the
+copy's buttons, or, if it went stale, sends a short note that it replaces any
+earlier copy, so no second live keyboard is made; if its reader says the
 earlier copy never came, Claude sends it again with buttons, as before.
 `buttons.json` is written as before, so an older release sharing it reads it
 as before.
