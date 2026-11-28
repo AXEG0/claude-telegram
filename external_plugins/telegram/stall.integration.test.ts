@@ -9,7 +9,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import fixture from './fixtures/channel-argv.json'
 import { calls, cleanup, deliver, driveClock, start, state, until, wait, type Call, type Server } from './fixtures/harness.ts'
-import { AGENT_TICK_MS, agentEventFile, appendAgentEvent } from './agents.ts'
+import { AGENT_TICK_MS, agentEventFile, appendAgentEvent, CHAT_GAP_MS } from './agents.ts'
 import { PROBE_MS, STALL_EVENT } from './stall.ts'
 
 beforeEach(driveClock)
@@ -284,6 +284,31 @@ describe.skipIf(process.platform !== 'linux')('after Telegram leaves the session
     expect(all[sent[1]!]!.refused).toBeUndefined()
     await wait(1000)
     expect(events(srv)).toEqual([])
+    await srv.close()
+  }, 30000)
+
+  test('the subagents message\'s first send not sent is tried again at each chat slot, five failures end it, as before, and no probe runs', async () => {
+    const dir = state()
+    const srv = await server(dir, { rules: [
+      { method: 'sendMessage', has: '🤖 Subagents', error: { error_code: 403, description: 'Forbidden: bot was blocked by the user' } },
+      { method: 'sendChatAction', error: BAD_GATEWAY },
+    ] })
+    deliver(dir, [{ message: { message_id: 600, date: now(), from: OWNER, chat: DM, text: 'hello' } }])
+    await until(() => srv.inbound().length === 1)
+    const base = join(dir, 'transcripts')
+    mkdirSync(base)
+    writeFileSync(join(base, 'agent-a1.meta.json'), JSON.stringify({ description: 'Long job' }))
+    appendAgentEvent(agentEventFile(dir, srv.child.pid!), { t: Date.now(), event: 'start', agent_id: 'a1', agent_type: 'general-purpose', agent_base: join(base, 'agent-a1') })
+    const panel = () => calls(dir).filter(c => c.method === 'sendMessage' && String(c.payload.text).startsWith('🤖 Subagents'))
+    await until(() => panel().length === 5, AGENT_TICK_MS + 5 * CHAT_GAP_MS + 4000)
+    const gaps = panel().slice(1).map((c, i) => c.at - panel()[i]!.at)
+    for (const gap of gaps) {
+      expect(gap).toBeGreaterThanOrEqual(CHAT_GAP_MS - 50)
+      expect(gap).toBeLessThan(CHAT_GAP_MS + AGENT_TICK_MS + 50)
+    }
+    await wait(PROBE_MS + 5000)
+    expect(panel()).toHaveLength(5)
+    expect(calls(dir).filter(c => c.method === 'setMyCommands')).toHaveLength(1)
     await srv.close()
   }, 30000)
 
