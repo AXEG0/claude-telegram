@@ -501,10 +501,12 @@ Further lines name sends to another bot (`To bots`, with the `@username` the
 reply went to: ask that bot whether it arrived, and send it again only if it
 says no), replies whose message with buttons may have landed (`Cards`, see
 [Button presses](#button-presses)) and edits (`Edits`, by chat and message, to
-repeat as they stand); a line shows only when it names something. Each entry
-gives the chat as the call passed it, when the call began and its opening
+repeat as they stand); a line shows only when it names something. Each reply's
+entry gives the chat as the call passed it, when the call began and its opening
 words, a `text_files` call's saved copy, whose words a repeat sends, and for a
-reply of several parts the part it stopped at and the parts never tried.
+reply of several parts the part it stopped at and the parts never tried; an
+edit's entry gives the chat as the call passed it, the message and when the
+call began.
 
 Only the plugin sets the `event` attribute, which no sender can set, so a
 message whose text reads like the event arrives as an ordinary message, without
@@ -1095,7 +1097,7 @@ Before a line is written anywhere, the bot token, `TELEGRAM_STT_OPENAI_KEY` and
 any text shaped like a bot token read `<masked>`, in the file and on stderr
 alike. The lines still carry chat and message IDs, usernames and Telegram's
 error texts, which can quote part of a message, and the outage lines below
-quote the opening words of each send they name, so the folder is owner-only
+quote the opening words of each reply they name, so the folder is owner-only
 (0700) and each file 0600.
 
 After Telegram leaves the session's sends unanswered, the server writes one

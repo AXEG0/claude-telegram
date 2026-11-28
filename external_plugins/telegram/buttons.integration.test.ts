@@ -1182,6 +1182,29 @@ describe.skipIf(process.platform !== 'linux')('answer buttons in the running ser
     await p.close()
   }, 35000)
 
+  // The mending call is the plugin's own button swap, not the session's edit,
+  // so its unknown outcome joins no record of sends Telegram left unanswered
+  // (stall.ts), and the result reads as on a server that does not poll.
+  test('on a server that polls the bot, that text edit reads the same, and the mending call held past 10 seconds opens no record of sends Telegram left unanswered', async () => {
+    const dir = state()
+    const srv = await channel(dir, { rules: [{ ...PLAIN, preMs: 1500 }, { ...SET, times: 1, holdMs: 3000 }, { method: 'editMessageReplyMarkup', holdMs: 11_000 }] })
+    // The record exists, holding another message.
+    await ask(srv)
+    const m = Number(/^sent \(id: (\d+)\)$/.exec(ok(await tool(srv, 'reply', { chat_id: '1', text: 'working' })))![1])
+    const text = tool(srv, 'edit_message', { chat_id: '1', message_id: String(m), text: 'PLAIN' }, 25_000)
+    await wait(200)
+    const setting = tool(srv, 'edit_message', { chat_id: '1', message_id: String(m), buttons: [['Yes', 'No']] })
+    ok(await setting)
+    expect(ok(await text)).toBe(`the text was edited, but the buttons another call gave message ${m} meanwhile could not be set again: Telegram did not answer within 10 s; the change may still land`)
+    expect(editLog(dir, m).map(([, method]) => method)).toEqual(['editMessageReplyMarkup', 'editMessageText', 'editMessageReplyMarkup'])
+    // A write Telegram answers after it closes nothing, since nothing opened.
+    ok(await tool(srv, 'reply', { chat_id: '1', text: 'answered' }))
+    await wait(1000)
+    expect(srv.inbound().filter(n => n.meta.event !== undefined)).toEqual([])
+    expect(srv.stderr()).not.toContain('stall opened:')
+    await srv.close()
+  }, 35000)
+
   test('when a press takes the keyboard and its swap gets a 429 before the late text edit arrives, the message ends with one disabled button showing the label, and the record no longer holds it', async () => {
     const { dir, p, s, m } = await plainPair([{ ...PLAIN, preMs: 3000 }], [{ method: 'editMessageReplyMarkup', has: 'disabled', times: 1, error: TOO_MANY }])
     const text = tool(s, 'edit_message', { chat_id: '1', message_id: String(m), text: 'PLAIN' })
