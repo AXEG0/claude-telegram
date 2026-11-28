@@ -526,7 +526,8 @@ type Batch = {
   failures: number
   // After a first send whose outcome is unknown: settles once Telegram answers
   // a write begun after that send, and until then the message is not tried
-  // again, so a send Telegram took but never answered leaves no second copy.
+  // again, so its tries no longer pile up one per chat slot while Telegram
+  // answers no write; a first send that did land stays beside the next copy.
   waiting?: Promise<unknown>
   sending?: boolean
   // The send or edit on its way, settled once Telegram answers.

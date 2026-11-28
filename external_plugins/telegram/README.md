@@ -729,9 +729,10 @@ A first send of the message that Telegram answers with a 5xx, or never
 answers, may still land, so in a server that polls the bot the message is not
 tried again until Telegram answers a write that began after it, which the
 [probe](#after-telegram-leaves-sends-unanswered) brings about while the session
-writes nothing, and an outage leaves no stray copies of it. Any other failure
-is tried again at the chat's next slot, and five failures in a row end the
-message, as before.
+writes nothing, so its tries no longer pile up one per chat slot inside an
+outage; a first send that did land stays in the chat beside the message's next
+copy. Any other failure is tried again at the chat's next slot, and five
+failures in a row end the message, as before.
 
 When the server shuts down, it makes one last edit of the live message: each
 row still running reads `🔌 No longer followed after …`, with how long it ran
