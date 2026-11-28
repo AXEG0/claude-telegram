@@ -183,10 +183,10 @@ can answer no prompt. The typing indicator still goes to the bot's chat.
 
 | Tool | Purpose |
 | --- | --- |
-| `reply` | Sends to a chat, and to [another bot](#other-bots) by its `@username`, as plain text. Takes a numeric `chat_id` and `text`, or in its place `text_files`, absolute paths of UTF-8 text files whose text, joined with a blank line between files, is the message, exactly one of the two, up to 256 KiB in all, each refusal naming the path and the reason, and the answer naming a saved copy of the words sent (see [Messages from files](#messages-from-files)), with `reply_to` (a message ID) for native threading and `files` (absolute paths) for attachments. Images (`.jpg`/`.jpeg`/`.png`/`.gif`/`.webp`) go as photos with an inline preview, other files as documents, up to 50MB each, after the text. To [another bot](#other-bots), the files go first, every one as a document, with the text as the first file's caption or after the files, whatever `textChunkLimit` and `chunkMode` say. `format` picks `text` or `markdownv2`, and with rich messages on also `rich`, which is then the default. Any other `format`, such as `markdown` or `null`, is refused with an error naming it and the formats, and nothing is sent. Long text goes out in several messages. `buttons` puts [answer buttons](#button-presses) under the last message sent, a text part or a file: 1 to 4 rows of 1 to 4 labels, each 1 to 40 characters and distinct across the keyboard, with single spaces between words and none of `"` `<` `>` `[` `]` `;`, control characters, or the invisible and combining characters Telegram would change. Buttons are refused in another bot's chat, in a server that does not poll the bot, and in one whose poll ended in a conflict (409) with no poll completed since. Returns the sent message IDs, and with buttons also the message that carries them. With files, the answer also says what each message holds: text, a file, or a file with a text caption, as Telegram's answer for each file says. A send Telegram refuses, with a 4xx or a 429 and the wait it asks for, or that never leaves, its connection refused or its host's name not found, says not sent. One Telegram answers with a 5xx, or never answers, says delivery unknown, in a result that is no error: Telegram may still deliver it, even minutes later, so Claude sends it again only if the recipient says it did not arrive, and the plugin never sends it again itself. A reply of several parts that stops names the parts sent with their IDs, the part it stopped at and the parts never tried; when the part whose outcome is unknown carries the buttons, they are kept, and a press on them counts once the message arrives. |
+| `reply` | Sends to a chat, and to [another bot](#other-bots) by its `@username`, as plain text. Takes a numeric `chat_id` and `text`, or in its place `text_files`, absolute paths of UTF-8 text files whose text, joined with a blank line between files, is the message, exactly one of the two, up to 256 KiB in all, each refusal naming the path and the reason, and the answer naming a saved copy of the words sent (see [Messages from files](#messages-from-files)), with `reply_to` (a message ID) for native threading and `files` (absolute paths) for attachments. Images (`.jpg`/`.jpeg`/`.png`/`.gif`/`.webp`) go as photos with an inline preview, other files as documents, up to 50MB each, after the text. To [another bot](#other-bots), the files go first, every one as a document, with the text as the first file's caption or after the files, whatever `textChunkLimit` and `chunkMode` say. `format` picks `text` or `markdownv2`, and with rich messages on also `rich`, which is then the default. Any other `format`, such as `markdown` or `null`, is refused with an error naming it and the formats, and nothing is sent. Long text goes out in several messages. `buttons` puts [answer buttons](#button-presses) under the last message sent, a text part or a file: 1 to 4 rows of 1 to 4 labels, each 1 to 40 characters and distinct across the keyboard, with single spaces between words and none of `"` `<` `>` `[` `]` `;`, control characters, or the invisible and combining characters Telegram would change. Buttons are refused in another bot's chat, in a server that does not poll the bot, and in one whose poll ended in a conflict (409) with no poll completed since. Returns the sent message IDs, and with buttons also the message that carries them. With files, the answer also says what each message holds: text, a file, or a file with a text caption, as Telegram's answer for each file says. A send Telegram refuses, with a 4xx or a 429 and the wait it asks for, or that never leaves, its connection refused or its host's name not found, says not sent. One Telegram answers with a 5xx, or never answers, says delivery unknown, in a result that is no error, since Telegram may still deliver it, even minutes later, and the plugin never sends it again itself. In a server that polls the bot, the result reads `delivery unknown: Telegram has left this bot's sends unanswered since <time>; do not send it again yet: once Telegram answers a write again, one event names this send and says what to do`, and once Telegram answers again, [that event](#after-telegram-leaves-sends-unanswered) names it, and Claude sends again what still matters, marked as a possible repeat. In a server that does not poll the bot, such as one under `claude -p`, the result says, as before, that Claude sends it again only if the recipient says it did not arrive. A reply of several parts that stops names the parts sent with their IDs, the part it stopped at and the parts never tried; when the part whose outcome is unknown carries the buttons, they are kept, and a press on them counts once the message arrives. |
 | `react` | Adds an emoji reaction to a message by ID, from Telegram's fixed set of reaction emoji (👍 👎 ❤ 🔥 👀 and others). |
 | `download_attachment` | Downloads an attachment by the `attachment_file_id` on its message to the inbox and returns the local path. Telegram serves bot downloads up to 20MB. |
-| `edit_message` | Edits a message the bot sent, for progress updates such as "working…" turning into the result. Takes `text` or `text_files`, which reads the new text from files as `reply` does, at most one of the two, each refusal naming the path and the reason, and the answer naming a saved copy of the words sent (see [Messages from files](#messages-from-files)), `buttons`, or both, and the same `format` as `reply`: any other is refused and nothing is edited, an edit of the buttons alone included. With `text`, the edit carries `buttons` in the same call, so a text edit without `buttons` leaves the message without buttons, a shown choice included. With `buttons` alone only the buttons change, under a file too, and an empty list removes them, which works from any server. Text on a file whose caption holds a reply's text, as the first file of a reply to another bot can, edits that caption, 1 to 1024 characters once trimmed as Telegram trims it; text on a file with no text is refused, and nothing is edited. The server knows what each message holds from the reply that sent it until the server restarts, or until a thousand newer messages have gone out through `reply`; a message it no longer knows is edited as before. An edit Telegram answers with "message is not modified" counts as done. An edit Telegram refuses says not edited, and one whose outcome is unknown says so and that repeating the same edit is safe, in a result that is no error: an edit that repeats the message's text, or sets no text, with the buttons the message already carries, unpressed, keeps their keyboard, so either copy carries the same buttons. An edit to other text gets a new keyboard, the same labels included, so a press made under the old text gets the closed notice. An edit stays one message, so longer text goes in a new reply, and an edit sends no notification, so a finished task gets a new reply too. |
+| `edit_message` | Edits a message the bot sent, for progress updates such as "working…" turning into the result. Takes `text` or `text_files`, which reads the new text from files as `reply` does, at most one of the two, each refusal naming the path and the reason, and the answer naming a saved copy of the words sent (see [Messages from files](#messages-from-files)), `buttons`, or both, and the same `format` as `reply`: any other is refused and nothing is edited, an edit of the buttons alone included. With `text`, the edit carries `buttons` in the same call, so a text edit without `buttons` leaves the message without buttons, a shown choice included. With `buttons` alone only the buttons change, under a file too, and an empty list removes them, which works from any server. Text on a file whose caption holds a reply's text, as the first file of a reply to another bot can, edits that caption, 1 to 1024 characters once trimmed as Telegram trims it; text on a file with no text is refused, and nothing is edited. The server knows what each message holds from the reply that sent it until the server restarts, or until a thousand newer messages have gone out through `reply`; a message it no longer knows is edited as before. An edit Telegram answers with "message is not modified" counts as done. An edit Telegram refuses says not edited, and one whose outcome is unknown says so in a result that is no error: in a server that polls the bot, `edit outcome unknown: Telegram has left this bot's sends unanswered since <time>; do not send it again yet: once Telegram answers a write again, one event names this send and says what to do`, and [that event](#after-telegram-leaves-sends-unanswered) then names it under Edits, to repeat as it stands; in a server that does not poll the bot, as before, that repeating the same edit is safe. Repeating it is safe either way: an edit that repeats the message's text, or sets no text, with the buttons the message already carries, unpressed, keeps their keyboard, so either copy carries the same buttons. An edit to other text gets a new keyboard, the same labels included, so a press made under the old text gets the closed notice. An edit stays one message, so longer text goes in a new reply, and an edit sends no notification, so a finished task gets a new reply too. |
 
 ### Messages from files
 
@@ -443,8 +443,8 @@ So a press made while a server polls reaches Claude, on a message sent before a
 restart or a plugin reload too. The record holds 1000 entries; a press on
 buttons older than that gets a notice that the question is closed. A Telegram
 call that sets, removes or swaps buttons gives up after 10 seconds, and a tool
-call that gave up says its outcome is unknown and that repeating the same edit
-is safe, in a result that is no error. Repeated as it was, the edit works
+call that gave up says its outcome is unknown, in a result that is no error,
+as `edit_message`'s row says. Repeated as it was, the edit works
 whichever copy lands; with other text or other buttons, a first copy that lands
 late shows buttons that answer a press with the closed notice. An edit that never lands leaves the old buttons
 on the message, and a press on them gets that notice until a later edit of the
@@ -458,6 +458,68 @@ delivers nothing and shows the first choice, or until the polling server next
 starts. Telegram's Bot API server keeps an unread press for 150 seconds, so a
 press made while no server polls for longer is lost and its buttons stay live.
 A press that arrives while the server shuts down gets a notice to press again.
+
+A reply whose message with buttons ended with its outcome unknown keeps its
+buttons in the record, as above, so a press on that message counts whenever it
+arrives, one held during an outage included. In a server that polls the bot,
+the [event after the outage](#after-telegram-leaves-sends-unanswered) names it
+under Cards: if no press has come, Claude sends its text again without buttons,
+marked as a possible repeat, and asks for the answer in words or on the earlier
+copy's buttons, or, if it went stale, sends a short note that it replaces any
+earlier copy, so no second live keyboard is made; if its reader says the
+earlier copy never came, Claude sends it again with buttons, as before.
+`buttons.json` is written as before, so an older release sharing it reads it
+as before.
+
+### After Telegram leaves sends unanswered
+
+Telegram can stop answering one bot for minutes to an hour while every other
+bot works, its sends answered with a 5xx or not at all, so a reply whose
+outcome is unknown may still have landed. The server that polls the bot keeps
+a record of the session's own `reply` and `edit_message` calls whose outcome is
+unknown, its subagents' included, opened by the first and joined by each one
+after it. It closes once Telegram answers a write that began after the last of
+them ended: a send, an edit, a typing call, a reaction, a press's answer or the
+probe below, answered, or refused with a 4xx. Polls and reads (`getUpdates`,
+`getMe`, `getFile`, `getChat`, `getChatMember`) never open, hold or close it,
+since polls have come back while sends still failed. A reply still waiting at
+the close holds nothing; if it then ends unknown, it opens a new record. The
+plugin's own messages, such as the subagents message and the notices, are
+never named.
+
+At the close, one event reaches Claude, its tag carrying `event`, `since` and
+`until`:
+
+```
+<channel source="plugin:telegram:telegram" event="telegram_stall" since="2026-11-16T15:23:27.000Z" until="2026-11-16T15:29:40.120Z">
+Telegram left these sends of this bot unanswered from 2026-11-16T15:23:27.000Z and answered a write begun after them at 2026-11-16T15:29:40.120Z. Telegram says it keeps a bot's updates up to 24 hours and gives no sign when a message it held will come, so messages sent to this bot in the 24 hours before this note may still arrive, each with its own send time; 2026-11-16T15:29:40.120Z is when Telegram answered this bot's writes again, not when messages to it stopped waiting.
+To people, delivery unknown: chat 1, began 2026-11-16T15:23:27.000Z, "The bot stopped receiving messages at 15:15". Send again what still matters, its first line saying it may repeat an earlier message; for what went stale, send a short note that it replaces any earlier copy.
+</channel>
+```
+
+Further lines name sends to another bot (`To bots`, with the `@username` the
+reply went to: ask that bot whether it arrived, and send it again only if it
+says no), replies whose message with buttons may have landed (`Cards`, see
+[Button presses](#button-presses)) and edits (`Edits`, by chat and message, to
+repeat as they stand); a line shows only when it names something. Each reply's
+entry gives the chat as the call passed it, when the call began and its opening
+words, a `text_files` call's saved copy, whose words a repeat sends, and for a
+reply of several parts the part it stopped at and the parts never tried; an
+edit's entry gives the chat as the call passed it, the message and when the
+call began.
+
+Only the plugin sets the `event` attribute, which no sender can set, so a
+message whose text reads like the event arrives as an ordinary message, without
+it. The event has no line in the [record of arrivals](#record-of-arrivals) and
+is not sent again after a restart, which loses an open record. While a record
+is open, or the subagents message's first send waits for Telegram to answer
+again (see [Subagents and shells](#subagents-and-shells)), the server calls
+`setMyCommands` with the commands it sets when polling starts, a write that
+shows no one anything, a minute after the record opened or that send began to
+wait, and a minute after each such probe settles, so a session that writes
+nothing still gets its event. A probe is no proof that sends land: a send that
+fails after it opens a new record. A server that does not poll the bot keeps no
+record, runs no probe and sends no event.
 
 ## What the chat shows
 
@@ -665,6 +727,15 @@ A subagent resumed after such an ending takes its earlier run's place, in the
 chat where it first appeared. A subagent's failure leaves the turn's
 [typing](#typing) on.
 
+A first send of the message that Telegram answers with a 5xx, or never
+answers, may still land, so in a server that polls the bot the message is not
+tried again until Telegram answers a write that began after it, which the
+[probe](#after-telegram-leaves-sends-unanswered) brings about while the session
+writes nothing, so its tries no longer pile up one per chat slot inside an
+outage; a first send that did land stays in the chat beside the message's next
+copy. Any other failure is tried again at the chat's next slot, and five
+failures in a row end the message, as before.
+
 When the server shuts down, it makes one last edit of the live message: each
 row still running reads `🔌 No longer followed after …`, with how long it ran
 until then and, for a subagent, its last step and tokens, and every finished
@@ -790,7 +861,8 @@ it writes a warning to its [log](#server-log) and polls as before. On hosts with
 ## Poll deadlines
 
 Each long poll (`getUpdates`) gets its 30-second poll time plus 15 seconds, and
-the start-up calls, `getMe` and `deleteWebhook`, 30 seconds. A poll Telegram
+the start-up calls, `getMe` and `deleteWebhook`, 30 seconds, as does
+`setMyCommands`. A poll Telegram
 has not answered by then is dropped and its connection closed, its answer never
 read, and the next poll goes 3 seconds later from the same offset, so no
 message is lost or handled twice. Each poll opens a connection of its own and
@@ -798,7 +870,10 @@ closes it once answered, so the poll after a dropped one never waits on an idle
 connection opened before the stall, which Telegram may have dropped meanwhile;
 every other call shares the pooled connections. A start-up call that fails
 is tried again at once, then after a wait that doubles from 0.1 seconds up to 20
-minutes. Each failed poll writes one line to the [server's log](#server-log), with its error
+minutes. grammY does not try `setMyCommands` again: when polling starts, one
+that fails fails silently, as before, and as the [probe after an
+outage](#after-telegram-leaves-sends-unanswered) it goes again only on its own
+minute. Each failed poll writes one line to the [server's log](#server-log), with its error
 and how long it took, such as `telegram channel: poll failed after 45.0 s: no
 answer within 45 s`, so a stall shows whether Telegram hung or refused; a
 conflict (409) has its own line. The server asks Telegram for its own list of
@@ -1021,8 +1096,20 @@ fields, so the message a failed send carried stays out.
 Before a line is written anywhere, the bot token, `TELEGRAM_STT_OPENAI_KEY` and
 any text shaped like a bot token read `<masked>`, in the file and on stderr
 alike. The lines still carry chat and message IDs, usernames and Telegram's
-error texts, which can quote part of a message, so the folder is owner-only
+error texts, which can quote part of a message, and the outage lines below
+quote the opening words of each reply they name, so the folder is owner-only
 (0700) and each file 0600.
+
+After Telegram leaves the session's sends unanswered, the server writes one
+line when its [record](#after-telegram-leaves-sends-unanswered) opens,
+`telegram channel: stall opened: ` and a JSON object with `since` and the send
+that opened it, and one once the event's notification resolves, which says
+only that the pipe to Claude Code took it, `telegram channel: stall closed: `
+and a JSON object with `since`, `until`, the write whose answer closed it
+(`closed_by`), whether that was the probe, and each send the event names, with
+when its call began and ended and its line in the event. A notification that
+fails writes `telegram channel: stall event not handed to Claude` with its
+error and the same object instead.
 
 A file past 1 MiB moves to `server-<pid>.jsonl.1`, replacing the one there, so
 a server keeps about 2 MiB. The turn-end hook deletes log files untouched for a

@@ -29,6 +29,23 @@ const NEVER_LEFT = new Set(['ConnectionRefused', 'ECONNREFUSED', 'ENOTFOUND', 'E
 export const UNKNOWN_SEND = 'delivery unknown: Telegram may still deliver it, even minutes later; do not resend unless the recipient says it did not arrive'
 export const UNKNOWN_EDIT = 'edit outcome unknown; repeating the same edit is safe'
 
+// The verdict of a send or edit whose outcome is unknown on a server that
+// polls the bot, while Telegram has left the bot's sends unanswered since
+// since: one event names the send once Telegram answers a write again, and
+// says what to do. See stall.ts.
+export const stallVerdict = (since: string, edit = false) =>
+  `${edit ? 'edit outcome unknown' : 'delivery unknown'}: Telegram has left this bot's sends unanswered since ${since}; do not send it again yet: once Telegram answers a write again, one event names this send and says what to do`
+
+// A result that names its outcome unknown, today's verdict in it replaced by
+// stallVerdict's; undefined for a result that names none.
+export function inStall(message: string, since: string): string | undefined {
+  for (const [verdict, edit] of [[UNKNOWN_SEND, false], [UNKNOWN_EDIT, true]] as const) {
+    const at = message.indexOf(verdict)
+    if (at !== -1) return message.slice(0, at) + stallVerdict(since, edit) + message.slice(at + verdict.length)
+  }
+  return undefined
+}
+
 export function outcomeOf(err: unknown): Outcome | undefined {
   if (err instanceof GrammyError) {
     const cause = `Telegram answered ${err.error_code}: ${err.description}`
@@ -57,10 +74,14 @@ export function outcomeText(o: Outcome, edit = false): string {
   return o.wait !== undefined ? `${not}; Telegram asks to wait ${o.wait} s` : not
 }
 
+// Where a reply of several parts stopped: the part, of how many, the parts
+// never tried, and whether that part carried the reply's buttons, now kept.
+export type Stop = { part: number; total: number; never: string; kept: boolean }
+
 // A send of a reply that failed with a known outcome: thrown by the reply
 // tool, so its result says no "failed" when the outcome is unknown.
 export class SendOutcome extends Error {
-  constructor(message: string, readonly outcome: Outcome) {
+  constructor(message: string, readonly outcome: Outcome, readonly stop?: Stop) {
     super(message)
   }
 }
@@ -81,8 +102,9 @@ export function stopped(p: {
   const { outcome, part, total, sent } = p
   const head = total > 1 ? `part ${part} of ${total}${p.what ? ` (${p.what})` : ''}: ` : ''
   const so = sent.length ? `${sent.length} message(s) (ids: ${sent.join(', ')})` : 'none'
-  const never = part >= total ? 'none' : part + 1 === total ? `part ${total}` : `parts ${part + 1} to ${total}`
+  const left = part >= total ? 'none' : part + 1 === total ? `${total}` : `${part + 1} to ${total}`
+  const never = left === 'none' ? left : `${part + 1 === total ? 'part' : 'parts'} ${left}`
   const tail = total > 1 ? `; sent so far: ${so}; never tried: ${never}` : ''
   const buttons = p.kept ? '; its buttons are kept, so a press on them counts if it arrives' : ''
-  return new SendOutcome(`${head}${outcomeText(outcome)} (${outcome.cause})${tail}${buttons}`, outcome)
+  return new SendOutcome(`${head}${outcomeText(outcome)} (${outcome.cause})${tail}${buttons}`, outcome, { part, total, never: left, kept: p.kept === true })
 }

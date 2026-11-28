@@ -1,5 +1,5 @@
-// The deadlines on the calls that hold polling (deadline.ts), against grammY
-// itself: its poll loop, its start-up retries and its client over a real
+// The deadlines on the calls that hold polling and on setMyCommands
+// (deadline.ts), against grammY itself: its poll loop, its start-up retries and its client over a real
 // socket. Limits here are a fraction of a second, so the tests run in real
 // time; the server's own 45 s, on the driven clock, is in
 // deadline.integration.test.ts.
@@ -16,7 +16,7 @@ afterEach(async () => {
 })
 
 describe('the deadline of each call', () => {
-  test('a poll gets its poll time plus 15 s, one without a poll time the margin alone, getMe and deleteWebhook 30 s, and every other call none', () => {
+  test('a poll gets its poll time plus 15 s, one without a poll time the margin alone, getMe, deleteWebhook and setMyCommands 30 s, and every other call none', () => {
     expect(POLL_MARGIN_MS).toBe(15_000)
     expect(START_CALL_MS).toBe(30_000)
     expect(deadlineOf('getUpdates', { offset: 5, timeout: 30 })).toBe(45_000)
@@ -24,7 +24,9 @@ describe('the deadline of each call', () => {
     expect(deadlineOf('getUpdates', undefined)).toBe(15_000)
     expect(deadlineOf('getMe', {})).toBe(30_000)
     expect(deadlineOf('deleteWebhook', {})).toBe(30_000)
-    for (const method of ['sendMessage', 'sendDocument', 'sendMediaGroup', 'answerCallbackQuery', 'editMessageText', 'getFile', 'setMyCommands']) {
+    expect(deadlineOf('setMyCommands', { commands: [] })).toBe(30_000)
+    expect(deadlineOf('setMyCommands', {}, { startMs: 200 })).toBe(200)
+    for (const method of ['sendMessage', 'sendDocument', 'sendMediaGroup', 'sendChatAction', 'answerCallbackQuery', 'editMessageText', 'getFile', 'getChat']) {
       expect(deadlineOf(method, {})).toBeUndefined()
     }
   })

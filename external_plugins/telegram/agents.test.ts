@@ -2754,6 +2754,67 @@ describe('createAgentStream', () => {
       expect(rows(q.edits.at(-1)!.text)).toEqual(Array.from({ length: 90 }, (_, i) => `${i + 1}. ⚠️ No activity for 31m 0s · 85.4k tokens`))
     })
 
+    // The server adds to a failed first send the outcome it judged and, for an
+    // unknown one, a promise that settles once Telegram answers a write begun
+    // after it (server.ts, stall.ts).
+    const unknownSend = () => {
+      let answer!: () => void
+      const answered = new Promise<void>(r => { answer = r })
+      return { err: Object.assign(new Error('Bad Gateway'), { error_code: 502, description: 'Bad Gateway', outcome: { sent: 'unknown' }, answered }), answer }
+    }
+    test('a first send whose outcome is unknown is not tried again until Telegram answers a write begun after it, then goes at the next slot, and edits are tried as before', async () => {
+      const h = harness('1001')
+      await h.tick()
+      const { err, answer } = unknownSend()
+      h.failSendWith(err)
+      begin(h, 2)
+      await h.tick()
+      expect(h.sendAttempts).toHaveLength(1)
+      h.failSendWith(undefined)
+      for (let i = 0; i < 10; i++) { h.advance(CHAT_GAP_MS); await h.tick() }
+      expect(h.sendAttempts).toHaveLength(1)
+      // The promise settles on a turn of its own; the next tick sends.
+      answer()
+      await Promise.resolve()
+      await h.tick()
+      expect(h.sendAttempts).toHaveLength(2)
+      expect(h.sent).toHaveLength(1)
+      // An edit that fails with a 502 is tried again at the chat's next slot.
+      h.advance(CHAT_GAP_MS)
+      h.failEditWith(unknownSend().err)
+      h.write('/s/agent-w0.jsonl', assistant([{ type: 'tool_use', name: 'Bash', input: { description: 'Checking gate' } }], { input_tokens: 90_000 }))
+      await h.tick()
+      h.failEditWith(undefined)
+      h.advance(CHAT_GAP_MS); await h.tick()
+      expect(h.attempts.map(a => a.error === undefined)).toEqual([false, true])
+      expect(h.attempts.map(a => a.text.includes('Checking gate'))).toEqual([true, true])
+    })
+
+    test('a first send not sent is tried again at the chat\'s next slot, and five failures end the message, whether or not a wait came between, as before', async () => {
+      const notSent = harness('1001')
+      await notSent.tick()
+      notSent.failSendWith(Object.assign(new Error('Forbidden'), { error_code: 403, description: 'Forbidden: bot was blocked by the user', outcome: { sent: 'no' } }))
+      begin(notSent, 1)
+      await notSent.tick()
+      for (let i = 0; i < 8; i++) { notSent.advance(CHAT_GAP_MS); await notSent.tick() }
+      expect(notSent.sendAttempts).toHaveLength(5)
+      expect(notSent.sendAttempts.map((a, i) => a.at - notSent.sendAttempts[0]!.at - i * CHAT_GAP_MS)).toEqual([0, 0, 0, 0, 0])
+      const unknown = harness('1001')
+      await unknown.tick()
+      begin(unknown, 1)
+      for (let i = 0; i < 5; i++) {
+        const { err, answer } = unknownSend()
+        unknown.failSendWith(err)
+        unknown.advance(CHAT_GAP_MS); await unknown.tick()
+        answer()
+        await Promise.resolve()
+      }
+      unknown.failSendWith(undefined)
+      for (let i = 0; i < 4; i++) { unknown.advance(CHAT_GAP_MS); await unknown.tick() }
+      expect(unknown.sendAttempts.map(a => a.error === undefined)).toEqual([false, false, false, false, false])
+      expect(unknown.sent).toEqual([])
+    })
+
     test('agents.ts imports only Node built-ins, so the hook loads it before bun install', () => {
       const source = readFileSync(join(import.meta.dir, 'agents.ts'), 'utf8')
       const imported = [...source.matchAll(/^import\b[^'"]*['"]([^'"]+)['"]/gm)].map(m => m[1]!)
